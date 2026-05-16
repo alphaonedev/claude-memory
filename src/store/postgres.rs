@@ -145,6 +145,18 @@ const MIGRATION_V38_FORM5_CONFIDENCE: &str =
 const MIGRATION_V39_SIGNED_EVENTS_DLQ: &str =
     include_str!("../../migrations/postgres/0021_v07_signed_events_dlq.sql");
 
+/// v0.7.0 Cluster G — shadow-mode retention + denormalised `source`
+/// column + compound `(namespace, source, observed_at)` index
+/// supporting the calibration scan (issue #767, PERF-4 + PERF-12).
+/// Mirrors SQLite schema v41. Adds a denormalised `source` column on
+/// `confidence_shadow_observations` (backfilled from the joined
+/// `memories.source` row) plus the compound index so the calibration
+/// sweep streams a single-table SQL aggregation instead of materialising
+/// the full window into Rust memory. Pure additive ADD COLUMN IF NOT
+/// EXISTS + UPDATE backfill + CREATE INDEX IF NOT EXISTS — idempotent.
+const MIGRATION_V40_SHADOW_RETENTION: &str =
+    include_str!("../../migrations/postgres/0022_v07_shadow_retention.sql");
+
 /// Current schema version. Matches SQLite CURRENT_SCHEMA_VERSION (src/db.rs:233).
 /// Incremented on each migration step.
 ///
@@ -249,7 +261,17 @@ const MIGRATION_V39_SIGNED_EVENTS_DLQ: &str =
 //       `signed_events_dlq` table backing the deferred-audit drainer's
 //       dead-letter-queue path. Pure additive CREATE TABLE IF NOT
 //       EXISTS + indexes — fully idempotent. Mirrors SQLite v40.
-const CURRENT_SCHEMA_VERSION: i32 = 39;
+// v40 = v0.7.0 Cluster G — shadow-mode retention + denormalised
+//       `source` column + compound `(namespace, source, observed_at)`
+//       index supporting the calibration scan (issue #767, PERF-4 +
+//       PERF-12). Mirrors SQLite schema v41. Postgres supports
+//       `ADD COLUMN IF NOT EXISTS` so the ALTER + backfill UPDATE +
+//       index live in one idempotent SQL batch
+//       (`migrations/postgres/0022_v07_shadow_retention.sql`).
+//       (Renumbered from v39 to v40 during rebase onto trunk: Cluster C
+//       SEC-3 closeout #770 landed first and claimed v39 for the
+//       `signed_events_dlq` table.)
+const CURRENT_SCHEMA_VERSION: i32 = 40;
 
 /// Default embedding column dimension used when the caller doesn't pass
 /// `--embedding-dim` to `ai-memory schema-init`. Matches the v0.7.0
@@ -701,6 +723,9 @@ impl PostgresStore {
         }
         if current_version < 39 {
             self.migrate_v39().await?;
+        }
+        if current_version < 40 {
+            self.migrate_v40().await?;
         }
 
         Ok(())
@@ -1179,6 +1204,41 @@ impl PostgresStore {
         tracing::info!(
             target = "store::postgres",
             "schema migration v39 applied (signed_events_dlq dead-letter queue)"
+        );
+        Ok(())
+    }
+
+    /// v40 — Cluster G shadow-mode retention + denormalised `source`
+    /// column + compound `(namespace, source, observed_at)` index
+    /// supporting the calibration scan (issue #767, PERF-4 + PERF-12).
+    ///
+    /// Adds a `source TEXT NOT NULL DEFAULT 'unknown'` column on
+    /// `confidence_shadow_observations`, backfills from the joined
+    /// `memories.source` row, and creates the compound index. The SQL
+    /// batch is fully idempotent (ADD COLUMN IF NOT EXISTS + UPDATE
+    /// guarded by `WHERE source = 'unknown'` + CREATE INDEX IF NOT
+    /// EXISTS) so a partial-failure replay is safe.
+    async fn migrate_v40(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v40 tx", e))?;
+
+        sqlx::raw_sql(MIGRATION_V40_SHADOW_RETENTION)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("apply v40 shadow retention", e))?;
+
+        record_schema_version(&mut tx, 40).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v40 migration", e))?;
+
+        tracing::info!(
+            target = "store::postgres",
+            "schema migration v40 applied (cluster-G shadow retention + denormalised source + compound index)"
         );
         Ok(())
     }
@@ -9326,7 +9386,7 @@ mod tests {
         // future bump on either side without the corresponding port
         // re-trips this assertion before the migration runner gets a
         // chance to write a partial schema to disk.
-        assert_eq!(CURRENT_SCHEMA_VERSION, 39);
+        assert_eq!(CURRENT_SCHEMA_VERSION, 40);
     }
 
     #[tokio::test]

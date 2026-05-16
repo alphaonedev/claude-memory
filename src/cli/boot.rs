@@ -102,11 +102,17 @@ pub const MIN_SUPPORTED_SCHEMA: u32 = 16;
 /// (issue #758) which adds `memories.confidence_source TEXT NOT NULL
 /// DEFAULT 'caller_provided'`, `memories.confidence_signals TEXT NULL`,
 /// `memories.confidence_decayed_at TEXT NULL` plus the
-/// `confidence_shadow_observations` table backing per-recall telemetry.
-/// When a DB's `schema_version` exceeds this, the binary is too old
-/// for a newer DB and we surface a warning. v0.6.3.1 (PR-9h / issue
-/// #487 PR #497 req #72).
-pub const MAX_SUPPORTED_SCHEMA: u32 = 40;
+/// `confidence_shadow_observations` table backing per-recall telemetry,
+/// v40 from Cluster C's (#770) SEC-3 closeout adding the
+/// `signed_events_dlq` table backing the deferred-audit drainer, and
+/// v41 from Cluster G's (#767) shadow-mode retention closeout which
+/// adds the denormalised `confidence_shadow_observations.source` column
+/// plus the compound `(namespace, source, observed_at)` index supporting
+/// the streaming calibration scan (PERF-4 + PERF-12). When a DB's
+/// `schema_version` exceeds this, the binary is too old for a newer DB
+/// and we surface a warning. v0.6.3.1 (PR-9h / issue #487 PR #497 req
+/// #72).
+pub const MAX_SUPPORTED_SCHEMA: u32 = 41;
 
 /// Pure boundary check: `true` when `v` lies within
 /// `[MIN_SUPPORTED_SCHEMA, MAX_SUPPORTED_SCHEMA]`. Extracted so the

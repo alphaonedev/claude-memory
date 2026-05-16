@@ -14,13 +14,50 @@
 //! calibration store is an opt-in follow-up that operators run only
 //! after reviewing the output (so a poorly-sampled window can't
 //! silently re-pin a namespace's confidence ceiling).
+//!
+//! # Streaming aggregation (Cluster G, PERF-12)
+//!
+//! Pre-Cluster-G, this module materialised the entire window into a
+//! `Vec<(ShadowObservation, String)>` (via INNER JOIN against
+//! `memories` to pull the source role), then grouped + sorted in Rust.
+//! A long-running shadow-mode deployment with millions of observations
+//! exhausted memory on the calibration call.
+//!
+//! Post-Cluster-G, the sweep streams in two passes:
+//!
+//! 1. **Group counts + mean** (single SQL aggregation):
+//!    ```sql
+//!    SELECT namespace, source, COUNT(*), AVG(derived_confidence)
+//!    FROM confidence_shadow_observations
+//!    WHERE observed_at >= ?1
+//!    GROUP BY namespace, source
+//!    ```
+//!
+//! 2. **Per-group median + bucket histogram** (cursor-based scan):
+//!    ```sql
+//!    SELECT derived_confidence FROM confidence_shadow_observations
+//!    WHERE observed_at >= ?1 AND namespace = ?2 AND source = ?3
+//!    ORDER BY derived_confidence ASC
+//!    ```
+//!    The compound `(namespace, source, observed_at)` index added in
+//!    schema v40 keeps the WHERE-predicate scan tight; the ORDER BY
+//!    DESCfile by sort merge stays in scratch space (no full-table
+//!    Vec materialisation). Median is picked at row index
+//!    `count / 2` (lower median for even counts, identical to the
+//!    pre-Cluster-G `(a+b)/2` semantics within the test tolerance);
+//!    buckets fold into 10 stack-allocated counters via a single pass.
+//!
+//! The denormalised `source` column (also schema v40) eliminates the
+//! join with `memories` entirely — orphan observation rows whose
+//! source memory has been CASCADE-deleted continue to surface in the
+//! report under their stamped `source` value, which is the audit-
+//! honest behaviour (the calibration sample was real; the source
+//! memory's later deletion doesn't unmake the observation).
 
 use anyhow::Result;
 use chrono::{Duration, Utc};
 use rusqlite::{Connection, params};
 use serde::Serialize;
-
-use super::shadow::ShadowObservation;
 
 /// Default sweep window. The Form 5 brief calls for 30 days; tunable
 /// per call via the CLI `--days N` flag and the MCP `days` parameter.
@@ -29,9 +66,10 @@ pub const DEFAULT_WINDOW_DAYS: i64 = 30;
 /// One per-(namespace, source) row in the calibration report.
 ///
 /// `source` is the `memories.source` role label (`user`, `claude`,
-/// `api`, …) joined back to each shadow observation via `memory_id`.
-/// `count` is the number of observations that contributed; `median`
-/// and the bucket distribution let an operator spot a skewed sample.
+/// `api`, …) denormalised onto each shadow observation via the
+/// v40-schema column. `count` is the number of observations that
+/// contributed; `median` and the bucket distribution let an operator
+/// spot a skewed sample.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PerSourceBaseline {
     pub namespace: String,
@@ -66,6 +104,7 @@ pub struct CalibrationReport {
 /// # Errors
 ///
 /// Returns the underlying `rusqlite` error if the SELECT fails.
+#[allow(clippy::cast_precision_loss)]
 pub fn calibrate_from_shadow(
     conn: &Connection,
     days: i64,
@@ -74,85 +113,77 @@ pub fn calibrate_from_shadow(
     let since_dt = now - Duration::days(days);
     let since = since_dt.to_rfc3339();
 
-    // Join shadow observations against memories to pull the `source`
-    // role label. Rows whose source memory has been deleted (cascade
-    // FK fires) drop out of the report. Sample stays representative.
+    // Pass 1: per-group count + mean, computed entirely in SQL. The
+    // denormalised `source` column (schema v40) lets us avoid the
+    // INNER JOIN against `memories` that pre-Cluster-G code carried.
     let mut stmt = conn.prepare(
-        "SELECT o.id, o.memory_id, o.namespace, o.caller_confidence, o.derived_confidence,
-                o.signals, o.recall_outcome, o.observed_at, m.source
-         FROM confidence_shadow_observations o
-         INNER JOIN memories m ON m.id = o.memory_id
-         WHERE o.observed_at >= ?1
-         ORDER BY o.namespace, m.source, o.observed_at ASC",
+        "SELECT namespace, source, COUNT(*), AVG(derived_confidence)
+         FROM confidence_shadow_observations
+         WHERE observed_at >= ?1
+         GROUP BY namespace, source
+         ORDER BY namespace, source",
     )?;
-    type Row = (ShadowObservation, String);
-    let rows = stmt.query_map(params![since], |row| {
-        Ok((
-            ShadowObservation {
-                id: row.get(0)?,
-                memory_id: row.get(1)?,
-                namespace: row.get(2)?,
-                caller_confidence: row.get(3)?,
-                derived_confidence: row.get(4)?,
-                signals_json: row.get(5)?,
-                recall_outcome: row.get(6)?,
-                observed_at: row.get(7)?,
-            },
-            row.get::<_, String>(8)?,
-        ))
-    })?;
-    let mut all: Vec<Row> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-    let total_observations = all.len() as u64;
+    let groups: Vec<(String, String, i64, f64)> = stmt
+        .query_map(params![since.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, f64>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
 
-    // Group by (namespace, source). `all` is already sorted by the
-    // SQL ORDER BY clause so we can stream-collect.
-    let mut baselines: Vec<PerSourceBaseline> = Vec::new();
-    let mut group: Vec<f64> = Vec::new();
-    let mut current_ns: Option<String> = None;
-    let mut current_src: Option<String> = None;
+    let total_observations: u64 = groups.iter().map(|(_, _, c, _)| *c as u64).sum();
 
-    fn finalise(ns: &str, src: &str, values: &mut Vec<f64>, out: &mut Vec<PerSourceBaseline>) {
-        if values.is_empty() {
-            return;
+    // Pass 2: per-group cursor scan for median + bucket histogram.
+    // The compound (namespace, source, observed_at) index from
+    // schema v40 makes the WHERE filter cheap; the per-group result
+    // set is bounded by the group size (typically thousands, not
+    // millions) so the streaming Vec<f64> stays small.
+    let mut median_stmt = conn.prepare(
+        "SELECT derived_confidence
+         FROM confidence_shadow_observations
+         WHERE observed_at >= ?1 AND namespace = ?2 AND source = ?3
+         ORDER BY derived_confidence ASC",
+    )?;
+
+    let mut baselines: Vec<PerSourceBaseline> = Vec::with_capacity(groups.len());
+    for (namespace, source, count_i64, mean) in groups {
+        if count_i64 <= 0 {
+            continue;
         }
-        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = if values.len() % 2 == 0 {
-            (values[values.len() / 2 - 1] + values[values.len() / 2]) / 2.0
+        let count = count_i64 as u64;
+        let mut values: Vec<f64> = Vec::with_capacity(count as usize);
+        let mut rows =
+            median_stmt.query(params![since.as_str(), namespace.as_str(), source.as_str()])?;
+        let mut buckets = [0_u64; 10];
+        while let Some(row) = rows.next()? {
+            let v: f64 = row.get(0)?;
+            let idx = ((v.clamp(0.0, 1.0) * 10.0) as usize).min(9);
+            buckets[idx] += 1;
+            values.push(v);
+        }
+        // Values arrived ORDER BY ASC — pick the median by index.
+        let median = if values.is_empty() {
+            0.0
+        } else if values.len() % 2 == 0 {
+            let mid = values.len() / 2;
+            (values[mid - 1] + values[mid]) / 2.0
         } else {
             values[values.len() / 2]
         };
-        let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let mut buckets = [0_u64; 10];
-        for &v in values.iter() {
-            let idx = ((v.clamp(0.0, 1.0) * 10.0) as usize).min(9);
-            buckets[idx] += 1;
-        }
-        out.push(PerSourceBaseline {
-            namespace: ns.to_string(),
-            source: src.to_string(),
-            count: values.len() as u64,
+        baselines.push(PerSourceBaseline {
+            namespace,
+            source,
+            count,
             median,
             mean,
             buckets,
         });
-        values.clear();
     }
-
-    all.drain(..).for_each(|(obs, src)| {
-        let same_ns = current_ns.as_deref() == Some(obs.namespace.as_str());
-        let same_src = current_src.as_deref() == Some(src.as_str());
-        if !(same_ns && same_src) {
-            if let (Some(ns), Some(s)) = (&current_ns, &current_src) {
-                finalise(ns, s, &mut group, &mut baselines);
-            }
-            current_ns = Some(obs.namespace.clone());
-            current_src = Some(src.clone());
-        }
-        group.push(obs.derived_confidence);
-    });
-    if let (Some(ns), Some(s)) = (&current_ns, &current_src) {
-        finalise(ns, s, &mut group, &mut baselines);
-    }
+    drop(median_stmt);
 
     Ok(CalibrationReport {
         window_days: days,
@@ -195,9 +226,9 @@ mod tests {
         seed_mem(&conn, "m1", "ns", "user");
         seed_mem(&conn, "m2", "ns", "user");
         seed_mem(&conn, "m3", "ns", "claude");
-        observe(&conn, "m1", "ns", 0.9, 0.5, &signals(), None).unwrap();
-        observe(&conn, "m2", "ns", 0.9, 0.7, &signals(), None).unwrap();
-        observe(&conn, "m3", "ns", 0.9, 0.3, &signals(), None).unwrap();
+        observe(&conn, "m1", "ns", "user", 0.9, 0.5, &signals(), None).unwrap();
+        observe(&conn, "m2", "ns", "user", 0.9, 0.7, &signals(), None).unwrap();
+        observe(&conn, "m3", "ns", "claude", 0.9, 0.3, &signals(), None).unwrap();
 
         let report = calibrate_from_shadow(&conn, 30, Utc::now()).expect("calibrate");
         assert_eq!(report.total_observations, 3);
@@ -226,7 +257,7 @@ mod tests {
         let (conn, _dir) = open_tmp();
         seed_mem(&conn, "m1", "ns", "user");
         for v in &[0.05, 0.25, 0.45, 0.55, 0.95] {
-            observe(&conn, "m1", "ns", 0.9, *v, &signals(), None).unwrap();
+            observe(&conn, "m1", "ns", "user", 0.9, *v, &signals(), None).unwrap();
         }
         let report = calibrate_from_shadow(&conn, 30, Utc::now()).expect("calibrate");
         let b = &report.baselines[0];
@@ -246,13 +277,13 @@ mod tests {
         // Insert one row with a very old observed_at by direct INSERT.
         conn.execute(
             "INSERT INTO confidence_shadow_observations
-                (memory_id, namespace, caller_confidence, derived_confidence,
+                (memory_id, namespace, source, caller_confidence, derived_confidence,
                  signals, recall_outcome, observed_at)
-             VALUES ('m1', 'ns', 0.9, 0.5, '{}', NULL, '2020-01-01T00:00:00Z')",
+             VALUES ('m1', 'ns', 'user', 0.9, 0.5, '{}', NULL, '2020-01-01T00:00:00Z')",
             [],
         )
         .unwrap();
-        observe(&conn, "m1", "ns", 0.9, 0.7, &signals(), None).unwrap();
+        observe(&conn, "m1", "ns", "user", 0.9, 0.7, &signals(), None).unwrap();
         let report = calibrate_from_shadow(&conn, 1, Utc::now()).expect("calibrate");
         // Old row outside the 1-day window drops out.
         assert_eq!(report.total_observations, 1);

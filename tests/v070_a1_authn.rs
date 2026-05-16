@@ -23,6 +23,7 @@
 // pedantic: test scaffolding only.
 #![allow(clippy::redundant_closure_for_method_calls)]
 #![allow(clippy::too_many_lines)]
+#![allow(clippy::doc_markdown)]
 
 use ai_memory::config::set_active_hooks_hmac_secret;
 use axum::body::Body;

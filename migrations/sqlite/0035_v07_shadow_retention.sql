@@ -1,0 +1,52 @@
+-- Copyright 2026 AlphaOne LLC
+-- SPDX-License-Identifier: Apache-2.0
+--
+-- v0.7.0 Cluster G — shadow-mode retention + denormalised source column
+-- + compound index supporting the calibration scan (schema v41, sqlite).
+-- Closes PERF-4 (unbounded `confidence_shadow_observations` growth) and
+-- PERF-12 (calibration sweep materialising the full window in memory)
+-- from the v0.7.0 6-reviewer audit (issue #767).
+--
+-- # Why
+--
+-- The v0.7.0 Form 5 closeout (schema v39 / migration 0033) shipped the
+-- `confidence_shadow_observations` table backing per-recall telemetry
+-- but did NOT ship retention. Operators flipping
+-- `AI_MEMORY_CONFIDENCE_SHADOW=1` in production would see the table grow
+-- without bound. The Cluster G fix wires the periodic GC sweep into the
+-- existing daemon background loop (`spawn_gc_loop` in
+-- `daemon_runtime.rs`) and adds a configurable retention window
+-- (`[confidence] shadow_retention_days = 30`, default 30) honored by
+-- the sweep DELETE.
+--
+-- # Denormalised `source` column
+--
+-- The calibration sweep groups by `(namespace, source)` where `source`
+-- lives on `memories.source`. Pre-Cluster-G, the sweep joined back to
+-- `memories` for every observation row, materialised the whole window
+-- in a `Vec`, and grouped in Rust. PERF-12 surfaced the memory
+-- footprint and the join cost. The Cluster G fix denormalises
+-- `source` onto the observation row at write time (single FK lookup,
+-- O(1)) and adds the compound `(namespace, source, observed_at)` index
+-- so the calibration sweep can stream a per-group aggregate in SQL:
+--
+--   SELECT namespace, source, COUNT(*), AVG(derived_confidence), ...
+--   FROM confidence_shadow_observations
+--   WHERE observed_at >= ?1
+--   GROUP BY namespace, source
+--
+-- Legacy rows (written under schema v39) backfill `source` from the
+-- joined `memories` row in the Rust migration step; rows whose source
+-- memory has been deleted (the v39 CASCADE FK would have removed them
+-- already, but defense in depth) land with `source = 'unknown'`.
+--
+-- # Idempotency
+--
+-- The Rust migrate ladder probes `PRAGMA table_info(confidence_shadow_observations)`
+-- for the `source` column before emitting the ALTER (SQLite has no
+-- `ADD COLUMN IF NOT EXISTS`). This SQL file holds the compound index
+-- only; the backfill UPDATE runs from Rust so the column-existence
+-- probe gates it.
+
+CREATE INDEX IF NOT EXISTS idx_shadow_obs_namespace_source_observed
+    ON confidence_shadow_observations(namespace, source, observed_at);
