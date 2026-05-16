@@ -75,7 +75,7 @@ fn main() -> Result<()> {
     let result = off
         .offload(&content, "cookbook/offload", None, "ai:cookbook")
         .context("offload step")?;
-    let deref = off.deref(&result.ref_id).context("deref step")?;
+    let deref = off.deref(&result.ref_id, None).context("deref step")?;
     std::fs::write(&args.output, deref.content.as_bytes())
         .with_context(|| format!("write output {}", args.output.display()))?;
     let round_trip_ok = deref.content == content && deref.sha256 == result.content_sha256;
@@ -95,7 +95,7 @@ fn main() -> Result<()> {
         "UPDATE offloaded_blobs SET content_zstd = ?1 WHERE ref_id = ?2",
         params![tampered, result.ref_id],
     )?;
-    let tamper_refused = match off.deref(&result.ref_id) {
+    let tamper_refused = match off.deref(&result.ref_id, None) {
         Err(e) => e
             .downcast_ref::<OffloadError>()
             .map(|err| matches!(err, OffloadError::IntegrityFailed { .. }))

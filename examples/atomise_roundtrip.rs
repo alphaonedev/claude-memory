@@ -177,6 +177,7 @@ fn observe_recall(
         None,
         None,
         /* include_archived = */ false,
+        /* source_uri_prefix = */ None,
     )
     .context("recall default")?;
     let recall_ids: Vec<&str> = rows.iter().map(|(m, _)| m.id.as_str()).collect();
@@ -200,6 +201,7 @@ fn observe_recall(
         None,
         None,
         /* include_archived = */ true,
+        /* source_uri_prefix = */ None,
     )
     .context("recall include_archived")?;
     let parent_visible_with_flag = rows_all.iter().any(|(m, _)| m.id == parent_id);
