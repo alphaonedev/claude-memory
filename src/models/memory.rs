@@ -1223,4 +1223,391 @@ mod tests {
         let q: ListQuery = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(q.limit, Some(20));
     }
+
+    // -----------------------------------------------------------------
+    // v0.7-polish coverage recovery (issue #767) — Forms 4/5/6 surface.
+    // Covers the new MemoryKind variants, ConfidenceSource enum, the
+    // Form 4 Citation / SourceSpan structs, and the v0.7.0 Memory
+    // serde round-trip with every new field populated.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn memory_kind_round_trips_every_variant_string() {
+        for (s, v) in [
+            ("observation", MemoryKind::Observation),
+            ("reflection", MemoryKind::Reflection),
+            ("persona", MemoryKind::Persona),
+            ("concept", MemoryKind::Concept),
+            ("entity", MemoryKind::Entity),
+            ("claim", MemoryKind::Claim),
+            ("relation", MemoryKind::Relation),
+            ("event", MemoryKind::Event),
+            ("conversation", MemoryKind::Conversation),
+            ("decision", MemoryKind::Decision),
+        ] {
+            assert_eq!(MemoryKind::from_str(s), Some(v));
+            assert_eq!(v.as_str(), s);
+            assert_eq!(format!("{v}"), s);
+        }
+    }
+
+    #[test]
+    fn memory_kind_from_str_returns_none_for_unknown() {
+        assert_eq!(MemoryKind::from_str("unknown"), None);
+        assert_eq!(MemoryKind::from_str(""), None);
+        assert_eq!(MemoryKind::from_str("OBSERVATION"), None); // case-sensitive
+    }
+
+    #[test]
+    fn memory_kind_all_enumerates_in_declaration_order() {
+        let all = MemoryKind::all();
+        assert_eq!(all.len(), 10);
+        assert_eq!(all[0], MemoryKind::Observation);
+        assert_eq!(all[1], MemoryKind::Reflection);
+        assert_eq!(all[2], MemoryKind::Persona);
+        assert_eq!(all[9], MemoryKind::Decision);
+    }
+
+    #[test]
+    fn memory_kind_default_is_observation() {
+        let k: MemoryKind = MemoryKind::default();
+        assert_eq!(k, MemoryKind::Observation);
+    }
+
+    #[test]
+    fn memory_kind_parse_csv_empty_string_returns_none() {
+        // Whitespace-only / empty → "no filter declared" → None.
+        assert_eq!(MemoryKind::parse_csv(""), None);
+        assert_eq!(MemoryKind::parse_csv("   "), None);
+        assert_eq!(MemoryKind::parse_csv(",,, "), None);
+    }
+
+    #[test]
+    fn memory_kind_parse_csv_all_unknown_returns_empty_vec() {
+        // Non-empty input with only-unknown tokens → "intentional zero
+        // filter" → Some(vec![]). Distinct from None per COR-4.
+        let parsed = MemoryKind::parse_csv("reflektion,observetion");
+        assert_eq!(parsed, Some(Vec::new()));
+    }
+
+    #[test]
+    fn memory_kind_parse_csv_mixed_known_and_unknown_drops_unknown() {
+        let parsed = MemoryKind::parse_csv("reflection,bogus,concept");
+        assert_eq!(
+            parsed,
+            Some(vec![MemoryKind::Reflection, MemoryKind::Concept])
+        );
+    }
+
+    #[test]
+    fn memory_kind_parse_csv_dedups_repeated_tokens() {
+        let parsed = MemoryKind::parse_csv("claim,claim,event,claim");
+        assert_eq!(parsed, Some(vec![MemoryKind::Claim, MemoryKind::Event]));
+    }
+
+    #[test]
+    fn memory_kind_parse_csv_trims_whitespace() {
+        let parsed = MemoryKind::parse_csv("  concept ,  entity ");
+        assert_eq!(parsed, Some(vec![MemoryKind::Concept, MemoryKind::Entity]));
+    }
+
+    #[test]
+    fn memory_kind_serialises_to_snake_case() {
+        let v = serde_json::to_value(MemoryKind::Conversation).unwrap();
+        assert_eq!(v, serde_json::Value::String("conversation".to_string()));
+    }
+
+    #[test]
+    fn confidence_source_round_trips_every_variant_string() {
+        for (s, v) in [
+            ("caller_provided", ConfidenceSource::CallerProvided),
+            ("auto_derived", ConfidenceSource::AutoDerived),
+            ("calibrated", ConfidenceSource::Calibrated),
+            ("decayed", ConfidenceSource::Decayed),
+        ] {
+            assert_eq!(ConfidenceSource::from_str(s), Some(v));
+            assert_eq!(v.as_str(), s);
+            assert_eq!(format!("{v}"), s);
+        }
+    }
+
+    #[test]
+    fn confidence_source_from_str_returns_none_for_unknown() {
+        assert_eq!(ConfidenceSource::from_str("unknown"), None);
+        assert_eq!(ConfidenceSource::from_str(""), None);
+    }
+
+    #[test]
+    fn confidence_source_default_is_caller_provided() {
+        let v: ConfidenceSource = ConfidenceSource::default();
+        assert_eq!(v, ConfidenceSource::CallerProvided);
+    }
+
+    #[test]
+    fn confidence_source_serialises_to_snake_case() {
+        let v = serde_json::to_value(ConfidenceSource::AutoDerived).unwrap();
+        assert_eq!(v, serde_json::Value::String("auto_derived".to_string()));
+    }
+
+    #[test]
+    fn confidence_signals_default_has_expected_values() {
+        let s = ConfidenceSignals::default();
+        assert!((s.source_age_days - 0.0).abs() < f64::EPSILON);
+        assert!(!s.atom_derivation);
+        assert_eq!(s.prior_corroboration_count, 0);
+        assert!((s.freshness_factor - 1.0).abs() < f64::EPSILON);
+        assert!((s.baseline_per_source - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn confidence_signals_round_trips_through_serde() {
+        let s = ConfidenceSignals {
+            source_age_days: 12.5,
+            atom_derivation: true,
+            prior_corroboration_count: 3,
+            freshness_factor: 0.75,
+            baseline_per_source: 0.62,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        let back: ConfidenceSignals = serde_json::from_value(v).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn source_span_round_trips_through_serde() {
+        let span = SourceSpan { start: 12, end: 34 };
+        let v = serde_json::to_value(span).unwrap();
+        let back: SourceSpan = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(back, span);
+        // JSON shape: {"start": 12, "end": 34}.
+        assert_eq!(v["start"], 12);
+        assert_eq!(v["end"], 34);
+    }
+
+    #[test]
+    fn citation_round_trips_through_serde_with_optional_fields_unset() {
+        let c = Citation {
+            uri: "doc:abc123".to_string(),
+            accessed_at: "2026-01-01T00:00:00Z".to_string(),
+            hash: None,
+            span: None,
+        };
+        let s = serde_json::to_string(&c).unwrap();
+        // skip_serializing_if drops the None fields entirely.
+        assert!(!s.contains("hash"));
+        assert!(!s.contains("span"));
+        let back: Citation = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn citation_round_trips_with_hash_and_span_set() {
+        let c = Citation {
+            uri: "uri:https://example.com/paper".to_string(),
+            accessed_at: "2026-02-03T04:05:06Z".to_string(),
+            hash: Some("a".repeat(64)),
+            span: Some(SourceSpan { start: 0, end: 100 }),
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        let back: Citation = serde_json::from_value(v).unwrap();
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn memory_default_populates_form4_and_form5_defaults() {
+        let m = Memory::default();
+        assert!(m.citations.is_empty());
+        assert!(m.source_uri.is_none());
+        assert!(m.source_span.is_none());
+        assert_eq!(m.confidence_source, ConfidenceSource::CallerProvided);
+        assert!(m.confidence_signals.is_none());
+        assert!(m.confidence_decayed_at.is_none());
+        assert_eq!(m.memory_kind, MemoryKind::Observation);
+        assert!(m.entity_id.is_none());
+        assert!(m.persona_version.is_none());
+    }
+
+    #[test]
+    fn memory_round_trips_with_all_v070_form_fields_populated() {
+        let mut m = Memory::default();
+        m.id = "mem-form".to_string();
+        m.title = "fact-bearer".to_string();
+        m.content = "the build broke at 14:32".to_string();
+        m.created_at = "2026-05-01T00:00:00Z".to_string();
+        m.updated_at = "2026-05-01T00:00:00Z".to_string();
+        m.memory_kind = MemoryKind::Claim;
+        m.entity_id = Some("entity-xyz".to_string());
+        m.persona_version = Some(7);
+        m.citations = vec![Citation {
+            uri: "doc:src-1".to_string(),
+            accessed_at: "2026-05-01T00:00:00Z".to_string(),
+            hash: None,
+            span: None,
+        }];
+        m.source_uri = Some("uri:https://example.com".to_string());
+        m.source_span = Some(SourceSpan { start: 5, end: 10 });
+        m.confidence_source = ConfidenceSource::Calibrated;
+        m.confidence_signals = Some(ConfidenceSignals::default());
+        m.confidence_decayed_at = Some("2026-04-01T00:00:00Z".to_string());
+
+        let s = serde_json::to_string(&m).unwrap();
+        let back: Memory = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.id, m.id);
+        assert_eq!(back.memory_kind, MemoryKind::Claim);
+        assert_eq!(back.entity_id.as_deref(), Some("entity-xyz"));
+        assert_eq!(back.persona_version, Some(7));
+        assert_eq!(back.citations.len(), 1);
+        assert_eq!(back.citations[0].uri, "doc:src-1");
+        assert_eq!(back.source_uri.as_deref(), Some("uri:https://example.com"));
+        assert_eq!(back.source_span, Some(SourceSpan { start: 5, end: 10 }));
+        assert_eq!(back.confidence_source, ConfidenceSource::Calibrated);
+        assert!(back.confidence_signals.is_some());
+        assert_eq!(
+            back.confidence_decayed_at.as_deref(),
+            Some("2026-04-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn memory_deserialises_pre_form4_payload_without_form4_fields() {
+        // A pre-Form-4 payload omits citations / source_uri / source_span /
+        // confidence_source / confidence_signals / confidence_decayed_at.
+        // serde defaults must populate them.
+        let json = serde_json::json!({
+            "id": "old-mem",
+            "tier": "long",
+            "namespace": "ns",
+            "title": "t",
+            "content": "c",
+            "tags": [],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "api",
+            "access_count": 0,
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z",
+            "metadata": {},
+        });
+        let m: Memory = serde_json::from_value(json).unwrap();
+        assert!(m.citations.is_empty());
+        assert!(m.source_uri.is_none());
+        assert!(m.source_span.is_none());
+        assert_eq!(m.confidence_source, ConfidenceSource::CallerProvided);
+        assert!(m.confidence_signals.is_none());
+        assert!(m.confidence_decayed_at.is_none());
+        assert!(m.entity_id.is_none());
+        assert!(m.persona_version.is_none());
+        assert_eq!(m.memory_kind, MemoryKind::Observation);
+    }
+
+    #[test]
+    fn recall_body_resolved_kinds_handles_all_keyword() {
+        let body: RecallBody = serde_json::from_value(serde_json::json!({
+            "kinds": "ALL",
+        }))
+        .unwrap();
+        assert_eq!(body.resolved_kinds(), None);
+    }
+
+    #[test]
+    fn recall_body_resolved_kinds_csv_parses_known_tokens() {
+        let body: RecallBody = serde_json::from_value(serde_json::json!({
+            "kinds": "concept,claim",
+        }))
+        .unwrap();
+        let kinds = body.resolved_kinds().unwrap();
+        assert!(kinds.contains(&MemoryKind::Concept));
+        assert!(kinds.contains(&MemoryKind::Claim));
+    }
+
+    #[test]
+    fn recall_body_resolved_kinds_array_parses_known_tokens() {
+        let body: RecallBody = serde_json::from_value(serde_json::json!({
+            "kinds": ["event", "entity", "bogus", "entity"],
+        }))
+        .unwrap();
+        let kinds = body.resolved_kinds().unwrap();
+        // Deduped + unknown dropped.
+        assert_eq!(kinds, vec![MemoryKind::Event, MemoryKind::Entity]);
+    }
+
+    #[test]
+    fn recall_body_resolved_kinds_empty_array_returns_none() {
+        let body: RecallBody = serde_json::from_value(serde_json::json!({
+            "kinds": [],
+        }))
+        .unwrap();
+        assert_eq!(body.resolved_kinds(), None);
+    }
+
+    #[test]
+    fn recall_body_resolved_kinds_only_unknown_array_returns_empty_vec() {
+        // COR-4 distinction: explicit array with only unknowns returns
+        // Some(vec![]) (intentional zero-match) — not None.
+        let body: RecallBody = serde_json::from_value(serde_json::json!({
+            "kinds": ["reflektion"],
+        }))
+        .unwrap();
+        assert_eq!(body.resolved_kinds(), Some(Vec::new()));
+    }
+
+    #[test]
+    fn recall_body_resolved_kinds_absent_returns_none() {
+        let body: RecallBody = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(body.resolved_kinds(), None);
+    }
+
+    #[test]
+    fn recall_body_resolved_kinds_non_string_non_array_returns_none() {
+        // A number, object, bool etc. is neither string nor array → None.
+        let body: RecallBody = serde_json::from_value(serde_json::json!({
+            "kinds": 42,
+        }))
+        .unwrap();
+        assert_eq!(body.resolved_kinds(), None);
+    }
+
+    #[test]
+    fn recall_query_resolved_kinds_handles_all_keyword() {
+        let q: RecallQuery = serde_json::from_value(serde_json::json!({
+            "kinds": "all",
+        }))
+        .unwrap();
+        assert_eq!(q.resolved_kinds(), None);
+    }
+
+    #[test]
+    fn recall_query_resolved_kinds_parses_csv() {
+        let q: RecallQuery = serde_json::from_value(serde_json::json!({
+            "kinds": "decision,relation",
+        }))
+        .unwrap();
+        let kinds = q.resolved_kinds().unwrap();
+        assert!(kinds.contains(&MemoryKind::Decision));
+        assert!(kinds.contains(&MemoryKind::Relation));
+    }
+
+    #[test]
+    fn recall_query_resolved_kinds_absent_returns_none() {
+        let q: RecallQuery = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(q.resolved_kinds(), None);
+    }
+
+    #[test]
+    fn create_memory_accepts_form4_fields_when_present() {
+        let cm: CreateMemory = serde_json::from_value(serde_json::json!({
+            "title": "t",
+            "content": "c",
+            "citations": [{
+                "uri": "doc:abc",
+                "accessed_at": "2026-01-01T00:00:00Z",
+            }],
+            "source_uri": "uri:https://example.com",
+            "source_span": {"start": 0, "end": 5},
+        }))
+        .unwrap();
+        assert_eq!(cm.citations.len(), 1);
+        assert_eq!(cm.source_uri.as_deref(), Some("uri:https://example.com"));
+        assert_eq!(cm.source_span, Some(SourceSpan { start: 0, end: 5 }));
+    }
 }
