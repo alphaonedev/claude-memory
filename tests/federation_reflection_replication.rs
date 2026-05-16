@@ -251,6 +251,9 @@ fn three_peer_federation_depth_replication_and_cross_peer_refusal() {
         auto_atomise_mode: None,
         legacy_per_pair_classifier: None,
         auto_classify_kind: None,
+        synthesis_failure_mode: None,
+        synthesis_max_deletes_per_call: None,
+        synthesis_max_candidate_chars: None,
     };
     seed_policy(&peer_b.conn, NAMESPACE, &tight);
 

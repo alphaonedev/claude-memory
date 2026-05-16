@@ -413,14 +413,34 @@ pub(crate) fn handle_store(
     // the candidate then proceeds with the standard insert. `add` /
     // `no_op` are pass-throughs to the existing path.
     //
-    // Errors from the synthesis call (LLM down, malformed JSON,
-    // validation failure) gracefully fall through to the existing
-    // dedup-merge / insert path — the substrate prefers a successful
-    // write to a typed error when the synthesiser is unavailable.
+    // v0.7.0 Cluster-B (issue #767):
+    //
+    // * SEC-1 — every delete verdict is re-checked against K9
+    //   `MemoryDelete` BEFORE the row is touched. K9-denied candidates
+    //   are dropped from the delete list, never silently applied.
+    // * SEC-1 — the per-batch delete count is capped at the namespace's
+    //   `synthesis_max_deletes_per_call` (default 1). Over-cap
+    //   batches refuse with `synthesis.refused_unbounded_delete`.
+    // * COR-5 — every `update` verdict is honoured (not just the
+    //   first). A WARN logs when >1 update verbs appear; the
+    //   per-batch tally feeds telemetry.
+    // * COR-6 — failure surfaces in the response envelope as
+    //   `synthesis_failed: true` + reason. The `synthesis_failure_mode`
+    //   namespace policy controls whether failure falls through to the
+    //   legacy path (default, backward-compatible) or refuses the
+    //   write outright.
+    // * PERF-7 — per-candidate content is truncated to the namespace's
+    //   `synthesis_max_candidate_chars` (default 1500) before being
+    //   inlined into the LLM prompt.
     let mut synthesis_counts: Option<crate::synthesis::SynthesisCounts> = None;
-    let mut synthesis_update_id: Option<String> = None;
-    let mut synthesis_update_content: Option<String> = None;
+    // COR-5: support multiple sequential update verdicts. Each entry
+    // is (candidate_id, merged_content).
+    let mut synthesis_updates: Vec<(String, String)> = Vec::new();
     let mut synthesis_deletes: Vec<String> = Vec::new();
+    // COR-6 surface: when synthesis fell through, carry the reason
+    // string into the response envelope (or block the write, depending
+    // on the namespace's `synthesis_failure_mode`).
+    let mut synthesis_failed_reason: Option<String> = None;
     let synthesis_eligible = autonomous_hooks
         && llm.is_some()
         && mem.content.len() >= AUTONOMY_MIN_CONTENT_LEN
@@ -437,7 +457,15 @@ pub(crate) fn handle_store(
         if !cands.is_empty()
             && let Some(llm_client) = llm
         {
-            match crate::synthesis::synthesise(llm_client, &mem.title, &mem.content, &cands) {
+            // PERF-7 — resolve the per-namespace prompt cap once.
+            let cap = ns_policy.effective_synthesis_max_candidate_chars();
+            match crate::synthesis::synthesise_with_cap(
+                llm_client,
+                &mem.title,
+                &mem.content,
+                &cands,
+                cap,
+            ) {
                 Ok(resp) => {
                     let counts = crate::synthesis::SynthesisCounts::from_response(&resp);
                     tracing::info!(
@@ -449,21 +477,98 @@ pub(crate) fn handle_store(
                         no_op = counts.no_op,
                         "synthesis batch decision",
                     );
-                    // Apply verdicts. At most one `update` wins (the
-                    // first one); subsequent `update`s degrade because
-                    // the incoming fact has already been merged into
-                    // the chosen candidate. `delete`s are collected
-                    // and applied below.
+
+                    // SEC-1 — refuse batches whose delete count
+                    // exceeds the namespace's per-call cap. This is
+                    // the unbounded-delete refusal point: the curator
+                    // may not mass-delete without an explicit K10
+                    // approval flow. Audit-honest WARN log.
+                    let delete_cap = ns_policy.effective_synthesis_max_deletes_per_call() as usize;
+                    if counts.delete > delete_cap {
+                        tracing::warn!(
+                            target: "synthesis",
+                            namespace = %mem.namespace,
+                            requested = counts.delete,
+                            cap = delete_cap,
+                            "synthesis.refused_unbounded_delete",
+                        );
+                        return Err(format!(
+                            "GOVERNANCE_REFUSED: synthesis batch attempted {} \
+                             deletes, exceeding namespace cap of {} (K10 approval \
+                             required for unbounded-delete; raise \
+                             `synthesis_max_deletes_per_call` to opt in per-namespace)",
+                            counts.delete, delete_cap
+                        ));
+                    }
+
+                    // COR-5 — honour ALL update verdicts in sequence.
+                    // Emit a WARN when more than one update verb
+                    // appears so operators can spot the case in
+                    // telemetry; the batch tally records the count.
+                    if counts.update > 1 {
+                        tracing::warn!(
+                            target: "synthesis",
+                            namespace = %mem.namespace,
+                            update_count = counts.update,
+                            "synthesis_decisions.update_count > 1; honouring all updates in sequence",
+                        );
+                    }
                     for v in &resp.verdicts {
                         match v.verb {
                             crate::synthesis::SynthesisVerb::Update => {
-                                if synthesis_update_id.is_none() {
-                                    synthesis_update_id = Some(v.candidate_id.clone());
-                                    synthesis_update_content.clone_from(&v.merged_content);
-                                }
+                                let merged = v
+                                    .merged_content
+                                    .clone()
+                                    .unwrap_or_else(|| mem.content.clone());
+                                synthesis_updates.push((v.candidate_id.clone(), merged));
                             }
                             crate::synthesis::SynthesisVerb::Delete => {
-                                synthesis_deletes.push(v.candidate_id.clone());
+                                // SEC-1 — re-check K9 per delete verdict.
+                                // The curator's verdict is advice; the
+                                // K9 pipeline remains authoritative.
+                                use crate::permissions::{
+                                    Decision, Op, PermissionContext, Permissions,
+                                };
+                                let payload = json!({
+                                    "id": v.candidate_id,
+                                    "via": "synthesis_verdict",
+                                });
+                                let ctx = PermissionContext {
+                                    op: Op::MemoryDelete,
+                                    namespace: mem.namespace.clone(),
+                                    agent_id: agent_id.clone(),
+                                    payload,
+                                };
+                                match Permissions::evaluate(&ctx, &[]) {
+                                    Decision::Allow | Decision::Modify(_) => {
+                                        synthesis_deletes.push(v.candidate_id.clone());
+                                    }
+                                    Decision::Deny(reason) => {
+                                        tracing::warn!(
+                                            target: "synthesis",
+                                            namespace = %mem.namespace,
+                                            candidate_id = %v.candidate_id,
+                                            "synthesis delete verdict denied by K9: {reason}",
+                                        );
+                                    }
+                                    Decision::Ask(reason) => {
+                                        // Ask outside K10 flow → treat
+                                        // as deny on the synthesis path
+                                        // (no operator UI to surface
+                                        // the prompt). Curator-driven
+                                        // deletes that need approval
+                                        // must be promoted to an
+                                        // explicit `memory_delete`
+                                        // call.
+                                        tracing::warn!(
+                                            target: "synthesis",
+                                            namespace = %mem.namespace,
+                                            candidate_id = %v.candidate_id,
+                                            "synthesis delete verdict held for approval (ask): {reason}; \
+                                             skipping in this batch",
+                                        );
+                                    }
+                                }
                             }
                             crate::synthesis::SynthesisVerb::Add
                             | crate::synthesis::SynthesisVerb::NoOp => {}
@@ -472,31 +577,61 @@ pub(crate) fn handle_store(
                     synthesis_counts = Some(counts);
                 }
                 Err(e) => {
+                    let reason = e.to_string();
+                    // COR-6 — observe the failure on the response
+                    // envelope so callers don't silently inherit the
+                    // legacy fall-through path. Then consult the
+                    // namespace's `synthesis_failure_mode` policy to
+                    // decide whether to fall through or block.
                     tracing::warn!(
                         target: "synthesis",
-                        "synthesis call failed, falling back to legacy path: {e}",
+                        namespace = %mem.namespace,
+                        "synthesis call failed: {reason}",
                     );
+                    match ns_policy.effective_synthesis_failure_mode() {
+                        crate::models::SynthesisFailureMode::BlockWrite => {
+                            return Err(format!(
+                                "SYNTHESIS_FAILED: namespace policy `block_write` refuses \
+                                 the store while the curator is unavailable: {reason}"
+                            ));
+                        }
+                        crate::models::SynthesisFailureMode::FallThrough => {
+                            synthesis_failed_reason = Some(reason);
+                        }
+                    }
                 }
             }
         }
     }
 
     // v0.7.x Form 1 — verdict honouring: when the synthesiser elected
-    // to UPDATE an existing candidate, apply that merge in place and
-    // SKIP the new-row insert. We return early; the forensic chain
-    // marker is the candidate's id, not a fresh row.
-    if let Some(target_id) = synthesis_update_id.as_deref() {
-        let merged_content = synthesis_update_content
-            .as_deref()
-            .unwrap_or_else(|| mem.content.as_str());
-        if let Some(target) = existing.iter().find(|c| c.id == target_id).cloned() {
+    // to UPDATE existing candidates, apply each merge in place.
+    //
+    // v0.7.0 Cluster-B (COR-5) — HONOUR ALL updates. The first update
+    // we apply is the "primary" — the one that subsumes the incoming
+    // fact and skips the new-row insert (the response carries that
+    // candidate's id back to the caller). Subsequent updates are still
+    // applied so the curator's merges actually land in the substrate
+    // instead of being silently dropped. A WARN log fired upstream
+    // recorded the multi-update case.
+    let primary_update: Option<(String, String)> = synthesis_updates.first().cloned();
+    if let Some((primary_id, _)) = primary_update.as_ref() {
+        // Apply every queued update in sequence.
+        for (cand_id, merged_content) in &synthesis_updates {
+            let Some(target) = existing.iter().find(|c| c.id == *cand_id).cloned() else {
+                tracing::warn!(
+                    target: "synthesis",
+                    "synthesis update target {cand_id} not found in candidate set",
+                );
+                continue;
+            };
             let preserved_metadata =
                 crate::identity::preserve_agent_id(&target.metadata, &mem.metadata);
-            let (_found, content_changed) = db::update(
+            let upd = db::update(
                 conn,
-                target_id,
+                cand_id,
                 None,
-                Some(merged_content),
+                Some(merged_content.as_str()),
                 Some(&mem.tier),
                 None,
                 Some(&mem.tags),
@@ -504,30 +639,48 @@ pub(crate) fn handle_store(
                 Some(mem.confidence),
                 None,
                 Some(&preserved_metadata),
-            )
-            .map_err(|e| e.to_string())?;
+            );
+            let (_found, content_changed) = match upd {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "synthesis",
+                        "synthesis update failed for {cand_id}: {e}",
+                    );
+                    continue;
+                }
+            };
             if content_changed && let Some(emb) = embedder {
                 let text = format!("{} {}", target.title, merged_content);
                 if let Ok(embedding) = emb.embed(&text) {
-                    let _ = db::set_embedding(conn, target_id, &embedding);
+                    let _ = db::set_embedding(conn, cand_id, &embedding);
                     if let Some(idx) = vector_index {
-                        idx.remove(target_id);
-                        idx.insert(target_id.to_string(), embedding);
+                        idx.remove(cand_id);
+                        idx.insert(cand_id.to_string(), embedding);
                     }
                 }
             }
-            // Apply pending deletes that came in the same batch.
-            for del_id in &synthesis_deletes {
-                if del_id == target_id {
-                    continue;
-                }
-                if let Err(e) = db::delete(conn, del_id) {
-                    tracing::warn!(
-                        target: "synthesis",
-                        "synthesis delete failed for {del_id}: {e}",
-                    );
-                }
+        }
+
+        // Apply queued deletes from the same batch (skip the primary
+        // update target so we don't delete the very row we just merged
+        // the incoming fact into).
+        for del_id in &synthesis_deletes {
+            if del_id == primary_id {
+                continue;
             }
+            if let Err(e) = db::delete(conn, del_id) {
+                tracing::warn!(
+                    target: "synthesis",
+                    "synthesis delete failed for {del_id}: {e}",
+                );
+            }
+        }
+
+        // Construct the response from the PRIMARY update's target.
+        if let Some(target) = existing.iter().find(|c| c.id == *primary_id).cloned() {
+            let preserved_metadata =
+                crate::identity::preserve_agent_id(&target.metadata, &mem.metadata);
             let echoed_agent_id = preserved_metadata
                 .get("agent_id")
                 .and_then(|v| v.as_str())
@@ -544,15 +697,19 @@ pub(crate) fn handle_store(
             if let Some(c) = &synthesis_counts {
                 resp["synthesis_decisions"] = c.to_json();
             }
+            if let Some(reason) = &synthesis_failed_reason {
+                resp["synthesis_failed"] = json!(true);
+                resp["synthesis_failed_reason"] = json!(reason);
+            }
             return Ok(resp);
         }
     }
 
     // v0.7.x Form 1 — verdict honouring: when the synthesiser elected
-    // to DELETE candidates (without an update), apply those deletes
+    // to DELETE candidates (without any update), apply those deletes
     // BEFORE the new-row insert so the substrate honours the verdict
     // on the standard insert path.
-    if synthesis_update_id.is_none() {
+    if synthesis_updates.is_empty() {
         for del_id in &synthesis_deletes {
             if let Err(e) = db::delete(conn, del_id) {
                 tracing::warn!(
@@ -905,6 +1062,14 @@ pub(crate) fn handle_store(
     }
     if let Some(counts) = &synthesis_counts {
         response["synthesis_decisions"] = counts.to_json();
+    }
+    if let Some(reason) = &synthesis_failed_reason {
+        // v0.7.0 Cluster-B (COR-6) — surface curator failure to the
+        // caller. The namespace policy chose to fall through, but the
+        // caller still observes that the new write did not benefit
+        // from the synthesis pass.
+        response["synthesis_failed"] = json!(true);
+        response["synthesis_failed_reason"] = json!(reason);
     }
     if let Some(outcome) = atomise_outcome {
         response["atomise_mode"] = json!("synchronous");
@@ -1820,6 +1985,9 @@ mod tests {
             auto_atomise_mode: None,
             legacy_per_pair_classifier: None,
             auto_classify_kind: None,
+            synthesis_failure_mode: None,
+            synthesis_max_deletes_per_call: None,
+            synthesis_max_candidate_chars: None,
         };
         let now = chrono::Utc::now().to_rfc3339();
         let mut metadata = default_metadata();
@@ -1886,6 +2054,9 @@ mod tests {
             auto_atomise_mode: None,
             legacy_per_pair_classifier: Some(true),
             auto_classify_kind: None,
+            synthesis_failure_mode: None,
+            synthesis_max_deletes_per_call: None,
+            synthesis_max_candidate_chars: None,
         };
         let now = chrono::Utc::now().to_rfc3339();
         let mut metadata = default_metadata();

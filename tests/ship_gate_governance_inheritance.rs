@@ -111,6 +111,9 @@ fn approve_write_policy() -> GovernancePolicy {
         auto_atomise_mode: None,
         legacy_per_pair_classifier: None,
         auto_classify_kind: None,
+        synthesis_failure_mode: None,
+        synthesis_max_deletes_per_call: None,
+        synthesis_max_candidate_chars: None,
     }
 }
 
@@ -131,6 +134,9 @@ fn any_policy_no_inherit() -> GovernancePolicy {
         auto_atomise_mode: None,
         legacy_per_pair_classifier: None,
         auto_classify_kind: None,
+        synthesis_failure_mode: None,
+        synthesis_max_deletes_per_call: None,
+        synthesis_max_candidate_chars: None,
     }
 }
 

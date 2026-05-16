@@ -331,6 +331,9 @@ mod tests {
             auto_atomise_mode: None,
             legacy_per_pair_classifier: None,
             auto_classify_kind: None,
+            synthesis_failure_mode: None,
+            synthesis_max_deletes_per_call: None,
+            synthesis_max_candidate_chars: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         let back: GovernancePolicy = serde_json::from_str(&json).unwrap();
