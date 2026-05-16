@@ -1156,6 +1156,7 @@ fn handle_request(
                     arguments,
                     llm.map(|c| c as &dyn crate::autonomy::AutonomyLlm),
                     tier_config.tier,
+                    active_keypair,
                 ),
                 // v0.7.0 Form 5 (issue #758) — calibration sweep over
                 // the shadow-mode observation table. Pure read-only;

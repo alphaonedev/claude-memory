@@ -24,11 +24,11 @@
 //! in production, `MockOllamaClient` in tests). Read-only
 //! `memory_persona` is available at Semantic+.
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::autonomy::AutonomyLlm;
 use crate::config::FeatureTier;
-use crate::persona::{PersonaConfig, PersonaError, PersonaGenerator, get_latest_persona};
+use crate::persona::{get_latest_persona, PersonaConfig, PersonaError, PersonaGenerator};
 
 /// Wire shape (read-only):
 ///
@@ -90,6 +90,7 @@ pub fn handle_persona_generate(
     params: &Value,
     llm: Option<&dyn AutonomyLlm>,
     tier: FeatureTier,
+    active_keypair: Option<&crate::identity::keypair::AgentKeypair>,
 ) -> Result<Value, String> {
     // Tier gate — refuse below smart so we never blow the budget by
     // accidentally firing curator synthesis on a keyword-only daemon.
@@ -110,7 +111,14 @@ pub fn handle_persona_generate(
     }
     let namespace = params["namespace"].as_str().unwrap_or("global");
 
-    let generator = PersonaGenerator::new(conn, llm, None, PersonaConfig::default());
+    // v0.7.0 issue #811 / #813 — the prior implementation passed `None`
+    // for the signer here even though the MCP dispatch already had the
+    // daemon keypair as `active_keypair`. That regression produced
+    // unsigned `derived_from` links + an unsigned persona artifact
+    // even when the operator had a keypair on disk. We now forward
+    // `active_keypair` through `PersonaGenerator::new` so the link
+    // path AND the persona-body signing path see the same identity.
+    let generator = PersonaGenerator::new(conn, llm, active_keypair, PersonaConfig::default());
     let persona = generator
         .generate(entity_id, namespace)
         .map_err(persona_error_to_string)?;
@@ -225,6 +233,7 @@ mod tests {
             &json!({"entity_id": "alice"}),
             Some(&llm),
             FeatureTier::Keyword,
+            None,
         )
         .unwrap_err();
         assert!(err.contains("requires smart tier"));
@@ -245,6 +254,7 @@ mod tests {
             &json!({"entity_id": "alice", "namespace": "team/alpha"}),
             Some(&llm),
             FeatureTier::Smart,
+            None,
         )
         .unwrap();
         assert_eq!(gen_res["regenerated"], true);

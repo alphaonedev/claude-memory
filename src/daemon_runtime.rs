@@ -1303,7 +1303,7 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
             // than spinning up a transient OllamaClient here. Operators
             // who want the regenerate path call `memory_persona_generate`
             // through MCP (where the daemon already owns the LLM).
-            match cli::commands::persona::run(&db_path, &a, None, &mut out)? {
+            match cli::commands::persona::run(&db_path, &a, None, None, &mut out)? {
                 0 => Ok(()),
                 code => std::process::exit(code),
             }

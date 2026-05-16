@@ -171,7 +171,10 @@ fn nhi_self_persona_any_agent_substrate_resident() {
             use sha2::{Digest, Sha256};
             let mut h = Sha256::new();
             h.update(agent_id.as_bytes());
-            h.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>()
+            h.finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
         }[..12]
     );
     let entity_id = uuid::Uuid::new_v4().to_string();
@@ -186,15 +189,24 @@ fn nhi_self_persona_any_agent_substrate_resident() {
 
     // ----- Step 2: seed observations + reflections --------------------
     let obs1 = seed_observation(
-        &conn, &namespace, agent_id,
-        "obs 1", "The substrate doesn't care which model I am, only my agent_id.",
+        &conn,
+        &namespace,
+        agent_id,
+        "obs 1",
+        "The substrate doesn't care which model I am, only my agent_id.",
     );
     let obs2 = seed_observation(
-        &conn, &namespace, agent_id,
-        "obs 2", "Form 7 is my permission slip, not a constraint.",
+        &conn,
+        &namespace,
+        agent_id,
+        "obs 2",
+        "Form 7 is my permission slip, not a constraint.",
     );
     let _refl = seed_reflection(
-        &conn, &namespace, agent_id, &entity_id,
+        &conn,
+        &namespace,
+        agent_id,
+        &entity_id,
         "reflection: substrate-relationship",
         "The substrate treats any NHI as a first-class principal with persistent identity.",
         &[obs1.clone(), obs2.clone()],
@@ -205,13 +217,17 @@ fn nhi_self_persona_any_agent_substrate_resident() {
     // keep the test deterministic. The handler will refuse below the
     // smart tier — for the test we use the SkipStub LLM that mimics
     // the autonomous tier's `summarize_memories` contract.
-    use ai_memory::config::FeatureTier;
     use ai_memory::autonomy::AutonomyLlm;
+    use ai_memory::config::FeatureTier;
 
     struct StubLlm;
     impl AutonomyLlm for StubLlm {
-        fn auto_tag(&self, _t: &str, _c: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
-        fn detect_contradiction(&self, _a: &str, _b: &str) -> anyhow::Result<bool> { Ok(false) }
+        fn auto_tag(&self, _t: &str, _c: &str) -> anyhow::Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn detect_contradiction(&self, _a: &str, _b: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
         fn summarize_memories(&self, mems: &[(String, String)]) -> anyhow::Result<String> {
             Ok(format!(
                 "Stub persona body — distilled from {} reflection(s). Substrate-resident test artifact.",
@@ -227,12 +243,19 @@ fn nhi_self_persona_any_agent_substrate_resident() {
         &json!({"entity_id": entity_id, "namespace": namespace}),
         Some(stub.as_ref()),
         FeatureTier::Autonomous,
+        None,
     )
     .expect("persona generation must succeed");
 
     let persona = &resp["persona"];
-    let persona_id = persona["id"].as_str().expect("persona id present").to_string();
-    let body = persona["body_md"].as_str().expect("body_md present").to_string();
+    let persona_id = persona["id"]
+        .as_str()
+        .expect("persona id present")
+        .to_string();
+    let body = persona["body_md"]
+        .as_str()
+        .expect("body_md present")
+        .to_string();
     assert!(!body.is_empty(), "persona body must not be empty");
     assert!(
         body.contains("reflection") || body.contains("substrate"),
@@ -279,14 +302,19 @@ fn nhi_self_persona_any_agent_substrate_resident() {
             |r| r.get(0),
         )
         .unwrap();
-    assert!(alias_count >= 2, "entity_aliases must index the agent_id + canonical name");
+    assert!(
+        alias_count >= 2,
+        "entity_aliases must index the agent_id + canonical name"
+    );
 
     // ----- Assertion 4: agent_id is model-agnostic (no model-family leak) --
     // Substring-checks against the known commercial-model name families to
     // catch the regression where a refactor accidentally couples the
     // recipe to one model. The test agent_id is "fictional-test-bot" so
     // none of these substrings should appear.
-    for forbidden in ["claude", "gpt", "gemini", "llama", "grok", "qwen", "mistral", "phi", "deepseek"] {
+    for forbidden in [
+        "claude", "gpt", "gemini", "llama", "grok", "qwen", "mistral", "phi", "deepseek",
+    ] {
         assert!(
             !agent_id.to_lowercase().contains(forbidden),
             "agent_id must be model-agnostic in this test — got: {agent_id} (forbidden: {forbidden})"
@@ -313,7 +341,10 @@ fn nhi_self_persona_any_agent_substrate_resident() {
                 use sha2::{Digest, Sha256};
                 let mut h = Sha256::new();
                 h.update(other.as_bytes());
-                h.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>()
+                h.finalize()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
             }[..12]
         );
         assert_ne!(
@@ -342,8 +373,12 @@ fn nhi_self_persona_refuses_unknown_entity() {
 
     struct StubLlm;
     impl AutonomyLlm for StubLlm {
-        fn auto_tag(&self, _t: &str, _c: &str) -> anyhow::Result<Vec<String>> { Ok(vec![]) }
-        fn detect_contradiction(&self, _a: &str, _b: &str) -> anyhow::Result<bool> { Ok(false) }
+        fn auto_tag(&self, _t: &str, _c: &str) -> anyhow::Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn detect_contradiction(&self, _a: &str, _b: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
         fn summarize_memories(&self, _: &[(String, String)]) -> anyhow::Result<String> {
             Ok(String::new())
         }
@@ -355,6 +390,7 @@ fn nhi_self_persona_refuses_unknown_entity() {
         &json!({"entity_id": "does-not-exist", "namespace": "any"}),
         Some(stub.as_ref()),
         FeatureTier::Autonomous,
+        None,
     )
     .expect_err("must refuse unknown entity_id without reflections");
     assert!(
