@@ -78,7 +78,11 @@ impl HelperKind {
 /// the fields it cares about; unused fields are ignored.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HelperParams {
-    /// Incoming content the orchestrator is ingesting.
+    /// Descriptor-level override for the content. The Form 3 executor
+    /// passes runtime content via a [`HelperContext`] **borrow** (issue
+    /// #782 PERF-11) — this field is only consulted when the pipeline
+    /// descriptor itself wants to pin a specific content string (rare;
+    /// almost always empty).
     pub content: String,
     /// Candidate memories to score against. Empty for helpers that
     /// don't need a candidate set (e.g., FTS classifier on standalone
@@ -97,6 +101,66 @@ pub struct HelperParams {
     /// Namespace hint forwarded to the FTS classifier.
     #[serde(default)]
     pub namespace: Option<String>,
+}
+
+/// Borrowed runtime inputs threaded into Phase 1 deterministic helper
+/// stages. The Form 3 executor constructs ONE of these per `run()` and
+/// reuses it across every helper stage so the content string is passed
+/// by **reference**, not cloned per-helper (issue #782 PERF-11).
+///
+/// The fields are public so test scaffolding under `cfg(test)` can
+/// construct a context directly; production callers go through the
+/// executor.
+#[derive(Debug, Clone, Copy)]
+pub struct HelperContext<'a> {
+    /// Incoming content slice — borrowed from the caller's owned
+    /// `String`. The same `&str` is threaded into every helper stage
+    /// within a run, so `content.as_ptr()` is stable across stages.
+    /// This is the load-bearing invariant pinned by the
+    /// `multistep_phase_1_helpers_receive_content_borrow_not_clone`
+    /// integration test.
+    pub content: &'a str,
+    /// Candidate memory set — borrowed slice, not cloned.
+    pub candidates: &'a [MemoryHandle],
+    /// Optional caller-supplied embedding for the content (cosine
+    /// pre-filter input).
+    pub content_embedding: Option<&'a [f32]>,
+    /// Optional namespace hint forwarded to the FTS classifier.
+    pub namespace: Option<&'a str>,
+}
+
+impl<'a> HelperContext<'a> {
+    /// Construct a borrowed context from the runtime inputs.
+    #[must_use]
+    pub fn new(
+        content: &'a str,
+        candidates: &'a [MemoryHandle],
+        content_embedding: Option<&'a [f32]>,
+        namespace: Option<&'a str>,
+    ) -> Self {
+        Self {
+            content,
+            candidates,
+            content_embedding,
+            namespace,
+        }
+    }
+
+    /// Resolve the effective content slice for this invocation. The
+    /// descriptor `params.content` wins when non-empty (rare pipeline
+    /// override); otherwise the context's borrowed slice is returned
+    /// verbatim. No `String` allocation.
+    #[must_use]
+    pub fn effective_content<'p>(&self, params: &'p HelperParams) -> &'p str
+    where
+        'a: 'p,
+    {
+        if params.content.is_empty() {
+            self.content
+        } else {
+            params.content.as_str()
+        }
+    }
 }
 
 /// Output of a single helper invocation. Carries the JSON payload that
@@ -121,35 +185,52 @@ pub struct HelperOutput {
 /// lowercase tokens. Two empty bodies score `0.0` (no overlap) rather
 /// than `1.0` (degenerate sets) to avoid surfacing zero-length matches
 /// to the LLM.
+///
+/// Convenience wrapper that builds a self-borrowing `HelperContext`
+/// out of `params`; production hot-paths call
+/// [`jaccard_overlap_with`] to avoid the per-call clones.
 #[must_use]
 pub fn jaccard_overlap(params: &HelperParams) -> HelperOutput {
-    let content_tokens = tokenise(&params.content);
-    let mut scored: Vec<(String, f32, String)> = params
-        .candidates
+    let ctx = HelperContext::new(&params.content, &params.candidates, None, None);
+    jaccard_overlap_with(params, &ctx)
+}
+
+/// Borrow-friendly variant of [`jaccard_overlap`]. The Form 3 executor
+/// threads ONE [`HelperContext`] through every helper invocation so
+/// the content string is read by reference, not cloned per-helper
+/// (issue #782 PERF-11).
+#[must_use]
+pub fn jaccard_overlap_with(params: &HelperParams, ctx: &HelperContext<'_>) -> HelperOutput {
+    let content = ctx.effective_content(params);
+    let candidates: &[MemoryHandle] = if params.candidates.is_empty() {
+        ctx.candidates
+    } else {
+        params.candidates.as_slice()
+    };
+
+    let content_tokens = tokenise(content);
+    let mut scored: Vec<(&str, f32, &str)> = candidates
         .iter()
         .map(|c| {
             let candidate_tokens = tokenise(&c.body);
             let overlap = jaccard(&content_tokens, &candidate_tokens);
-            (c.id.clone(), overlap, c.body.clone())
+            (c.id.as_str(), overlap, c.body.as_str())
         })
         .collect();
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(10);
 
-    let over_threshold: Vec<&(String, f32, String)> = scored
-        .iter()
-        .filter(|(_, score, _)| *score >= 0.40)
-        .collect();
+    let over_threshold: usize = scored.iter().filter(|(_, score, _)| *score >= 0.40).count();
 
     let summary = format!(
         "jaccard: {}/{} candidates over 0.40 overlap",
-        over_threshold.len(),
-        params.candidates.len()
+        over_threshold,
+        candidates.len()
     );
 
     let payload = json!({
         "helper": "jaccard_overlap",
-        "candidates_scored": params.candidates.len(),
+        "candidates_scored": candidates.len(),
         "top_candidates": scored
             .iter()
             .map(|(id, score, body)| json!({
@@ -171,13 +252,36 @@ pub fn jaccard_overlap(params: &HelperParams) -> HelperOutput {
 /// Returns the candidate set above `cosine_threshold` (default `0.20`).
 /// Candidates without embeddings are passed through with `score = null`
 /// so the LLM still sees them but they don't contribute to ranking.
+///
+/// Convenience wrapper around [`cosine_pre_filter_with`].
 #[must_use]
 pub fn cosine_pre_filter(params: &HelperParams) -> HelperOutput {
-    let threshold = params.cosine_threshold.unwrap_or(0.20);
-    let content_emb = params.content_embedding.as_deref();
+    let ctx = HelperContext::new(
+        &params.content,
+        &params.candidates,
+        params.content_embedding.as_deref(),
+        None,
+    );
+    cosine_pre_filter_with(params, &ctx)
+}
 
-    let scored: Vec<Value> = params
-        .candidates
+/// Borrow-friendly variant of [`cosine_pre_filter`] consuming the
+/// borrowed [`HelperContext`] (issue #782 PERF-11).
+#[must_use]
+pub fn cosine_pre_filter_with(params: &HelperParams, ctx: &HelperContext<'_>) -> HelperOutput {
+    let threshold = params.cosine_threshold.unwrap_or(0.20);
+    let content_emb: Option<&[f32]> = if params.content_embedding.is_some() {
+        params.content_embedding.as_deref()
+    } else {
+        ctx.content_embedding
+    };
+    let candidates: &[MemoryHandle] = if params.candidates.is_empty() {
+        ctx.candidates
+    } else {
+        params.candidates.as_slice()
+    };
+
+    let scored: Vec<Value> = candidates
         .iter()
         .map(|c| {
             let score = match (content_emb, c.embedding.as_deref()) {
@@ -224,31 +328,53 @@ pub fn cosine_pre_filter(params: &HelperParams) -> HelperOutput {
 /// LLM stage a starting hint so it doesn't burn tokens re-deriving the
 /// kind from scratch. Per Batman's contract, the LLM is told "trust
 /// this label" rather than asked to re-classify.
+///
+/// Convenience wrapper around [`fts_classifier_with`].
 #[must_use]
 pub fn fts_classifier(params: &HelperParams) -> HelperOutput {
-    let body = params.content.to_lowercase();
-    let kind = if body.contains("step ") || body.contains("first, ") || body.contains("then ") {
+    let ctx = HelperContext::new(
+        &params.content,
+        &params.candidates,
+        None,
+        params.namespace.as_deref(),
+    );
+    fts_classifier_with(params, &ctx)
+}
+
+/// Borrow-friendly variant of [`fts_classifier`] consuming the
+/// borrowed [`HelperContext`] (issue #782 PERF-11).
+#[must_use]
+pub fn fts_classifier_with(params: &HelperParams, ctx: &HelperContext<'_>) -> HelperOutput {
+    let content = ctx.effective_content(params);
+    let namespace: &str = params
+        .namespace
+        .as_deref()
+        .or(ctx.namespace)
+        .unwrap_or("global");
+
+    let body_lower = content.to_lowercase();
+    let kind = if body_lower.contains("step ")
+        || body_lower.contains("first, ")
+        || body_lower.contains("then ")
+    {
         "procedural"
-    } else if body.contains("yesterday")
-        || body.contains("today")
-        || body.contains("happened")
-        || body.contains("event")
+    } else if body_lower.contains("yesterday")
+        || body_lower.contains("today")
+        || body_lower.contains("happened")
+        || body_lower.contains("event")
     {
         "episodic"
     } else {
         "declarative"
     };
 
-    let summary = format!(
-        "fts_classifier: kind={kind} (namespace={})",
-        params.namespace.as_deref().unwrap_or("global")
-    );
+    let summary = format!("fts_classifier: kind={kind} (namespace={namespace})");
 
     let payload = json!({
         "helper": "fts_classifier",
         "fact_kind": kind,
-        "namespace": params.namespace.clone().unwrap_or_else(|| "global".to_string()),
-        "tokens": tokenise(&params.content).len(),
+        "namespace": namespace,
+        "tokens": tokenise(content).len(),
     });
 
     HelperOutput {
@@ -260,12 +386,30 @@ pub fn fts_classifier(params: &HelperParams) -> HelperOutput {
 
 /// Dispatch a helper by kind. Used by the executor when walking a
 /// pipeline's stage list.
+///
+/// Convenience wrapper around [`run_helper_with`] that builds a
+/// self-borrowing context.
 #[must_use]
 pub fn run_helper(kind: HelperKind, params: &HelperParams) -> HelperOutput {
     match kind {
         HelperKind::JaccardOverlap => jaccard_overlap(params),
         HelperKind::CosinePreFilter => cosine_pre_filter(params),
         HelperKind::FtsClassifier => fts_classifier(params),
+    }
+}
+
+/// Borrow-friendly dispatch — used by the Form 3 executor to avoid the
+/// per-helper content `String` clone (issue #782 PERF-11).
+#[must_use]
+pub fn run_helper_with(
+    kind: HelperKind,
+    params: &HelperParams,
+    ctx: &HelperContext<'_>,
+) -> HelperOutput {
+    match kind {
+        HelperKind::JaccardOverlap => jaccard_overlap_with(params, ctx),
+        HelperKind::CosinePreFilter => cosine_pre_filter_with(params, ctx),
+        HelperKind::FtsClassifier => fts_classifier_with(params, ctx),
     }
 }
 

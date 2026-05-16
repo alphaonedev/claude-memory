@@ -217,6 +217,7 @@ fn opt_in_policy(threshold: u32, max_atom_tokens: u32) -> GovernancePolicy {
         synthesis_failure_mode: None,
         synthesis_max_deletes_per_call: None,
         synthesis_max_candidate_chars: None,
+        multistep_max_content_chars: None,
     }
 }
 
@@ -241,6 +242,7 @@ fn opt_out_policy() -> GovernancePolicy {
         synthesis_failure_mode: None,
         synthesis_max_deletes_per_call: None,
         synthesis_max_candidate_chars: None,
+        multistep_max_content_chars: None,
     }
 }
 

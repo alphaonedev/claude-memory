@@ -337,6 +337,7 @@ fn enable_auto_export(conn: &rusqlite::Connection, ns: &str) {
         synthesis_failure_mode: None,
         synthesis_max_deletes_per_call: None,
         synthesis_max_candidate_chars: None,
+        multistep_max_content_chars: None,
     };
     let gov_meta = json!({
         "agent_id": "ai:test",

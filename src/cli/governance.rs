@@ -282,6 +282,7 @@ mod tests {
             synthesis_failure_mode: None,
             synthesis_max_deletes_per_call: None,
             synthesis_max_candidate_chars: None,
+            multistep_max_content_chars: None,
         };
         seed_governance_policy(&db_path, "gov-ns", policy, "alice");
         let conn = db::open(&db_path).unwrap();
@@ -333,6 +334,7 @@ mod tests {
             synthesis_failure_mode: None,
             synthesis_max_deletes_per_call: None,
             synthesis_max_candidate_chars: None,
+            multistep_max_content_chars: None,
         };
         seed_governance_policy(&db_path, "gov-ns", policy, "alice");
         let conn = db::open(&db_path).unwrap();
@@ -389,6 +391,7 @@ mod tests {
             synthesis_failure_mode: None,
             synthesis_max_deletes_per_call: None,
             synthesis_max_candidate_chars: None,
+            multistep_max_content_chars: None,
         };
         seed_governance_policy(&db_path, "gov-ns", policy, "alice");
         let conn = db::open(&db_path).unwrap();
@@ -444,6 +447,7 @@ mod tests {
             synthesis_failure_mode: None,
             synthesis_max_deletes_per_call: None,
             synthesis_max_candidate_chars: None,
+            multistep_max_content_chars: None,
         };
         seed_governance_policy(&db_path, "gov-ns", policy, "alice");
         let conn = db::open(&db_path).unwrap();
@@ -496,6 +500,7 @@ mod tests {
             synthesis_failure_mode: None,
             synthesis_max_deletes_per_call: None,
             synthesis_max_candidate_chars: None,
+            multistep_max_content_chars: None,
         };
         seed_governance_policy(&db_path, "gov-ns", policy, "alice");
         let conn = db::open(&db_path).unwrap();

@@ -303,6 +303,7 @@ fn explicit_cap_one_refuses_depth_two_reflection() {
         synthesis_failure_mode: None,
         synthesis_max_deletes_per_call: None,
         synthesis_max_candidate_chars: None,
+        multistep_max_content_chars: None,
     };
     seed_policy(&conn, "task4-cap-one", &policy);
 
@@ -357,6 +358,7 @@ fn cap_zero_disables_every_reflection() {
         synthesis_failure_mode: None,
         synthesis_max_deletes_per_call: None,
         synthesis_max_candidate_chars: None,
+        multistep_max_content_chars: None,
     };
     seed_policy(&conn, "task4-cap-zero", &policy);
 
