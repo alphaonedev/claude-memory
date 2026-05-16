@@ -930,3 +930,406 @@ pub struct AgentRegistration {
     pub registered_at: String,
     pub last_seen_at: String,
 }
+
+// -----------------------------------------------------------------
+// v0.7-polish coverage recovery (issue #767) — GovernancePolicy
+// effective_* accessor + default-resolution coverage. Covers the
+// Form 1/2/4/5/6 + QW-1/QW-2 + Cluster B/F fields and their accessors.
+// -----------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn governance_policy_default_resolves_form_fields_to_none_and_compiled_defaults() {
+        let p = GovernancePolicy::default();
+        assert_eq!(p.write, GovernanceLevel::Any);
+        assert_eq!(p.promote, GovernanceLevel::Any);
+        assert_eq!(p.delete, GovernanceLevel::Owner);
+        assert_eq!(p.approver, ApproverType::Human);
+        assert!(p.inherit);
+        // Every Form / Cluster field defaults to None.
+        assert!(p.max_reflection_depth.is_none());
+        assert!(p.auto_export_reflections_to_filesystem.is_none());
+        assert!(p.auto_atomise.is_none());
+        assert!(p.auto_atomise_threshold_cl100k.is_none());
+        assert!(p.auto_atomise_max_atom_tokens.is_none());
+        assert!(p.auto_atomise_max_retries.is_none());
+        assert!(p.auto_persona_trigger_every_n_memories.is_none());
+        assert!(p.auto_export_personas_to_filesystem.is_none());
+        assert!(p.auto_atomise_mode.is_none());
+        assert!(p.legacy_per_pair_classifier.is_none());
+        assert!(p.auto_classify_kind.is_none());
+        assert!(p.synthesis_failure_mode.is_none());
+        assert!(p.synthesis_max_deletes_per_call.is_none());
+        assert!(p.synthesis_max_candidate_chars.is_none());
+        assert!(p.multistep_max_content_chars.is_none());
+    }
+
+    #[test]
+    fn default_for_managed_namespace_tightens_write_to_owner() {
+        let p = GovernancePolicy::default_for_managed_namespace();
+        assert_eq!(p.write, GovernanceLevel::Owner);
+        assert!(p.inherit);
+        // All Form fields remain None — managed namespaces inherit
+        // compiled defaults explicitly.
+        assert!(p.max_reflection_depth.is_none());
+        assert!(p.auto_atomise.is_none());
+        assert!(p.auto_atomise_mode.is_none());
+        assert!(p.synthesis_failure_mode.is_none());
+        assert!(p.multistep_max_content_chars.is_none());
+    }
+
+    #[test]
+    fn effective_max_reflection_depth_defaults_to_three_when_none() {
+        let p = GovernancePolicy::default();
+        assert_eq!(p.effective_max_reflection_depth(), 3);
+    }
+
+    #[test]
+    fn effective_max_reflection_depth_returns_override_when_set() {
+        let mut p = GovernancePolicy::default();
+        p.max_reflection_depth = Some(7);
+        assert_eq!(p.effective_max_reflection_depth(), 7);
+    }
+
+    #[test]
+    fn effective_max_reflection_depth_returns_zero_kill_switch() {
+        let mut p = GovernancePolicy::default();
+        p.max_reflection_depth = Some(0);
+        assert_eq!(p.effective_max_reflection_depth(), 0);
+    }
+
+    #[test]
+    fn effective_auto_export_reflections_to_filesystem_defaults_false() {
+        let p = GovernancePolicy::default();
+        assert!(!p.effective_auto_export_reflections_to_filesystem());
+    }
+
+    #[test]
+    fn effective_auto_export_reflections_to_filesystem_returns_override() {
+        let mut p = GovernancePolicy::default();
+        p.auto_export_reflections_to_filesystem = Some(true);
+        assert!(p.effective_auto_export_reflections_to_filesystem());
+        p.auto_export_reflections_to_filesystem = Some(false);
+        assert!(!p.effective_auto_export_reflections_to_filesystem());
+    }
+
+    #[test]
+    fn effective_auto_atomise_defaults_false() {
+        let p = GovernancePolicy::default();
+        assert!(!p.effective_auto_atomise());
+    }
+
+    #[test]
+    fn effective_auto_atomise_returns_override() {
+        let mut p = GovernancePolicy::default();
+        p.auto_atomise = Some(true);
+        assert!(p.effective_auto_atomise());
+    }
+
+    #[test]
+    fn effective_auto_atomise_threshold_cl100k_defaults_to_500() {
+        let p = GovernancePolicy::default();
+        assert_eq!(p.effective_auto_atomise_threshold_cl100k(), 500);
+    }
+
+    #[test]
+    fn effective_auto_atomise_threshold_cl100k_returns_override() {
+        let mut p = GovernancePolicy::default();
+        p.auto_atomise_threshold_cl100k = Some(1000);
+        assert_eq!(p.effective_auto_atomise_threshold_cl100k(), 1000);
+    }
+
+    #[test]
+    fn effective_auto_atomise_max_atom_tokens_defaults_to_200() {
+        let p = GovernancePolicy::default();
+        assert_eq!(p.effective_auto_atomise_max_atom_tokens(), 200);
+    }
+
+    #[test]
+    fn effective_auto_atomise_max_atom_tokens_returns_override() {
+        let mut p = GovernancePolicy::default();
+        p.auto_atomise_max_atom_tokens = Some(50);
+        assert_eq!(p.effective_auto_atomise_max_atom_tokens(), 50);
+    }
+
+    #[test]
+    fn effective_auto_atomise_max_retries_returns_none_by_default() {
+        let p = GovernancePolicy::default();
+        assert_eq!(p.effective_auto_atomise_max_retries(), None);
+    }
+
+    #[test]
+    fn effective_auto_atomise_max_retries_returns_override() {
+        let mut p = GovernancePolicy::default();
+        p.auto_atomise_max_retries = Some(3);
+        assert_eq!(p.effective_auto_atomise_max_retries(), Some(3));
+    }
+
+    #[test]
+    fn effective_auto_persona_trigger_returns_none_by_default() {
+        let p = GovernancePolicy::default();
+        assert_eq!(p.effective_auto_persona_trigger_every_n_memories(), None);
+    }
+
+    #[test]
+    fn effective_auto_persona_trigger_returns_override() {
+        let mut p = GovernancePolicy::default();
+        p.auto_persona_trigger_every_n_memories = Some(5);
+        assert_eq!(p.effective_auto_persona_trigger_every_n_memories(), Some(5));
+    }
+
+    #[test]
+    fn effective_auto_export_personas_to_filesystem_defaults_false() {
+        let p = GovernancePolicy::default();
+        assert!(!p.effective_auto_export_personas_to_filesystem());
+    }
+
+    #[test]
+    fn effective_auto_export_personas_to_filesystem_returns_override() {
+        let mut p = GovernancePolicy::default();
+        p.auto_export_personas_to_filesystem = Some(true);
+        assert!(p.effective_auto_export_personas_to_filesystem());
+    }
+
+    #[test]
+    fn effective_auto_atomise_mode_off_when_disabled() {
+        let p = GovernancePolicy::default();
+        assert_eq!(p.effective_auto_atomise_mode(), AutoAtomiseMode::Off);
+    }
+
+    #[test]
+    fn effective_auto_atomise_mode_explicit_off_wins_over_enabled_flag() {
+        let mut p = GovernancePolicy::default();
+        p.auto_atomise = Some(true);
+        p.auto_atomise_mode = Some(AutoAtomiseMode::Off);
+        assert_eq!(p.effective_auto_atomise_mode(), AutoAtomiseMode::Off);
+    }
+
+    #[test]
+    fn effective_auto_atomise_mode_legacy_flag_implies_deferred() {
+        let mut p = GovernancePolicy::default();
+        p.auto_atomise = Some(true);
+        // No explicit mode → implicit Deferred (legacy WT-1-D behaviour).
+        assert_eq!(p.effective_auto_atomise_mode(), AutoAtomiseMode::Deferred);
+    }
+
+    #[test]
+    fn effective_auto_atomise_mode_explicit_synchronous() {
+        let mut p = GovernancePolicy::default();
+        p.auto_atomise = Some(true);
+        p.auto_atomise_mode = Some(AutoAtomiseMode::Synchronous);
+        assert_eq!(
+            p.effective_auto_atomise_mode(),
+            AutoAtomiseMode::Synchronous
+        );
+    }
+
+    #[test]
+    fn effective_auto_atomise_mode_explicit_deferred_when_flag_absent() {
+        let mut p = GovernancePolicy::default();
+        p.auto_atomise_mode = Some(AutoAtomiseMode::Deferred);
+        // Explicit mode wins regardless of the boolean flag.
+        assert_eq!(p.effective_auto_atomise_mode(), AutoAtomiseMode::Deferred);
+    }
+
+    #[test]
+    fn auto_atomise_mode_as_str_labels() {
+        assert_eq!(AutoAtomiseMode::Off.as_str(), "off");
+        assert_eq!(AutoAtomiseMode::Deferred.as_str(), "deferred");
+        assert_eq!(AutoAtomiseMode::Synchronous.as_str(), "synchronous");
+    }
+
+    #[test]
+    fn effective_legacy_per_pair_classifier_defaults_false() {
+        let p = GovernancePolicy::default();
+        assert!(!p.effective_legacy_per_pair_classifier());
+    }
+
+    #[test]
+    fn effective_legacy_per_pair_classifier_returns_override() {
+        let mut p = GovernancePolicy::default();
+        p.legacy_per_pair_classifier = Some(true);
+        assert!(p.effective_legacy_per_pair_classifier());
+    }
+
+    #[test]
+    fn effective_synthesis_failure_mode_defaults_to_fall_through() {
+        let p = GovernancePolicy::default();
+        assert_eq!(
+            p.effective_synthesis_failure_mode(),
+            SynthesisFailureMode::FallThrough
+        );
+    }
+
+    #[test]
+    fn effective_synthesis_failure_mode_returns_override() {
+        let mut p = GovernancePolicy::default();
+        p.synthesis_failure_mode = Some(SynthesisFailureMode::BlockWrite);
+        assert_eq!(
+            p.effective_synthesis_failure_mode(),
+            SynthesisFailureMode::BlockWrite
+        );
+    }
+
+    #[test]
+    fn synthesis_failure_mode_as_str_labels() {
+        assert_eq!(SynthesisFailureMode::FallThrough.as_str(), "fall_through");
+        assert_eq!(SynthesisFailureMode::BlockWrite.as_str(), "block_write");
+    }
+
+    #[test]
+    fn synthesis_failure_mode_default_is_fall_through() {
+        let v: SynthesisFailureMode = SynthesisFailureMode::default();
+        assert_eq!(v, SynthesisFailureMode::FallThrough);
+    }
+
+    #[test]
+    fn effective_synthesis_max_deletes_per_call_defaults_to_one() {
+        let p = GovernancePolicy::default();
+        assert_eq!(p.effective_synthesis_max_deletes_per_call(), 1);
+    }
+
+    #[test]
+    fn effective_synthesis_max_deletes_per_call_returns_override() {
+        let mut p = GovernancePolicy::default();
+        p.synthesis_max_deletes_per_call = Some(8);
+        assert_eq!(p.effective_synthesis_max_deletes_per_call(), 8);
+    }
+
+    #[test]
+    fn effective_synthesis_max_candidate_chars_defaults_to_1500() {
+        let p = GovernancePolicy::default();
+        assert_eq!(p.effective_synthesis_max_candidate_chars(), 1500);
+    }
+
+    #[test]
+    fn effective_synthesis_max_candidate_chars_returns_override() {
+        let mut p = GovernancePolicy::default();
+        p.synthesis_max_candidate_chars = Some(2_500);
+        assert_eq!(p.effective_synthesis_max_candidate_chars(), 2_500);
+    }
+
+    #[test]
+    fn effective_multistep_max_content_chars_defaults_to_1500() {
+        let p = GovernancePolicy::default();
+        assert_eq!(p.effective_multistep_max_content_chars(), 1500);
+    }
+
+    #[test]
+    fn effective_multistep_max_content_chars_returns_override() {
+        let mut p = GovernancePolicy::default();
+        p.multistep_max_content_chars = Some(3_000);
+        assert_eq!(p.effective_multistep_max_content_chars(), 3_000);
+    }
+
+    #[test]
+    fn memory_kind_auto_classify_default_is_off() {
+        let v: MemoryKindAutoClassify = MemoryKindAutoClassify::default();
+        assert_eq!(v, MemoryKindAutoClassify::Off);
+    }
+
+    #[test]
+    fn memory_kind_auto_classify_serde_round_trip() {
+        for v in [
+            MemoryKindAutoClassify::Off,
+            MemoryKindAutoClassify::RegexOnly,
+            MemoryKindAutoClassify::RegexThenLlm,
+        ] {
+            let s = serde_json::to_value(v).unwrap();
+            let back: MemoryKindAutoClassify = serde_json::from_value(s).unwrap();
+            assert_eq!(back, v);
+        }
+    }
+
+    #[test]
+    fn auto_atomise_mode_serde_round_trip() {
+        for v in [
+            AutoAtomiseMode::Off,
+            AutoAtomiseMode::Deferred,
+            AutoAtomiseMode::Synchronous,
+        ] {
+            let s = serde_json::to_value(v).unwrap();
+            let back: AutoAtomiseMode = serde_json::from_value(s).unwrap();
+            assert_eq!(back, v);
+        }
+    }
+
+    #[test]
+    fn synthesis_failure_mode_serde_round_trip() {
+        for v in [
+            SynthesisFailureMode::FallThrough,
+            SynthesisFailureMode::BlockWrite,
+        ] {
+            let s = serde_json::to_value(v).unwrap();
+            let back: SynthesisFailureMode = serde_json::from_value(s).unwrap();
+            assert_eq!(back, v);
+        }
+    }
+
+    #[test]
+    fn governance_policy_serde_round_trip_with_all_v070_fields() {
+        let mut p = GovernancePolicy::default();
+        p.max_reflection_depth = Some(5);
+        p.auto_atomise = Some(true);
+        p.auto_atomise_mode = Some(AutoAtomiseMode::Synchronous);
+        p.auto_atomise_threshold_cl100k = Some(750);
+        p.auto_atomise_max_atom_tokens = Some(150);
+        p.auto_atomise_max_retries = Some(2);
+        p.auto_persona_trigger_every_n_memories = Some(10);
+        p.auto_export_personas_to_filesystem = Some(true);
+        p.auto_export_reflections_to_filesystem = Some(true);
+        p.legacy_per_pair_classifier = Some(false);
+        p.auto_classify_kind = Some(MemoryKindAutoClassify::RegexOnly);
+        p.synthesis_failure_mode = Some(SynthesisFailureMode::BlockWrite);
+        p.synthesis_max_deletes_per_call = Some(4);
+        p.synthesis_max_candidate_chars = Some(2_000);
+        p.multistep_max_content_chars = Some(3_000);
+        let v = serde_json::to_value(&p).unwrap();
+        let back: GovernancePolicy = serde_json::from_value(v).unwrap();
+        assert_eq!(back.max_reflection_depth, Some(5));
+        assert_eq!(back.auto_atomise_mode, Some(AutoAtomiseMode::Synchronous));
+        assert_eq!(back.auto_atomise_threshold_cl100k, Some(750));
+        assert_eq!(back.auto_persona_trigger_every_n_memories, Some(10));
+        assert_eq!(
+            back.synthesis_failure_mode,
+            Some(SynthesisFailureMode::BlockWrite)
+        );
+        assert_eq!(back.synthesis_max_deletes_per_call, Some(4));
+        assert_eq!(back.multistep_max_content_chars, Some(3_000));
+    }
+
+    #[test]
+    fn from_metadata_returns_none_when_governance_key_absent() {
+        let meta = json!({"unrelated": 42});
+        assert!(GovernancePolicy::from_metadata(&meta).is_none());
+    }
+
+    #[test]
+    fn from_metadata_returns_none_when_governance_key_is_null() {
+        let meta = json!({"governance": null});
+        assert!(GovernancePolicy::from_metadata(&meta).is_none());
+    }
+
+    #[test]
+    fn from_metadata_parses_governance_blob() {
+        let meta = json!({
+            "governance": {
+                "write": "owner",
+                "max_reflection_depth": 4,
+            },
+        });
+        let parsed = GovernancePolicy::from_metadata(&meta).unwrap().unwrap();
+        assert_eq!(parsed.write, GovernanceLevel::Owner);
+        assert_eq!(parsed.max_reflection_depth, Some(4));
+    }
+
+    #[test]
+    fn from_metadata_propagates_parse_error_for_malformed_payload() {
+        let meta = json!({"governance": {"write": 42}});
+        let res = GovernancePolicy::from_metadata(&meta).unwrap();
+        assert!(res.is_err());
+    }
+}

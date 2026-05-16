@@ -1880,4 +1880,201 @@ mod tests {
         let err = validate_id("has\0null").unwrap_err();
         assert!(format!("{err}").contains("invalid characters"));
     }
+
+    // -----------------------------------------------------------------
+    // v0.7-polish coverage recovery (issue #767) — Form 4 validator
+    // reject paths for validate_citation / validate_source_uri /
+    // validate_source_span / validate_source_span_for_body /
+    // validate_citations.
+    // -----------------------------------------------------------------
+
+    fn good_citation() -> crate::models::Citation {
+        crate::models::Citation {
+            uri: "doc:abc".to_string(),
+            accessed_at: "2026-01-01T00:00:00Z".to_string(),
+            hash: None,
+            span: None,
+        }
+    }
+
+    #[test]
+    fn validate_source_uri_rejects_empty_string() {
+        let err = validate_source_uri("").unwrap_err();
+        assert!(format!("{err}").contains("cannot be empty"));
+    }
+
+    #[test]
+    fn validate_source_uri_rejects_whitespace_only() {
+        let err = validate_source_uri("   \t  ").unwrap_err();
+        assert!(format!("{err}").contains("cannot be empty"));
+    }
+
+    #[test]
+    fn validate_source_uri_rejects_bare_string_without_scheme() {
+        let err = validate_source_uri("example.com/path").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("must start with"), "got: {msg}");
+        assert!(msg.contains("uri:") || msg.contains("doc:") || msg.contains("file:"));
+    }
+
+    #[test]
+    fn validate_source_uri_rejects_control_chars() {
+        let err = validate_source_uri("uri:has\x07ctrl").unwrap_err();
+        assert!(format!("{err}").contains("invalid control characters"));
+    }
+
+    #[test]
+    fn validate_source_uri_rejects_oversize_input() {
+        let big = format!("uri:{}", "a".repeat(8_000));
+        let err = validate_source_uri(&big).unwrap_err();
+        assert!(format!("{err}").contains("max length"));
+    }
+
+    #[test]
+    fn validate_source_uri_rejects_scheme_with_empty_payload() {
+        let err = validate_source_uri("doc:").unwrap_err();
+        assert!(format!("{err}").contains("empty payload"));
+        let err = validate_source_uri("file:   ").unwrap_err();
+        assert!(format!("{err}").contains("empty payload"));
+    }
+
+    #[test]
+    fn validate_source_uri_accepts_three_known_schemes() {
+        assert!(validate_source_uri("uri:https://example.com").is_ok());
+        assert!(validate_source_uri("doc:abc-123").is_ok());
+        assert!(validate_source_uri("file:/etc/hosts").is_ok());
+    }
+
+    #[test]
+    fn validate_source_span_rejects_end_lt_start() {
+        let span = crate::models::SourceSpan { start: 10, end: 5 };
+        let err = validate_source_span(&span).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("start") && msg.contains("end"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_source_span_rejects_end_eq_start() {
+        // Half-open interval requires strict start < end.
+        let span = crate::models::SourceSpan { start: 4, end: 4 };
+        assert!(validate_source_span(&span).is_err());
+    }
+
+    #[test]
+    fn validate_source_span_accepts_valid_range() {
+        let span = crate::models::SourceSpan { start: 0, end: 10 };
+        assert!(validate_source_span(&span).is_ok());
+    }
+
+    #[test]
+    fn validate_source_span_for_body_rejects_end_gt_body_len() {
+        let body = "hello";
+        let span = crate::models::SourceSpan { start: 0, end: 10 };
+        let err = validate_source_span_for_body(&span, body).unwrap_err();
+        assert!(format!("{err}").contains("exceeds body length"));
+    }
+
+    #[test]
+    fn validate_source_span_for_body_rejects_non_char_boundary_start() {
+        // "é" is two bytes in UTF-8 (0xC3 0xA9); offset 1 falls
+        // mid-codepoint.
+        let body = "é-pattern";
+        let span = crate::models::SourceSpan { start: 1, end: 3 };
+        let err = validate_source_span_for_body(&span, body).unwrap_err();
+        assert!(format!("{err}").contains("char boundary"));
+    }
+
+    #[test]
+    fn validate_source_span_for_body_rejects_non_char_boundary_end() {
+        let body = "aéb";
+        let span = crate::models::SourceSpan { start: 0, end: 2 };
+        let err = validate_source_span_for_body(&span, body).unwrap_err();
+        assert!(format!("{err}").contains("char boundary"));
+    }
+
+    #[test]
+    fn validate_source_span_for_body_accepts_full_body_slice() {
+        let body = "hello world";
+        let span = crate::models::SourceSpan {
+            start: 0,
+            end: body.len(),
+        };
+        assert!(validate_source_span_for_body(&span, body).is_ok());
+    }
+
+    #[test]
+    fn validate_citation_rejects_bad_uri() {
+        let mut c = good_citation();
+        c.uri = "bare-string-no-scheme".to_string();
+        let err = validate_citation(&c).unwrap_err();
+        assert!(format!("{err}").contains("must start with"));
+    }
+
+    #[test]
+    fn validate_citation_rejects_bad_accessed_at() {
+        let mut c = good_citation();
+        c.accessed_at = "not-a-date".to_string();
+        let err = validate_citation(&c).unwrap_err();
+        assert!(format!("{err}").contains("RFC3339"));
+    }
+
+    #[test]
+    fn validate_citation_rejects_short_hash() {
+        let mut c = good_citation();
+        c.hash = Some("deadbeef".to_string()); // 8 chars, not 64
+        let err = validate_citation(&c).unwrap_err();
+        assert!(format!("{err}").contains("64 hex"));
+    }
+
+    #[test]
+    fn validate_citation_rejects_non_hex_hash() {
+        let mut c = good_citation();
+        // Right length, wrong alphabet (contains 'z').
+        c.hash = Some(format!("{}z", "a".repeat(63)));
+        let err = validate_citation(&c).unwrap_err();
+        assert!(format!("{err}").contains("64 hex"));
+    }
+
+    #[test]
+    fn validate_citation_accepts_valid_hash() {
+        let mut c = good_citation();
+        c.hash = Some("a".repeat(64));
+        assert!(validate_citation(&c).is_ok());
+    }
+
+    #[test]
+    fn validate_citation_propagates_span_rejection() {
+        let mut c = good_citation();
+        c.span = Some(crate::models::SourceSpan { start: 5, end: 1 });
+        let err = validate_citation(&c).unwrap_err();
+        assert!(format!("{err}").contains("source_span"));
+    }
+
+    #[test]
+    fn validate_citation_accepts_minimal_valid_form() {
+        assert!(validate_citation(&good_citation()).is_ok());
+    }
+
+    #[test]
+    fn validate_citations_rejects_count_over_cap() {
+        let many = vec![good_citation(); 65];
+        let err = validate_citations(&many).unwrap_err();
+        assert!(format!("{err}").contains("too many"));
+    }
+
+    #[test]
+    fn validate_citations_propagates_first_invalid_entry() {
+        let mut bad = good_citation();
+        bad.uri = "bogus".to_string();
+        let v = vec![good_citation(), bad];
+        let err = validate_citations(&v).unwrap_err();
+        assert!(format!("{err}").contains("must start with"));
+    }
+
+    #[test]
+    fn validate_citations_accepts_empty_and_full_under_cap() {
+        assert!(validate_citations(&[]).is_ok());
+        let v = vec![good_citation(); 64];
+        assert!(validate_citations(&v).is_ok());
+    }
 }

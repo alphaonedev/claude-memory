@@ -568,6 +568,10 @@ fn synthesis_delete_verdict_consults_k9_per_candidate() {
         set_active_permission_rules,
     };
 
+    let _g = k9_synthesis_rules_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
     let (conn, db_path) = open_db();
     let ns = "ns-k9-recheck";
     // Bump the per-call delete cap so the 2-delete batch is permitted
@@ -1052,4 +1056,157 @@ fn synthesis_prompt_format_reuse_byte_identical() {
         got.len(),
         want.len(),
     );
+}
+
+// -----------------------------------------------------------------
+// v0.7-polish coverage recovery (issue #767) — store.rs synthesis
+// path edge cases: update verdict without merged_content, update +
+// delete combined in same batch, update with embedder (re-embed path),
+// update verdict referencing a non-existent candidate (the
+// "target not found" warning branch).
+// -----------------------------------------------------------------
+
+/// Process-wide mutex serialising K9 permission-rule mutation across
+/// the synthesis tests below (both the existing Deny test and the new
+/// Ask test mutate `ACTIVE_PERMISSION_RULES`). Without the mutex, a
+/// concurrent test reading the registry mid-mutation could observe a
+/// transient state.
+fn k9_synthesis_rules_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// SEC-1 — K9 Ask rule on synthesis delete. The Ask arm at lines
+/// 556-572 of `src/mcp/tools/store.rs` is symmetric to the Deny arm
+/// — both treat the delete as suppressed because there's no operator
+/// UI to surface the prompt in the synthesis path. The candidate is
+/// NOT deleted.
+#[test]
+fn synthesis_delete_verdict_k9_ask_skips_candidate() {
+    use ai_memory::permissions::{
+        PermissionRule, RuleDecision, clear_active_permission_rules_for_test,
+        set_active_permission_rules,
+    };
+
+    let _g = k9_synthesis_rules_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let (conn, db_path) = open_db();
+    let ns = "ns-k9-ask-synthesis";
+    install_synthesis_policy(&conn, ns, None, Some(5), None);
+
+    let to_delete = seed_existing(&conn, "kubernetes deploy notes ask", "body ask", ns);
+
+    clear_active_permission_rules_for_test();
+    set_active_permission_rules(vec![PermissionRule {
+        namespace_pattern: ns.to_string(),
+        op: "memory_delete".to_string(),
+        agent_pattern: "*".to_string(),
+        decision: RuleDecision::Ask,
+        reason: Some("operator must approve mass deletes".into()),
+    }]);
+
+    let verdict = json!({
+        "verdicts": [
+            {"candidate_id": to_delete, "verb": "delete"}
+        ]
+    });
+    let server = shared_mock_for_synthesis(verdict);
+    let uri = server.uri();
+    let llm = OllamaClient::new_with_url(&uri, "test-model").expect("mock client");
+
+    let _resp = run_store(
+        &conn,
+        &db_path,
+        &llm,
+        json!({
+            "title": "kubernetes ask-path rollout",
+            "content": BASE_CONTENT,
+            "namespace": ns,
+            "on_conflict": "version",
+        }),
+    )
+    .expect("store ok under K9 ask");
+
+    // The candidate is preserved — Ask on synthesis delete treated as deny.
+    let exists: bool = conn
+        .query_row("SELECT 1 FROM memories WHERE id = ?1", [&to_delete], |_| {
+            Ok(true)
+        })
+        .unwrap_or(false);
+    assert!(
+        exists,
+        "K9 Ask on synthesis delete must NOT delete the candidate"
+    );
+
+    clear_active_permission_rules_for_test();
+}
+
+/// COR-5 + SEC-1 — combined update + delete batch. The PRIMARY update
+/// is honoured AND the delete is applied (skipping the primary id).
+/// Exercises the synthesis_deletes loop inside the update path
+/// (lines 670-679).
+#[test]
+fn synthesis_update_plus_delete_combined_applies_both() {
+    let (conn, db_path) = open_db();
+    let ns = "ns-update-plus-delete";
+    let id_update = seed_existing(
+        &conn,
+        "kubernetes deployment update",
+        "stale notes for update",
+        ns,
+    );
+    let id_delete = seed_existing(&conn, "kubernetes obsolete notes", "stale to delete", ns);
+
+    let verdict = json!({
+        "verdicts": [
+            {
+                "candidate_id": id_update,
+                "verb": "update",
+                "merged_content": "merged-after-batch"
+            },
+            {
+                "candidate_id": id_delete,
+                "verb": "delete"
+            }
+        ]
+    });
+    let server = shared_mock_for_synthesis(verdict);
+    let uri = server.uri();
+    let llm = OllamaClient::new_with_url(&uri, "test-model").expect("mock client");
+
+    let resp = run_store(
+        &conn,
+        &db_path,
+        &llm,
+        json!({
+            "title": "kubernetes deployment update v2",
+            "content": BASE_CONTENT,
+            "namespace": ns,
+            "on_conflict": "version",
+        }),
+    )
+    .expect("ok");
+
+    // Primary update wins as the response id.
+    assert_eq!(resp["id"].as_str(), Some(id_update.as_str()));
+    // The deleted candidate is gone.
+    let n_delete: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE id = ?1",
+            [&id_delete],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n_delete, 0, "delete verdict honoured in update batch");
+    // The updated candidate carries the merged body.
+    let body: String = conn
+        .query_row(
+            "SELECT content FROM memories WHERE id = ?1",
+            [&id_update],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(body, "merged-after-batch");
 }
