@@ -212,6 +212,12 @@ fn build_capabilities_overlay(
     caps.hnsw.evictions_total = crate::hnsw::index_evictions_total();
     caps.hnsw.evicted_recently = crate::hnsw::evicted_recently(60);
 
+    // v0.7-polish SEC-15 / COR-11 (issue #780) — mirror the
+    // process-wide auto-export spawn-failure counter onto the
+    // capabilities surface so operators see otherwise-silent
+    // detached-worker failures without scraping /metrics directly.
+    caps.hooks.auto_export_spawn_failed_total = crate::metrics::auto_export_spawn_failed_count();
+
     // --- Live DB-count overlays ---
     if let Some(c) = conn {
         if let Ok(n) = db::count_active_governance_rules(c) {

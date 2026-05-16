@@ -722,6 +722,22 @@ pub struct CapabilityHooks {
     /// the 22nd + 23rd; L1-7 adds the 24th + 25th → total **25**.
     #[serde(default = "default_hook_events_count")]
     pub hook_events_count: usize,
+    /// v0.7-polish SEC-15 / COR-11 (issue #780): mirror of the
+    /// process-wide
+    /// `crate::metrics::auto_export_spawn_failed_total` counter.
+    /// Non-zero means at least one `post_reflect.auto_export` detached
+    /// worker panicked or returned `Err` since process start — the
+    /// reflection is committed in the DB but its on-disk markdown/json
+    /// artefact did NOT land. Operators alert on a non-zero value
+    /// without scraping `/metrics` directly.
+    ///
+    /// `skip_serializing_if = is_zero_u64` keeps healthy daemons'
+    /// capabilities responses byte-identical to pre-#780 — only
+    /// daemons that have actually hit the failure path see the field
+    /// on the wire. The MCP/HTTP capabilities builder overlays the
+    /// live value at response time.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub auto_export_spawn_failed_total: u64,
 }
 
 /// Compile-time count of `HookEvent` variants.  Updated here when new
@@ -739,6 +755,7 @@ impl Default for CapabilityHooks {
             registered_count: 0,
             webhook_events: default_webhook_events(),
             hook_events_count: HOOK_EVENTS_COUNT,
+            auto_export_spawn_failed_total: 0,
         }
     }
 }

@@ -20,18 +20,40 @@
 //!    NEVER propagated back to the caller. The reflection is already
 //!    committed; making the operator chase a transient disk error is
 //!    worse than a missed file.
+//!    *v0.7-polish SEC-15 / COR-11 (issue #780):* failure is also
+//!    counted via [`crate::metrics::record_auto_export_spawn_failed`]
+//!    and mirrored onto the capabilities-v3
+//!    `hooks.auto_export_spawn_failed_total` field so operators can
+//!    alert on the otherwise-silent disk-write loss without scraping
+//!    `/metrics` directly. The detached worker closure is wrapped in
+//!    `catch_unwind` so a panic inside the closure (e.g., a poisoned
+//!    DB handle or a corrupt JSON column) is converted to the same
+//!    counter+warn path rather than being swallowed by the runtime's
+//!    detached-thread default.
 //! 3. **Capability isolation.** This code runs inside the substrate
 //!    process (CLI, MCP, HTTP daemon). It is gated by the namespace
 //!    policy — an operator who has not explicitly opted in to
 //!    `auto_export_reflections_to_filesystem` will see no disk writes
 //!    from this module ever.
 
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::cli::commands::export_reflections::{self, ExportFormat};
 use crate::db;
 use crate::storage::reflect::{ReflectHooks, ReflectOutcome};
+
+/// v0.7-polish SEC-15 / COR-11 (issue #780) — test-only panic-injection
+/// env-var. When set to `1` (any case), the next worker spawn panics
+/// inside its closure body so the panic-recovery path
+/// (`catch_unwind` → counter increment → `tracing::warn!`) can be
+/// exercised by an in-process integration test without an unsafe
+/// runtime hack. Production binaries never read this env-var
+/// (`debug_assertions`-gated read-site below), so the hot path stays
+/// uninstrumented in release builds.
+#[cfg(any(test, debug_assertions))]
+const AUTO_EXPORT_INJECT_PANIC_ENV: &str = "AI_MEMORY_AUTO_EXPORT_INJECT_PANIC";
 
 /// Static configuration for the auto-export hook.
 ///
@@ -92,15 +114,66 @@ pub fn build_post_reflect_hook(
         let namespace = outcome.namespace.clone();
         // Detached worker thread. Notify-class: any failure stays
         // inside this thread, never reaches the caller.
+        //
+        // v0.7-polish SEC-15 / COR-11 (issue #780): the closure body
+        // is wrapped in `catch_unwind` so a panic inside
+        // `run_auto_export` (poisoned DB handle, corrupt JSON column,
+        // an `unwrap` deep in the export-rendering chain, etc.) is
+        // caught and converted to the same counter+warn path that an
+        // `Err` return takes. Without this, a panic would silently
+        // unwind the detached thread — the reflection would be
+        // committed in the DB but no on-disk artefact would land and
+        // no operator-visible signal would fire.
         std::thread::spawn(move || {
-            if let Err(e) = run_auto_export(&dbp, &outcome_id, &namespace, &cfg) {
-                tracing::warn!(
-                    target: "post_reflect.auto_export",
-                    "auto-export of reflection {} (ns={}) failed: {}",
-                    outcome_id,
-                    namespace,
-                    e,
-                );
+            let outcome_id_for_log = outcome_id.clone();
+            let namespace_for_log = namespace.clone();
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                // v0.7-polish #780 — debug-only panic injection so the
+                // catch_unwind path is reachable from an in-process
+                // integration test. Release builds never read the
+                // env-var (cfg-gated below).
+                #[cfg(any(test, debug_assertions))]
+                {
+                    if std::env::var(AUTO_EXPORT_INJECT_PANIC_ENV)
+                        .ok()
+                        .is_some_and(|v| v == "1")
+                    {
+                        panic!("auto_export panic injected via {AUTO_EXPORT_INJECT_PANIC_ENV}=1");
+                    }
+                }
+                run_auto_export(&dbp, &outcome_id, &namespace, &cfg)
+            }));
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    crate::metrics::record_auto_export_spawn_failed();
+                    tracing::warn!(
+                        target: "post_reflect.auto_export",
+                        "auto-export of reflection {} (ns={}) failed: {}",
+                        outcome_id_for_log,
+                        namespace_for_log,
+                        e,
+                    );
+                }
+                Err(panic_payload) => {
+                    crate::metrics::record_auto_export_spawn_failed();
+                    let panic_msg = panic_payload
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| {
+                            panic_payload
+                                .downcast_ref::<&'static str>()
+                                .map(|s| (*s).to_string())
+                        })
+                        .unwrap_or_else(|| "<non-string panic payload>".to_string());
+                    tracing::warn!(
+                        target: "post_reflect.auto_export",
+                        "auto-export of reflection {} (ns={}) panicked: {}",
+                        outcome_id_for_log,
+                        namespace_for_log,
+                        panic_msg,
+                    );
+                }
             }
         });
     });
@@ -410,6 +483,85 @@ mod tests {
         // could still be running. We don't assert here; the file
         // existence is exercised by `run_auto_export_writes_md_when_policy_enabled`.
         let _ = outcome.id;
+    }
+
+    /// v0.7-polish SEC-15 / COR-11 (issue #780) — when the detached
+    /// `auto_export` worker panics, the `catch_unwind` wrapper must
+    /// (a) keep the panic from unwinding the runtime, (b) increment
+    /// `crate::metrics::auto_export_spawn_failed_total` so operators
+    /// see the loss, and (c) leave the reflect path itself unaffected
+    /// (it had already returned). The test induces the panic via the
+    /// debug-only `AI_MEMORY_AUTO_EXPORT_INJECT_PANIC=1` env-var hook
+    /// in the spawn closure, then polls the counter for the increment.
+    ///
+    /// Serialised via a process-wide mutex because the env-var is
+    /// process-global — if two tests in this module raced on it the
+    /// "off" test would see the injection. The mutex scope brackets
+    /// the env-var lifetime + the counter-advance wait so unrelated
+    /// tests (which never set the env-var) are not held up.
+    #[test]
+    fn auto_export_worker_panic_increments_spawn_failed_counter() {
+        use std::sync::Mutex;
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        // PoisonError is fine — we only care about exclusive access.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let (conn, dir, db_path) = fresh_db();
+        enable_auto_export_on_namespace(&conn, "panic-ns");
+        let src = seed_observation(&conn, "panic-ns");
+        let hooks = build_post_reflect_hook(
+            db_path.clone(),
+            AutoExportConfig {
+                out_dir: dir.path().join("out"),
+                format: ExportFormat::Markdown,
+            },
+        );
+        let input = crate::storage::reflect::ReflectInput {
+            source_ids: vec![src.clone()],
+            title: "rfl".into(),
+            content: "rfl body".into(),
+            namespace: Some("panic-ns".into()),
+            tier: Tier::Mid,
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "cli".into(),
+            agent_id: "ai:test".into(),
+            metadata: serde_json::json!({}),
+        };
+
+        let before = crate::metrics::auto_export_spawn_failed_count();
+        // SAFETY: env-var mutation is process-global; the ENV_LOCK
+        // mutex above serialises against any other test in this
+        // module that touches the same key. No other module sets it.
+        // SAFETY justification documented above; unsafe is required
+        // because `set_var` is `unsafe` on edition-2024.
+        unsafe {
+            std::env::set_var(AUTO_EXPORT_INJECT_PANIC_ENV, "1");
+        }
+        let _outcome = crate::storage::reflect::reflect_with_hooks(&conn, &input, &hooks).unwrap();
+
+        // Poll for the counter to advance. The worker is detached;
+        // its thread may not have run by the time reflect_with_hooks
+        // returns. Bound the wait at 5s — generous for any host.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut after = before;
+        while std::time::Instant::now() < deadline {
+            after = crate::metrics::auto_export_spawn_failed_count();
+            if after > before {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        // SAFETY: same as set_var above — protected by ENV_LOCK.
+        unsafe {
+            std::env::remove_var(AUTO_EXPORT_INJECT_PANIC_ENV);
+        }
+        assert!(
+            after > before,
+            "auto_export_spawn_failed_total did not advance after panic injection \
+             (before={before}, after={after})"
+        );
     }
 
     #[test]

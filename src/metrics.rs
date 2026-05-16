@@ -67,6 +67,16 @@ pub struct Metrics {
     /// column name (`citations` | `source_span` | `confidence_signals`
     /// | `metadata`).
     pub corrupt_provenance_rows_total: IntCounterVec,
+    /// v0.7-polish SEC-15 / COR-11 (issue #780): count of
+    /// `post_reflect.auto_export` detached worker invocations whose
+    /// outcome was a panic or a returned `Err`. Non-zero means an
+    /// operator-opted-in namespace had a reflection that did NOT
+    /// land on the filesystem and the failure would otherwise be
+    /// silent (the worker thread is detached; the reflection itself
+    /// already committed). The capabilities-v3 surface mirrors this
+    /// counter so operator dashboards can alert without scraping
+    /// `/metrics` directly.
+    pub auto_export_spawn_failed_total: IntCounter,
 }
 
 /// Lazily-built process-global metrics handle.
@@ -255,6 +265,18 @@ impl Metrics {
         )?;
         registry.register(Box::new(corrupt_provenance_rows_total.clone()))?;
 
+        // v0.7-polish SEC-15 / COR-11 (issue #780) — auto-export
+        // detached-worker failure observability.
+        let auto_export_spawn_failed_total = IntCounter::new(
+            "ai_memory_auto_export_spawn_failed_total",
+            "Detached post_reflect.auto_export worker invocations whose \
+             outcome was a panic or returned Err. Non-zero means at \
+             least one reflection was committed to the DB but its \
+             on-disk markdown/json artefact did not land — operators \
+             use this to alert on otherwise-silent disk-write failures.",
+        )?;
+        registry.register(Box::new(auto_export_spawn_failed_total.clone()))?;
+
         Ok(Self {
             registry,
             store_total,
@@ -274,6 +296,7 @@ impl Metrics {
             federation_fanout_retry_total,
             federation_partial_quorum_total,
             corrupt_provenance_rows_total,
+            auto_export_spawn_failed_total,
         })
     }
 }
@@ -288,6 +311,27 @@ pub fn record_corrupt_provenance(column: &str) {
         .corrupt_provenance_rows_total
         .with_label_values(&[column])
         .inc();
+}
+
+/// v0.7-polish SEC-15 / COR-11 (issue #780) — record one detached
+/// `auto_export` worker failure (panic OR returned `Err`). Pairs with
+/// a `tracing::warn!` at the call site so operators see the
+/// reflection id + failure mode. The counter is also mirrored onto the
+/// capabilities-v3 `hooks.auto_export_spawn_failed_total` field so
+/// dashboards that consume `memory_capabilities` (vs `/metrics`) see
+/// the same signal.
+pub fn record_auto_export_spawn_failed() {
+    registry().auto_export_spawn_failed_total.inc();
+}
+
+/// v0.7-polish SEC-15 / COR-11 (issue #780) — read the current value
+/// of the auto-export spawn-failure counter. Used by the
+/// capabilities-v3 builder to mirror the metric onto the
+/// `hooks.auto_export_spawn_failed_total` field without scraping
+/// `/metrics`.
+#[must_use]
+pub fn auto_export_spawn_failed_count() -> u64 {
+    registry().auto_export_spawn_failed_total.get()
 }
 
 /// Render the current registry state to the Prometheus text exposition
@@ -575,6 +619,7 @@ mod tests {
             .with_label_values(&["ok"])
             .inc();
         m.federation_partial_quorum_total.inc();
+        m.auto_export_spawn_failed_total.inc();
     }
 
     #[test]
@@ -593,6 +638,29 @@ mod tests {
         enc.encode(&b.registry.gather(), &mut buf_b).unwrap();
         assert!(String::from_utf8_lossy(&buf_a).contains("ai_memory_store_total"));
         assert!(String::from_utf8_lossy(&buf_b).contains("ai_memory_store_total"));
+    }
+
+    #[test]
+    fn record_auto_export_spawn_failed_increments_singleton() {
+        // v0.7-polish #780 — record_auto_export_spawn_failed() must
+        // monotonically advance the process-wide counter that the
+        // capabilities-v3 builder mirrors onto
+        // `hooks.auto_export_spawn_failed_total`.
+        let before = auto_export_spawn_failed_count();
+        record_auto_export_spawn_failed();
+        let after = auto_export_spawn_failed_count();
+        assert!(
+            after >= before + 1,
+            "auto_export_spawn_failed_total did not advance \
+             (before={before}, after={after})"
+        );
+        // The render text must mention the metric name so /metrics
+        // scrapers see it.
+        let text = render();
+        assert!(
+            text.contains("ai_memory_auto_export_spawn_failed_total"),
+            "/metrics output missing auto_export counter\n\n{text}"
+        );
     }
 
     #[test]
