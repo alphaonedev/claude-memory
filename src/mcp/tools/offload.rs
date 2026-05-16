@@ -66,14 +66,26 @@ pub fn handle_offload(
 }
 
 /// `memory_deref(ref_id)`.
-pub fn handle_deref(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+///
+/// SEC-4 (Cluster D, issue #767) — IDOR fix. The handler now requires
+/// the caller's authenticated `agent_id` and forwards it to
+/// [`ContextOffloader::deref`] which refuses with `NotFound` (leak-
+/// resistant) when the caller is not the row's stored owner. Mirrors
+/// the `handle_offload` signer-aware contract.
+pub fn handle_deref(
+    conn: &rusqlite::Connection,
+    params: &Value,
+    agent_id: &str,
+) -> Result<Value, String> {
     let ref_id = params
         .get("ref_id")
         .and_then(Value::as_str)
         .ok_or("ref_id is required")?;
 
     let off = ContextOffloader::new(conn, None, OffloadConfig::default());
-    let result = off.deref(ref_id).map_err(|e| e.to_string())?;
+    let result = off
+        .deref(ref_id, Some(agent_id))
+        .map_err(|e| e.to_string())?;
     Ok(json!({
         "ref_id": ref_id,
         "content": result.content,
@@ -102,7 +114,7 @@ mod tests {
     #[test]
     fn handle_deref_requires_ref_id() {
         let conn = fresh_conn();
-        let err = handle_deref(&conn, &json!({})).unwrap_err();
+        let err = handle_deref(&conn, &json!({}), "ai:alice").unwrap_err();
         assert!(err.contains("ref_id"));
     }
 
@@ -116,8 +128,30 @@ mod tests {
         )
         .expect("offload");
         let ref_id = off["ref_id"].as_str().expect("ref_id").to_string();
-        let back = handle_deref(&conn, &json!({"ref_id": ref_id})).expect("deref");
+        let back = handle_deref(&conn, &json!({"ref_id": ref_id}), "ai:alice").expect("deref");
         assert_eq!(back["content"].as_str(), Some("hello mcp"));
+    }
+
+    /// SEC-4 (Cluster D, issue #767) — MCP-level IDOR pin: bob cannot
+    /// deref a blob alice offloaded; the error must look like a
+    /// not-found rather than a permission error so probing cannot
+    /// enumerate ref_ids by message differentiation.
+    #[test]
+    fn handle_deref_refuses_cross_agent_caller_mcp_layer() {
+        let conn = fresh_conn();
+        let off = handle_offload(
+            &conn,
+            &json!({"content": "alice secret", "namespace": "mcp/test"}),
+            "ai:alice",
+        )
+        .expect("offload");
+        let ref_id = off["ref_id"].as_str().expect("ref_id").to_string();
+        let err = handle_deref(&conn, &json!({"ref_id": ref_id}), "ai:bob")
+            .expect_err("cross-agent deref must reject");
+        assert!(
+            err.contains("not found"),
+            "leak-resistant deref error must look like not-found, got: {err}"
+        );
     }
 
     #[test]

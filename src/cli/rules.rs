@@ -240,8 +240,31 @@ pub fn run(
             let signing_key = load_operator_signing_key_from_dir(&key_dir)?;
             // Validate matcher JSON shape now — better to refuse at
             // input time than on the next check call.
-            serde_json::from_str::<serde_json::Value>(&matcher)
+            let matcher_json: serde_json::Value = serde_json::from_str(&matcher)
                 .with_context(|| format!("rules add: matcher is not valid JSON: {matcher}"))?;
+            // SEC-12 / COR-10 (Cluster D, issue #767) — the bash
+            // matcher field is a LITERAL substring (despite the
+            // legacy `command_regex` field name). Reject regex
+            // metacharacters at CLI input time so an operator who
+            // pastes `rm\s+-rf` does not silently install a
+            // never-matching rule.
+            if let Some(val) = matcher_json
+                .get("command_substring")
+                .or_else(|| matcher_json.get("command_regex"))
+                .and_then(|v| v.as_str())
+            {
+                crate::governance::agent_action::validate_command_substring(val)
+                    .map_err(|e| anyhow::anyhow!("rules add: {e}"))?;
+                if matcher_json.get("command_regex").is_some()
+                    && matcher_json.get("command_substring").is_none()
+                {
+                    tracing::warn!(
+                        "rules add: matcher field `command_regex` is DEPRECATED — rename to \
+                         `command_substring` (the engine has always done literal substring \
+                         matching, not regex). See SEC-12 in the v0.7.0 cluster-D fix."
+                    );
+                }
+            }
             let created_at = chrono::Utc::now().timestamp();
             let agent_id = resolve_agent_id();
             let mut rule = Rule {
@@ -1400,7 +1423,9 @@ mod tests {
             action: RulesAction::Add {
                 id: "R-add-1".into(),
                 kind: "bash".into(),
-                matcher: r#"{"command_regex":"^rm -rf /"}"#.into(),
+                // SEC-12/COR-10: literal substring (engine has always done
+                // substring match, despite the legacy field name).
+                matcher: r#"{"command_substring":"rm -rf /"}"#.into(),
                 severity: "refuse".into(),
                 reason: "rm-rf is bad".into(),
                 namespace: "_global".into(),
@@ -1581,7 +1606,8 @@ mod tests {
             action: RulesAction::Add {
                 id: "R-toggle".into(),
                 kind: "bash".into(),
-                matcher: r#"{"command_regex":"^x"}"#.into(),
+                // SEC-12/COR-10: literal substring matcher.
+                matcher: r#"{"command_substring":"x"}"#.into(),
                 severity: "warn".into(),
                 reason: "toggle me".into(),
                 namespace: "_global".into(),
@@ -1718,7 +1744,8 @@ mod tests {
             action: RulesAction::Add {
                 id: "R-rm".into(),
                 kind: "bash".into(),
-                matcher: r#"{"command_regex":"^x"}"#.into(),
+                // SEC-12/COR-10: literal substring matcher.
+                matcher: r#"{"command_substring":"x"}"#.into(),
                 severity: "warn".into(),
                 reason: "rm me".into(),
                 namespace: "_global".into(),

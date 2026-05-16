@@ -1094,6 +1094,20 @@ pub struct CapabilityGovernance {
     pub rules_engine: String,
     pub enforced_actions: Vec<String>,
     pub bypass_impossibility_tests: u32,
+    /// v0.7.0 SEC-2 (Cluster D, issue #767) — `true` when an operator
+    /// pubkey is resolved (env var or `~/.config/ai-memory/operator.key.pub`)
+    /// AND therefore the L1-6 loader is in attest-enforcing mode (every
+    /// `enabled = 1` row MUST be operator-signed to fire). `false` when
+    /// the substrate is in pre-L1-6 / fail-OPEN compat mode — every
+    /// enabled rule passes through without signature verification.
+    ///
+    /// Clients that need to display the deployment's enforcement
+    /// posture (operator dashboard, MCP-inspect tool, capabilities
+    /// summary) can render this flag verbatim. Defaults to `false`
+    /// for envelopes serialised before SEC-2 to preserve wire
+    /// compatibility.
+    #[serde(default)]
+    pub l1_6_attest: bool,
 }
 
 /// v0.7.0 L1-6 — the canonical agent-external action kinds the
@@ -1128,6 +1142,11 @@ impl CapabilityGovernance {
                 .map(|s| (*s).to_string())
                 .collect(),
             bypass_impossibility_tests: GOVERNANCE_BYPASS_IMPOSSIBILITY_TESTS,
+            // SEC-2 — reflect the live pubkey-resolution state at
+            // envelope construction time. The pubkey lookup is
+            // filesystem + env; cheap relative to the rest of the
+            // capabilities-v3 build path.
+            l1_6_attest: crate::governance::rules_store::l1_6_attest_active(),
         }
     }
 }
@@ -2369,6 +2388,46 @@ pub struct AppConfig {
     /// the handler before the storage call; explicit args always win
     /// over the defaults.
     pub agents: Option<AgentsConfig>,
+    /// v0.7.0 SEC-2 (Cluster D, issue #767) — `[governance]` block.
+    /// Today exposes one knob: `require_operator_pubkey` (default
+    /// `false`). When `true`, daemon `serve` startup REFUSES to boot
+    /// if the `governance_rules` table contains any `enabled = 1`
+    /// rows AND no operator pubkey is resolved (env var or
+    /// `~/.config/ai-memory/operator.key.pub`). Closes the
+    /// fail-OPEN gap where a SQL-write gadget could install
+    /// `enabled = 1` rules that the pre-L1-6 loader would honour
+    /// without signature check. Default `false` preserves the
+    /// pre-cluster-D contract for the install-script deploy where
+    /// no operator pubkey is yet on disk.
+    pub governance: Option<GovernanceConfig>,
+}
+
+/// v0.7.0 SEC-2 (Cluster D, issue #767) — `[governance]` top-level
+/// block. Today exposes a single fail-closed knob; future governance
+/// knobs (e.g., signature-rotation policy timestamps, per-rule
+/// override timeouts) can stack here.
+///
+/// Wire format:
+/// ```toml
+/// [governance]
+/// require_operator_pubkey = true
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GovernanceConfig {
+    /// SEC-2 fail-closed switch. When `true`, the daemon refuses to
+    /// start if the `governance_rules` table contains any
+    /// `enabled = 1` row AND no operator pubkey is resolved. Default
+    /// `false` preserves the pre-cluster-D contract that the
+    /// substrate stays in pre-L1-6 mode (every enabled rule passes
+    /// through) until the operator activates L1-6 by placing the
+    /// pubkey on disk or setting `AI_MEMORY_OPERATOR_PUBKEY`.
+    ///
+    /// Operators running the install-script default deploy who want
+    /// strict enforcement BEFORE the operator pubkey lands set this
+    /// to `true` — the daemon will then surface a clear error
+    /// message naming the missing pubkey path.
+    #[serde(default)]
+    pub require_operator_pubkey: bool,
 }
 
 /// v0.7.0 (issue #518) — `[agents]` top-level block. Today only carries
@@ -4966,6 +5025,7 @@ legacy_scoring = false
             verify: Some(VerifyConfig::default()),
             mcp_federation_forward_url: Some(String::new()),
             agents: Some(AgentsConfig::default()),
+            governance: Some(GovernanceConfig::default()),
         };
 
         let serialised = toml::to_string(&cfg).expect("serialise AppConfig to TOML");
@@ -5008,6 +5068,7 @@ legacy_scoring = false
             "verify",
             "mcp_federation_forward_url",
             "agents",
+            "governance",
         ];
 
         for key in table.keys() {

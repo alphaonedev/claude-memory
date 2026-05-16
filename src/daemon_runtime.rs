@@ -2079,6 +2079,44 @@ pub async fn bootstrap_serve(
     let archive_on_gc = app_config.effective_archive_on_gc();
     let conn = db::open(db_path)?;
 
+    // v0.7.0 SEC-2 (Cluster D, issue #767) — fail-OPEN diagnostic + the
+    // operator-opt-in fail-CLOSED knob. When `governance_rules` has any
+    // `enabled = 1` row AND no operator pubkey is resolved, the L1-6
+    // loader honours every enabled row without signature verification
+    // (pre-L1-6 compat mode). A SQL-write gadget that mutates
+    // `governance_rules` can therefore install / flip rules without
+    // operator consent.
+    //
+    // Default: surface a once-per-process `tracing::error!` so the
+    // operator sees the fail-OPEN posture on every daemon start.
+    //
+    // Operator opt-in: `[governance] require_operator_pubkey = true`
+    // promotes the diagnostic to a hard refusal — `bootstrap_serve`
+    // returns an `anyhow::Error` and the daemon does NOT start. This
+    // is the right posture for hardened deployments that want strict
+    // enforcement BEFORE the pubkey lands.
+    let enabled_rule_count =
+        crate::governance::rules_store::count_enabled_rules(&conn).unwrap_or(0);
+    let pubkey_resolved = crate::governance::rules_store::resolve_operator_pubkey().is_some();
+    if enabled_rule_count > 0 && !pubkey_resolved {
+        crate::governance::rules_store::log_missing_operator_pubkey_once(enabled_rule_count);
+        if app_config
+            .governance
+            .as_ref()
+            .is_some_and(|g| g.require_operator_pubkey)
+        {
+            anyhow::bail!(
+                "SEC-2 fail-closed: `[governance] require_operator_pubkey = true` is set but \
+                 `governance_rules` contains {enabled_rule_count} enabled row(s) AND no \
+                 operator pubkey is resolved (AI_MEMORY_OPERATOR_PUBKEY unset AND \
+                 ~/.config/ai-memory/operator.key.pub absent). Refusing to start: a fail-OPEN \
+                 L1-6 loader would honour every enabled rule without signature verification. \
+                 Run `ai-memory rules keygen` + `ai-memory rules sign-seed` to activate L1-6, \
+                 or unset `require_operator_pubkey` to accept the pre-L1-6 posture."
+            );
+        }
+    }
+
     // v0.7.0 L1-6 Deliverable E (issue #691) — install the substrate
     // governance pre-write hook BEFORE any write paths come live. The
     // hook consults the operator-signed `governance_rules` table for

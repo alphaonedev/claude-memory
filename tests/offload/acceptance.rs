@@ -49,7 +49,7 @@ fn test_offload_deref_roundtrip() {
     assert!(r.ref_id.starts_with("ofl_"));
     assert_eq!(r.ref_id.len(), "ofl_".len() + 13);
 
-    let back = off.deref(&r.ref_id).expect("deref");
+    let back = off.deref(&r.ref_id, None).expect("deref");
     assert_eq!(back.content, content);
     assert_eq!(back.sha256, r.content_sha256);
     assert_eq!(back.stored_at, r.stored_at);
@@ -88,7 +88,7 @@ fn test_offload_signature_verification_on_deref() {
     .expect("tamper update");
 
     let err = off
-        .deref(&r.ref_id)
+        .deref(&r.ref_id, None)
         .expect_err("deref must refuse tampered blob");
     let downcast = err
         .downcast_ref::<OffloadError>()
@@ -150,10 +150,10 @@ fn test_offload_ttl_expiry() {
     let deleted = sweep_expired(&conn, now, 1000, Duration::ZERO).expect("sweep");
     assert_eq!(deleted, 2);
 
-    assert!(off.deref(&a.ref_id).is_err());
-    assert!(off.deref(&b.ref_id).is_err());
+    assert!(off.deref(&a.ref_id, None).is_err());
+    assert!(off.deref(&b.ref_id, None).is_err());
     assert!(
-        off.deref(&permanent.ref_id).is_ok(),
+        off.deref(&permanent.ref_id, None).is_ok(),
         "permanent (ttl=None) row must survive the sweep"
     );
 }
@@ -210,8 +210,14 @@ fn test_offload_namespace_isolation() {
 
     // Independent check that the substrate-level engine deref still
     // works after the UPSERT.
-    assert_eq!(off.deref(&a.ref_id).expect("a").content, "tenant-a payload");
-    assert_eq!(off.deref(&b.ref_id).expect("b").content, "tenant-b payload");
+    assert_eq!(
+        off.deref(&a.ref_id, None).expect("a").content,
+        "tenant-a payload"
+    );
+    assert_eq!(
+        off.deref(&b.ref_id, None).expect("b").content,
+        "tenant-b payload"
+    );
 }
 
 #[test]
@@ -256,7 +262,7 @@ fn test_offload_signed_events_trail() {
     let r = off
         .offload("audit-traced", "ns", None, "ai:alice")
         .expect("offload");
-    let _back = off.deref(&r.ref_id).expect("deref");
+    let _back = off.deref(&r.ref_id, None).expect("deref");
 
     let events = list_signed_events(&conn, Some("ai:alice"), 100, 0).expect("list signed events");
     let kinds: Vec<&str> = events.iter().map(|e| e.event_type.as_str()).collect();

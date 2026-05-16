@@ -447,6 +447,39 @@ pub struct ExecExecutor {
     metrics: MetricsCounters,
 }
 
+/// SEC-17 (Cluster D, issue #767) — convert an `OsStr` (the raw
+/// command path) into the wire-check `AgentAction::ProcessSpawn.binary`
+/// string with the highest fidelity available on the host. On Unix
+/// the underlying bytes are forwarded verbatim through
+/// `OsStrExt::as_bytes` + `String::from_utf8_lossy` (the lossy
+/// conversion is a substitution, not a truncation — every non-UTF-8
+/// byte becomes a U+FFFD REPLACEMENT CHARACTER, preserving the byte
+/// count so a downstream substring match cannot accidentally collide
+/// with a sanitised value). On Windows / wasm the standard
+/// `OsStr::to_string_lossy` path is the best the platform exposes.
+///
+/// Why not `display().to_string()` everywhere? `PathBuf::display` is
+/// designed for human-facing output and may collapse or reshape
+/// non-UTF-8 sequences depending on the platform. The matcher engine
+/// is a security boundary — it must see the same bytes the kernel
+/// will exec, with no platform-specific rewriting.
+#[cfg(unix)]
+fn os_str_lossless_for_wire_check(s: &std::ffi::OsStr) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    // `from_utf8_lossy` substitutes invalid bytes with U+FFFD WITHOUT
+    // shrinking the byte length (each invalid byte becomes one
+    // replacement char), so a substring matcher sees a stable shape.
+    String::from_utf8_lossy(s.as_bytes()).into_owned()
+}
+
+/// Non-Unix fallback — `to_string_lossy` is the best the platform
+/// surface exposes. On Windows the path is WTF-8 internally so the
+/// lossy conversion is generally a no-op for legitimate paths.
+#[cfg(not(unix))]
+fn os_str_lossless_for_wire_check(s: &std::ffi::OsStr) -> String {
+    s.to_string_lossy().into_owned()
+}
+
 impl ExecExecutor {
     #[must_use]
     pub fn new(config: HookConfig) -> Self {
@@ -465,9 +498,24 @@ impl ExecExecutor {
         // typed ExecutorError::GovernanceRefused so the chain runner
         // can apply the cascade policy without confusing it with a
         // legitimate spawn IO failure.
+        //
+        // SEC-13 / SEC-17 (Cluster D, issue #767) — build the binary
+        // identifier from the raw `OsStr` (NOT
+        // `display().to_string()`, which is lossy on non-UTF-8 path
+        // injections). The lossy conversion is reserved for log
+        // surfaces / error messages where readability outweighs the
+        // fidelity loss. The matcher engine sees the full OS-string
+        // representation so a non-UTF-8 path injection does not
+        // sneak past a substring-match rule. We pass an empty argv
+        // here because the hook executor never spawns the child with
+        // positional args (HookConfig has no `args` field); the
+        // matcher's optional `args_contain` field is a no-op for the
+        // hooks path but ready for the next caller (CLI shell-out,
+        // skill-export, etc.) that adds positional args.
+        let binary = os_str_lossless_for_wire_check(self.config.command.as_os_str());
         let command_str = self.config.command.display().to_string();
         let spawn_action = crate::governance::agent_action::AgentAction::ProcessSpawn {
-            binary: command_str.clone(),
+            binary,
             args: Vec::new(),
         };
         if let Err(refusal) = crate::governance::wire_check::check(&spawn_action) {

@@ -110,7 +110,11 @@ pub fn run_offload(db_path: &Path, args: &OffloadArgs, out: &mut CliOutput<'_>) 
 pub fn run_deref(db_path: &Path, args: &DerefArgs, out: &mut CliOutput<'_>) -> Result<()> {
     let conn = db::open(db_path).context("open db")?;
     let off = ContextOffloader::new(&conn, None, OffloadConfig::default());
-    let result = off.deref(&args.ref_id).context("deref failed")?;
+    // SEC-4 (Cluster D) — operator CLI is the trusted-direct-ops path
+    // (see CLAUDE.md §"Agent Identity"); pass `None` to BYPASS the
+    // per-agent ownership gate that the MCP handler enforces. The
+    // operator can deref any blob in the local DB.
+    let result = off.deref(&args.ref_id, None).context("deref failed")?;
     if let Some(path) = &args.out {
         std::fs::write(path, &result.content)
             .with_context(|| format!("write {}", path.display()))?;

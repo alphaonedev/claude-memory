@@ -6,7 +6,11 @@
 use crate::{db, validate};
 use serde_json::{Value, json};
 use std::path::Path;
-pub(super) fn handle_kg_invalidate(
+/// SEC-2 / COV-8 (Cluster D, issue #767) — `pub` so the integration
+/// test fleet can drive the handler directly. The function is still
+/// only registered as the MCP `memory_kg_invalidate` tool; visibility
+/// is the only thing that changed.
+pub fn handle_kg_invalidate(
     conn: &rusqlite::Connection,
     db_path: &Path,
     params: &Value,

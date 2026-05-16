@@ -258,13 +258,24 @@ impl Severity {
 ///
 /// Per-kind matcher shapes:
 ///
-/// | AgentAction          | Matcher JSON shape                                            |
-/// |----------------------|---------------------------------------------------------------|
-/// | `Bash`               | `{"command_regex":"..."}` — substring match on `command`      |
-/// | `FilesystemWrite`    | `{"glob":"/tmp/**"}` — tiny glob over `path`                  |
-/// | `NetworkRequest`     | `{"host":"evil.example.com"}` — exact host match              |
-/// | `ProcessSpawn`       | `{"binary":"cargo","disk_free_min_gib":20}` — binary + disk    |
-/// | `Custom`             | `{"kind":"<kind>"}` plus optional caller-specific fields      |
+/// | AgentAction          | Matcher JSON shape                                                      |
+/// |----------------------|-------------------------------------------------------------------------|
+/// | `Bash`               | `{"command_substring":"..."}` — literal substring match on `command`    |
+/// | `FilesystemWrite`    | `{"glob":"/tmp/**"}` — tiny glob over `path`                            |
+/// | `NetworkRequest`     | `{"host":"evil.example.com"}` — exact host match                        |
+/// | `ProcessSpawn`       | `{"binary":"cargo","disk_free_min_gib":20,"args_contain":"..."}` — binary + disk + optional argv substring |
+/// | `Custom`             | `{"kind":"<kind>"}` plus optional caller-specific fields                |
+///
+/// # Bash field naming (SEC-12 / COR-10, Cluster D, issue #767)
+///
+/// The substring-match field is `command_substring`. The legacy name
+/// `command_regex` is accepted as a SILENT alias for one ship cycle
+/// so existing operator configs continue to load — the engine never
+/// treated the value as a regex (always a literal substring). New
+/// configs MUST use `command_substring`. The CLI loader emits a
+/// deprecation warning when it sees the legacy name. See
+/// [`validate_command_substring`] for the regex-metacharacter
+/// rejection that the CLI add path enforces.
 ///
 /// Returns `false` on a kind/matcher mismatch (e.g. a `bash` rule
 /// against a `FilesystemWrite` action) — the caller pre-filters on
@@ -286,7 +297,7 @@ pub fn matcher_applies(rule: &Rule, action: &AgentAction) -> bool {
         AgentAction::Bash { command, .. } => match_bash(&matcher, command),
         AgentAction::FilesystemWrite { path, .. } => match_filesystem_write(&matcher, path),
         AgentAction::NetworkRequest { host, .. } => match_network_request(&matcher, host),
-        AgentAction::ProcessSpawn { binary, .. } => match_process_spawn(&matcher, binary),
+        AgentAction::ProcessSpawn { binary, args } => match_process_spawn(&matcher, binary, args),
         AgentAction::Custom {
             custom_kind,
             payload,
@@ -294,15 +305,64 @@ pub fn matcher_applies(rule: &Rule, action: &AgentAction) -> bool {
     }
 }
 
+/// SEC-12 (Cluster D, issue #767) — operator-facing validator for
+/// the `command_substring` matcher value. Rejects any regex
+/// metacharacter the field name (`command_regex` pre-rename) used to
+/// suggest the engine supported — `. * + ? [ ] ( ) ^ $ |`. The
+/// engine has always treated the value as a literal substring; the
+/// validator catches an operator who pastes a real regex expecting
+/// it to work and would otherwise silently produce a never-matching
+/// rule (e.g. `rm\s+-rf` is never a substring of `rm -rf /`).
+///
+/// Backslash is permitted (Windows paths, escape sequences in
+/// operator-authored shell snippets) but a backslash followed by a
+/// regex metacharacter is still flagged — the operator likely meant
+/// "literal `.`" expecting the engine to honour the escape, which it
+/// does not.
+///
+/// # Errors
+///
+/// Returns `Err(String)` describing the offending character (and
+/// position) for the operator-facing CLI message. The caller surfaces
+/// the error verbatim to stderr + exits non-zero.
+pub fn validate_command_substring(value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("command_substring must not be empty".to_string());
+    }
+    // Regex metacharacters the legacy `command_regex` name suggested
+    // the engine honoured. The engine has always done substring; the
+    // validator catches the operator misuse.
+    const FORBIDDEN: &[char] = &['.', '*', '+', '?', '[', ']', '(', ')', '^', '$', '|', '\\'];
+    if let Some(pos) = value.find(|c: char| FORBIDDEN.contains(&c)) {
+        let offending = value.as_bytes()[pos] as char;
+        return Err(format!(
+            "command_substring rejects regex metacharacter {offending:?} at byte {pos}: \
+             the matcher is a LITERAL substring match (despite the legacy `command_regex` \
+             field name). Quote the literal text you want to match, e.g. `\"rm -rf\"` \
+             rather than `\"rm\\s+-rf\"`. If you need true regex semantics, file an issue \
+             — the engine will gain a typed `command_regex` discriminator in a future ship."
+        ));
+    }
+    Ok(())
+}
+
 fn match_bash(matcher: &serde_json::Value, command: &str) -> bool {
-    let Some(needle) = matcher.get("command_regex").and_then(|v| v.as_str()) else {
+    // SEC-12 (Cluster D, issue #767) — accept the new canonical
+    // `command_substring` AND the legacy alias `command_regex` so
+    // existing operator configs continue to load through the ship
+    // cycle that renames the field. New configs MUST use
+    // `command_substring`; the CLI add path warns when it sees the
+    // legacy name.
+    let needle = matcher
+        .get("command_substring")
+        .or_else(|| matcher.get("command_regex"))
+        .and_then(|v| v.as_str());
+    let Some(needle) = needle else {
         return false;
     };
-    // We treat the `command_regex` field as a literal substring
-    // today — full regex would require pulling in the `regex` crate,
-    // which is fine but unnecessary for the seed rules. If a future
-    // rule wants regex, a `"command_regex_kind": "regex"` discriminator
-    // can switch the engine. Substring is the safe default.
+    // The matcher value is a LITERAL substring (never a regex —
+    // despite the legacy field name). The CLI add path validates
+    // operator-supplied values with [`validate_command_substring`].
     command.contains(needle)
 }
 
@@ -323,12 +383,23 @@ fn match_network_request(matcher: &serde_json::Value, host: &str) -> bool {
     target_host == host
 }
 
-fn match_process_spawn(matcher: &serde_json::Value, binary: &str) -> bool {
+fn match_process_spawn(matcher: &serde_json::Value, binary: &str, args: &[String]) -> bool {
     let Some(target_binary) = matcher.get("binary").and_then(|v| v.as_str()) else {
         return false;
     };
     if target_binary != binary {
         return false;
+    }
+    // SEC-13 (Cluster D, issue #767) — optional `args_contain`
+    // matcher. When present, the rule fires ONLY if the joined argv
+    // tail (space-separated, lossy String) contains the substring.
+    // Same literal-substring contract as the bash matcher — full
+    // regex is intentionally out of scope.
+    if let Some(needle) = matcher.get("args_contain").and_then(|v| v.as_str()) {
+        let joined = args.join(" ");
+        if !joined.contains(needle) {
+            return false;
+        }
     }
     // Optional `disk_free_min_gib`: refuse spawn when free disk on
     // the working volume drops below the threshold. The engine

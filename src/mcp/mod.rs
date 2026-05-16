@@ -487,6 +487,16 @@ pub mod tools {
     // through this re-export.
     pub use super::ingest_multistep::{IngestMultistepHandler, handle_ingest_multistep};
 
+    // v0.7.0 COV-8 (Cluster D, issue #767) — re-export the
+    // `memory_kg_invalidate` substrate handler so the K9
+    // governance-gate regression test
+    // (`tests/k9_kg_invalidate_governance_gate.rs`) can drive it
+    // directly. The handler stays read-only from the perspective of
+    // external callers; the surface change is test-visibility only.
+    pub mod kg_invalidate {
+        pub use super::super::kg_invalidate::handle_kg_invalidate;
+    }
+
     /// v0.7.x Form 1/2 acceptance tests need to drive the `memory_store`
     /// MCP write path from an integration test crate. Thin pass-through
     /// to the internal `handle_store` dispatch. Not part of the supported
@@ -1189,7 +1199,25 @@ fn handle_request(
                         Err(e) => Err(e.to_string()),
                     }
                 }
-                "memory_deref" => offload::handle_deref(conn, arguments),
+                "memory_deref" => {
+                    // SEC-4 (Cluster D, issue #767) — resolve caller's
+                    // authenticated agent_id so deref's ownership gate
+                    // can refuse cross-agent leaks (NotFound, leak-
+                    // resistant). Mirror the `memory_offload` shape.
+                    let explicit_agent_id = arguments
+                        .get("agent_id")
+                        .and_then(Value::as_str)
+                        .or_else(|| {
+                            arguments
+                                .get("metadata")
+                                .and_then(|m| m.get("agent_id"))
+                                .and_then(Value::as_str)
+                        });
+                    match crate::identity::resolve_agent_id(explicit_agent_id, mcp_client) {
+                        Ok(agent_id) => offload::handle_deref(conn, arguments, &agent_id),
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
                 // Ultrareview #349: unknown tool is a JSON-RPC 2.0
                 // "method not found" condition — return -32601, not
                 // an ok_response with `isError: true`. Clients that

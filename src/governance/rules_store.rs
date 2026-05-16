@@ -253,7 +253,13 @@ pub fn enforced_rule_passes(
 /// "no key" (the once-per-process diagnostic in
 /// [`log_missing_operator_pubkey_once`] surfaces the misconfig to the
 /// operator).
-fn resolve_operator_pubkey() -> Option<ed25519_dalek::VerifyingKey> {
+///
+/// Exposed `pub` so the daemon startup path
+/// (`bootstrap_serve`) can call this directly to enforce the SEC-2
+/// fail-closed posture (refuse to boot when `enabled = 1` rules are
+/// present but no pubkey is resolved).
+#[must_use]
+pub fn resolve_operator_pubkey() -> Option<ed25519_dalek::VerifyingKey> {
     use base64::Engine;
     let try_decode = |s: &str| -> Option<ed25519_dalek::VerifyingKey> {
         let trimmed = s.trim();
@@ -280,6 +286,75 @@ fn resolve_operator_pubkey() -> Option<ed25519_dalek::VerifyingKey> {
     let pub_path = base.join("ai-memory").join("operator.key.pub");
     let contents = std::fs::read_to_string(&pub_path).ok()?;
     try_decode(&contents)
+}
+
+/// v0.7.0 SEC-2 (Cluster D, issue #767) — count of `enabled = 1`
+/// rows in `governance_rules`. Used by the daemon startup path to
+/// decide whether to surface the fail-OPEN error
+/// (`tracing::error!`) and, when
+/// `[governance] require_operator_pubkey = true`, refuse to boot.
+///
+/// Returns `Ok(0)` when the table is empty or the migration that
+/// creates it has not yet run — the caller treats absent table as
+/// "no enabled rules" rather than a hard error so a cold-start
+/// daemon can complete its migration pass before the L1-6 audit
+/// runs.
+///
+/// # Errors
+///
+/// Propagates SQLite errors OTHER than the "no such table" case,
+/// which is mapped to `Ok(0)`.
+pub fn count_enabled_rules(conn: &Connection) -> Result<i64> {
+    let result = conn.query_row(
+        "SELECT COUNT(*) FROM governance_rules WHERE enabled = 1",
+        [],
+        |row| row.get::<_, i64>(0),
+    );
+    match result {
+        Ok(n) => Ok(n),
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+            if msg.contains("no such table") || msg.contains("does not exist") =>
+        {
+            Ok(0)
+        }
+        Err(rusqlite::Error::SqliteFailure(_, None)) => Ok(0),
+        Err(e) => Err(anyhow::Error::new(e).context("rules_store::count_enabled_rules")),
+    }
+}
+
+/// v0.7.0 SEC-2 (Cluster D, issue #767) — `true` when the substrate
+/// is in pre-L1-6 mode (no operator pubkey resolved). Exposed so the
+/// capabilities-v3 envelope can surface `l1_6_attest: false` without
+/// re-decoding the pubkey on every call.
+#[must_use]
+pub fn l1_6_attest_active() -> bool {
+    resolve_operator_pubkey().is_some()
+}
+
+/// v0.7.0 SEC-2 (Cluster D, issue #767) — once-per-process diagnostic
+/// surfaced from the daemon startup path when the substrate is in
+/// the fail-OPEN posture (any `enabled = 1` row exists but no
+/// operator pubkey is resolved). Idempotent across repeated calls;
+/// re-invocation from a test harness (or a `bootstrap_serve` reuse)
+/// stays silent on the second+ trip.
+pub fn log_missing_operator_pubkey_once(enabled_rule_count: i64) {
+    use std::sync::OnceLock;
+    static LOGGED: OnceLock<()> = OnceLock::new();
+    if LOGGED.set(()).is_err() {
+        return;
+    }
+    tracing::error!(
+        enabled_rule_count,
+        "SEC-2: governance_rules contains {enabled_rule_count} enabled row(s) but no operator \
+         pubkey is resolved (AI_MEMORY_OPERATOR_PUBKEY unset AND \
+         ~/.config/ai-memory/operator.key.pub absent). Substrate is in FAIL-OPEN posture: every \
+         enabled rule passes through without signature verification, so a SQL-write gadget that \
+         can mutate `governance_rules` can install or flip rules without operator consent. \
+         Activate L1-6 by either (a) running `ai-memory rules keygen` + `ai-memory rules \
+         sign-seed` to place an operator key + sign the existing rows, or (b) setting `[governance] \
+         require_operator_pubkey = true` in config.toml to refuse boot until the pubkey is in \
+         place."
+    );
 }
 
 /// Remove a rule by id. Returns `true` when a row was deleted,

@@ -285,14 +285,28 @@ impl<'a> ContextOffloader<'a> {
 
     /// Dereference a `ref_id` and return the original content.
     ///
+    /// # IDOR (SEC-4, Cluster D, issue #767)
+    ///
+    /// `caller_agent_id` is the **authenticated** identity of the
+    /// caller (resolved via [`crate::identity::resolve_agent_id`]
+    /// upstream). The stored row's `agent_id` is consulted as the
+    /// owner of the blob; when the caller is not the owner, this
+    /// function returns [`OffloadError::NotFound`] (leak-resistant
+    /// — does NOT reveal the blob exists). A future K9 cross-agent
+    /// grant check can layer on top of this; pass `None` to BYPASS
+    /// the ownership gate (substrate-internal sweepers, integrity
+    /// audits, operator dump tools — none of which originate from
+    /// an authenticated agent context).
+    ///
     /// # Errors
     ///
-    /// - [`OffloadError::NotFound`] when `ref_id` has no row.
+    /// - [`OffloadError::NotFound`] when `ref_id` has no row OR
+    ///   when the caller is not the stored owner (leak-resistant).
     /// - [`OffloadError::IntegrityFailed`] when the decompressed
     ///   content's SHA-256 disagrees with the stored hash (tamper).
     /// - [`OffloadError::SignatureFailed`] when a signer was provided
     ///   and the stored Ed25519 signature fails to verify.
-    pub fn deref(&self, ref_id: &str) -> Result<DerefResult> {
+    pub fn deref(&self, ref_id: &str, caller_agent_id: Option<&str>) -> Result<DerefResult> {
         let row: Option<(Vec<u8>, String, i64, String, String, String)> = self
             .conn
             .query_row(
@@ -320,6 +334,27 @@ impl<'a> ContextOffloader<'a> {
                     ref_id: ref_id.to_string(),
                 })
             })?;
+
+        // SEC-4 (Cluster D, issue #767) — IDOR gate. The MCP
+        // `handle_deref` handler always passes an authenticated
+        // `caller_agent_id`; substrate-internal callers that
+        // legitimately need to reach any row (TTL sweeper, integrity
+        // audit, operator dump) pass `None` to BYPASS this check.
+        // Mismatch maps to NotFound (not Unauthorized) so a casual
+        // probe cannot enumerate ref_ids by error-message
+        // differentiation.
+        if let Some(caller) = caller_agent_id
+            && caller != agent_id
+        {
+            tracing::info!(
+                ref_id = %ref_id,
+                caller = %caller,
+                "SEC-4: handle_deref ownership mismatch — surfacing NotFound (leak-resistant)"
+            );
+            return Err(anyhow!(OffloadError::NotFound {
+                ref_id: ref_id.to_string(),
+            }));
+        }
 
         // Optional: verify the signature against the supplied key BEFORE
         // decompressing. Catches tampered blobs early without the zstd
@@ -644,7 +679,7 @@ mod tests {
         let r = off
             .offload(content, "ns/test", None, "ai:alice")
             .expect("offload");
-        let back = off.deref(&r.ref_id).expect("deref");
+        let back = off.deref(&r.ref_id, None).expect("deref");
         assert_eq!(back.content, content);
         assert_eq!(back.sha256, r.content_sha256);
     }
@@ -684,7 +719,7 @@ mod tests {
         )
         .expect("tamper");
 
-        let err = off.deref(&r.ref_id).err().expect("deref must reject");
+        let err = off.deref(&r.ref_id, None).err().expect("deref must reject");
         let downcast = err.downcast_ref::<OffloadError>().expect("OffloadError");
         assert!(matches!(downcast, OffloadError::IntegrityFailed { .. }));
     }
@@ -693,9 +728,44 @@ mod tests {
     fn deref_refuses_unknown_ref_id() {
         let conn = fresh_db();
         let off = ContextOffloader::new(&conn, None, OffloadConfig::default());
-        let err = off.deref("ofl_DOESNOTEXIST").err().expect("not found");
+        let err = off
+            .deref("ofl_DOESNOTEXIST", None)
+            .err()
+            .expect("not found");
         let downcast = err.downcast_ref::<OffloadError>().expect("OffloadError");
         assert!(matches!(downcast, OffloadError::NotFound { .. }));
+    }
+
+    /// SEC-4 (Cluster D, issue #767) — cross-agent deref must surface
+    /// `NotFound` (leak-resistant), NOT a typed permission error that
+    /// would let a probe enumerate ref_ids by message differentiation.
+    #[test]
+    fn deref_refuses_cross_agent_caller_with_notfound() {
+        let conn = fresh_db();
+        let off = ContextOffloader::new(&conn, None, OffloadConfig::default());
+        let r = off
+            .offload("alice's secret", "ns", None, "ai:alice")
+            .expect("offload");
+        // Bob tries to deref Alice's blob — must fail with NotFound.
+        let err = off
+            .deref(&r.ref_id, Some("ai:bob"))
+            .err()
+            .expect("cross-agent deref must reject");
+        let downcast = err.downcast_ref::<OffloadError>().expect("OffloadError");
+        assert!(
+            matches!(downcast, OffloadError::NotFound { .. }),
+            "cross-agent deref must map to NotFound (leak-resistant), got: {downcast:?}"
+        );
+        // Owner can still read.
+        let owner_back = off
+            .deref(&r.ref_id, Some("ai:alice"))
+            .expect("owner deref ok");
+        assert_eq!(owner_back.content, "alice's secret");
+        // Substrate-internal callers (None) BYPASS the ownership gate.
+        let internal_back = off
+            .deref(&r.ref_id, None)
+            .expect("substrate-internal deref ok");
+        assert_eq!(internal_back.content, "alice's secret");
     }
 
     #[test]
@@ -719,9 +789,9 @@ mod tests {
         assert_eq!(deleted, 2);
 
         // a + b are gone; c (permanent) remains.
-        assert!(off.deref(&a.ref_id).is_err());
-        assert!(off.deref(&b.ref_id).is_err());
-        assert!(off.deref(&c.ref_id).is_ok());
+        assert!(off.deref(&a.ref_id, None).is_err());
+        assert!(off.deref(&b.ref_id, None).is_err());
+        assert!(off.deref(&c.ref_id, None).is_ok());
     }
 
     #[test]
@@ -731,7 +801,7 @@ mod tests {
         let r = off
             .offload("traced", "ns", None, "ai:alice")
             .expect("offload");
-        let _ = off.deref(&r.ref_id).expect("deref");
+        let _ = off.deref(&r.ref_id, None).expect("deref");
         let rows = crate::signed_events::list_signed_events(&conn, None, 100, 0).expect("list");
         let kinds: Vec<&str> = rows.iter().map(|r| r.event_type.as_str()).collect();
         assert!(kinds.contains(&"context_offloaded"));
