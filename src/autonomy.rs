@@ -588,6 +588,13 @@ pub fn persist_self_report(
     pass_report: &AutonomyPassReport,
     auto_tagged: usize,
     contradictions_found: usize,
+    // Issue #816 — count of `__persona_<entity_id>_v<n>` rows the
+    // curator's auto-persona sweep produced this cycle. Surfaces in the
+    // self-report JSON alongside the existing per-pass counters so an
+    // operator inspecting `_curator/reports/*` can audit auto-persona
+    // activity over time without joining against the persona rows
+    // themselves.
+    personas_generated: usize,
     errors_total: usize,
 ) -> Result<()> {
     let now = chrono::Utc::now();
@@ -597,6 +604,7 @@ pub fn persist_self_report(
         "cycle_duration_ms": cycle_duration_ms,
         "auto_tagged": auto_tagged,
         "contradictions_found": contradictions_found,
+        "personas_generated": personas_generated,
         "clusters_formed": pass_report.clusters_formed,
         "memories_consolidated": pass_report.memories_consolidated,
         "memories_forgotten": pass_report.memories_forgotten,
@@ -1232,7 +1240,7 @@ mod tests {
             rollback_entries_written: 2,
             errors: vec![],
         };
-        persist_self_report(&conn, 1234, &pass, 3, 0, 0).unwrap();
+        persist_self_report(&conn, 1234, &pass, 3, 0, 0, 0).unwrap();
         let reports = db::list(
             &conn,
             Some("_curator/reports"),

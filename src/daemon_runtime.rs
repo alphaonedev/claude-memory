@@ -3350,9 +3350,15 @@ pub async fn run_curator_daemon_with_shutdown(
     });
 
     let llm_arc: Option<Arc<crate::llm::OllamaClient>> = None;
+    // Issue #816 — load the daemon signing keypair so the curator's
+    // auto-persona sweep can produce signed persona rows. `None`
+    // (no key on disk + auto-gen disabled) leaves the sweep no-op,
+    // matching the pre-#816 behaviour.
+    let (kp_opt, _outcome) = ensure_and_load_daemon_keypair();
+    let active_keypair = kp_opt.map(Arc::new);
     let db_owned = db_path;
     tokio::task::spawn_blocking(move || {
-        crate::curator::run_daemon(db_owned, llm_arc, cfg, shutdown_flag);
+        crate::curator::run_daemon(db_owned, llm_arc, cfg, shutdown_flag, active_keypair);
     })
     .await
     .map_err(|e| anyhow::anyhow!("curator daemon join: {e}"))?;
@@ -3392,8 +3398,16 @@ pub async fn run_curator_daemon_with_primitives(
         shutdown_flag_for_signal.store(true, Ordering::Relaxed);
     });
 
+    // Issue #816 — load the daemon signing keypair for the auto-persona
+    // sweep. Mirrors the load in `run_curator_daemon_with_shutdown`;
+    // both daemon entry-points need the same keypair resolution so the
+    // CLI (`ai-memory curator --daemon`) and the test-driven shutdown
+    // flow both honour the same on-disk state.
+    let (kp_opt, _outcome) = ensure_and_load_daemon_keypair();
+    let active_keypair = kp_opt.map(Arc::new);
+
     tokio::task::spawn_blocking(move || {
-        crate::curator::run_daemon(db_path, llm, cfg, shutdown_flag);
+        crate::curator::run_daemon(db_path, llm, cfg, shutdown_flag, active_keypair);
     })
     .await
     .map_err(|e| anyhow::anyhow!("curator daemon join: {e}"))?;
