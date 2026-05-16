@@ -168,6 +168,16 @@ pub struct CuratorReport {
     /// enabled or not reached for this cycle.
     #[serde(default)]
     pub autonomy: crate::autonomy::AutonomyPassReport,
+    /// Issue #816 — count of `__persona_<entity_id>_v<n>` rows the
+    /// curator's auto-persona sweep produced this cycle. Zero when:
+    /// the cycle has no fresh-entity reflections to distil, the
+    /// daemon was started without a signing keypair (sweep skipped to
+    /// avoid emitting unsigned persona rows), the LLM is unreachable,
+    /// or every candidate entity already has an up-to-date persona row.
+    /// Surfaces in the cycle's tracing line and in the
+    /// `_curator/reports` JSON self-report.
+    #[serde(default)]
+    pub personas_generated: usize,
     pub errors: Vec<String>,
     pub dry_run: bool,
 }
@@ -187,10 +197,21 @@ impl CuratorReport {
 /// Run one curator cycle. Safe to call repeatedly. Returns a structured
 /// report regardless of outcome — LLM failures are recorded in
 /// `report.errors` rather than propagated.
+///
+/// Issue #816 — `active_keypair` carries the daemon's signing keypair
+/// for the auto-persona sweep. When `Some` AND the LLM is reachable,
+/// the sweep at the end of the cycle scans freshly-tagged reflections
+/// (rows with `mentioned_entity_id` set, in non-reserved namespaces)
+/// and calls [`crate::persona::PersonaGenerator`] for each entity that
+/// lacks a current persona row. When `None`, the sweep skips entirely
+/// — the substrate refuses to emit unsigned persona rows from the
+/// curator path, matching the pre-#816 posture for daemons started
+/// without a keypair on disk.
 pub fn run_once(
     conn: &Connection,
     llm: Option<&OllamaClient>,
     cfg: &CuratorConfig,
+    active_keypair: Option<&crate::identity::keypair::AgentKeypair>,
 ) -> Result<CuratorReport> {
     let mut report = CuratorReport::new(cfg.dry_run);
     let started = Instant::now();
@@ -284,6 +305,24 @@ pub fn run_once(
     report.errors.extend(pass_report.errors.clone());
     report.autonomy = pass_report;
 
+    // Issue #816 — auto-persona sweep. After auto_tag has populated
+    // `mentioned_entity_id` on this cycle's reflections, scan for
+    // entities that lack a current persona row and synthesise one via
+    // [`PersonaGenerator`]. Pre-#816 this work was deferred: the
+    // post_reflect hook surface in `storage::reflect` accepted a
+    // keypair-aware callback (see `src/hooks/post_reflect/auto_persona.rs`)
+    // but no caller installed it on the curator path, so operators had
+    // to call `memory_persona_generate` explicitly for every entity.
+    //
+    // Sweep is gated on `active_keypair.is_some()` — without a keypair
+    // we'd emit unsigned persona rows that look like legacy data and
+    // muddy the attestation audit trail. The pre-#816 contract was
+    // "no persona at all", which is more honest than "unsigned
+    // persona", so we stay no-op when the daemon hasn't been issued a
+    // keypair. The `personas_generated` counter on `CuratorReport`
+    // reflects the count and lands in the `_curator/reports` JSON.
+    persona_sweep(conn, llm_client, &candidates, cfg, active_keypair, &mut report);
+
     report.completed_at = chrono::Utc::now().to_rfc3339();
     report.cycle_duration_ms = started.elapsed().as_millis();
 
@@ -298,6 +337,7 @@ pub fn run_once(
             &report.autonomy,
             report.auto_tagged,
             report.contradictions_found,
+            report.personas_generated,
             report.errors.len(),
         )
     {
@@ -314,6 +354,143 @@ pub fn run_once(
     Ok(report)
 }
 
+/// Issue #816 — auto-persona sweep helper.
+///
+/// Called from [`run_once`] after the auto_tag / contradiction / autonomy
+/// passes complete. Scans the cycle's candidate batch for reflections
+/// whose `mentioned_entity_id` was populated (by the auto_tag pass earlier
+/// in the same cycle, or by a prior cycle), groups by
+/// `(entity_id, namespace)`, and for each group that lacks a current
+/// persona row calls [`crate::persona::PersonaGenerator::generate`] with
+/// `active_keypair` as the signer. The resulting persona row lands with
+/// `attest_level='self_signed'` and a 64-byte Ed25519 signature on every
+/// `derived_from` link.
+///
+/// **Gating**: skips the entire sweep when `active_keypair` is `None`.
+/// The pre-#816 contract on the curator path was "no auto-generated
+/// persona at all" rather than "unsigned auto-generated persona", so
+/// we hold that line — unsigned persona rows from the curator would
+/// muddy the attestation audit trail.
+///
+/// **Best-effort**: errors per-entity are appended to `report.errors`
+/// and the next entity continues. A storage error opening reflections
+/// in one namespace cannot crash the cycle.
+///
+/// **Budget**: each persona generation counts as one operation against
+/// `cfg.max_ops_per_cycle`. The sweep stops mid-loop when the budget
+/// is exhausted; remaining entities surface in the next cycle.
+fn persona_sweep(
+    conn: &Connection,
+    _llm_client: &OllamaClient,
+    _candidates: &[Memory],
+    cfg: &CuratorConfig,
+    active_keypair: Option<&crate::identity::keypair::AgentKeypair>,
+    report: &mut CuratorReport,
+) {
+    let Some(keypair) = active_keypair else {
+        return;
+    };
+
+    // De-duplicate to one `(entity_id, namespace)` pair per cycle.
+    //
+    // We query `memories` directly for the `mentioned_entity_id`
+    // column (populated by `storage::extract_mentioned_entity_id` on
+    // insert + the auto_tag pass earlier in this cycle) rather than
+    // iterating the `candidates: &[Memory]` batch — the in-memory
+    // `Memory` struct does NOT expose that column today, so a SQL
+    // query is the only way to see it from this layer.
+    //
+    // Bounded by the curator's per-cycle op cap (`max_ops_per_cycle`,
+    // 2x for headroom): each candidate row may or may not need a
+    // persona, so we read a generous superset and let the persona
+    // existence check inside the loop short-circuit.
+    use std::collections::BTreeSet;
+    let limit = (cfg.max_ops_per_cycle.saturating_mul(2)).max(64);
+    let mut entity_pairs: BTreeSet<(String, String)> = BTreeSet::new();
+    let scan_result = (|| -> Result<()> {
+        let mut stmt = conn.prepare(
+            "SELECT mentioned_entity_id, namespace
+             FROM memories
+             WHERE memory_kind = 'reflection'
+               AND mentioned_entity_id IS NOT NULL
+               AND namespace NOT LIKE '\\_%' ESCAPE '\\'
+             ORDER BY created_at DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit as i64], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (eid, ns) = row?;
+            entity_pairs.insert((eid, ns));
+        }
+        Ok(())
+    })();
+    if let Err(e) = scan_result {
+        report
+            .errors
+            .push(format!("persona_sweep: scan for mentioned_entity_id failed: {e}"));
+        return;
+    }
+
+    if entity_pairs.is_empty() {
+        return;
+    }
+
+    // Use the OllamaClient as the LLM trait object — PersonaGenerator
+    // takes `&dyn AutonomyLlm` and OllamaClient impls it.
+    use crate::persona::{PersonaConfig, PersonaGenerator, get_latest_persona};
+    let config = PersonaConfig::default();
+    let generator = PersonaGenerator::new(conn, _llm_client, Some(keypair), config);
+
+    for (entity_id, namespace) in entity_pairs {
+        if report.operations_attempted >= cfg.max_ops_per_cycle {
+            report.operations_skipped_cap += 1;
+            continue;
+        }
+
+        // Skip if a persona already exists for this entity in this
+        // namespace. A future enhancement (per the namespace policy
+        // `auto_persona_trigger_every_n_memories` field that already
+        // exists in GovernancePolicy) would re-generate on cadence;
+        // this first cut only fills the "no persona yet" gap so the
+        // operator-visible behaviour is "every entity that gets
+        // reflected on grows a persona row, signed".
+        match get_latest_persona(conn, &entity_id, &namespace) {
+            Ok(Some(_)) => continue,
+            Ok(None) => {}
+            Err(e) => {
+                report.errors.push(format!(
+                    "persona_sweep: get_latest_persona failed for ({entity_id}, {namespace}): {e}"
+                ));
+                continue;
+            }
+        }
+
+        report.operations_attempted += 1;
+
+        if cfg.dry_run {
+            // Honour the dry-run contract: count the would-be generation
+            // in `personas_generated` so an operator running
+            // `ai-memory curator --dry-run` sees the sweep's intended
+            // work without committing it.
+            report.personas_generated += 1;
+            continue;
+        }
+
+        match generator.generate(&entity_id, &namespace) {
+            Ok(_persona) => {
+                report.personas_generated += 1;
+            }
+            Err(e) => {
+                report.errors.push(format!(
+                    "persona_sweep: generate failed for ({entity_id}, {namespace}): {e}"
+                ));
+            }
+        }
+    }
+}
+
 /// Long-running daemon loop. Polls `shutdown` between cycles so SIGINT
 /// / SIGTERM lands cleanly.
 ///
@@ -326,26 +503,37 @@ pub fn run_daemon(
     llm: Option<Arc<OllamaClient>>,
     cfg: CuratorConfig,
     shutdown: Arc<AtomicBool>,
+    // Issue #816 — daemon signing keypair, threaded to `run_once` for
+    // the auto-persona sweep. `None` disables the sweep (the curator
+    // refuses to emit unsigned persona rows on this path); `Some`
+    // lets every cycle synthesise signed persona artifacts for fresh
+    // entities. The daemon-runtime loader at
+    // `daemon_runtime::ensure_and_load_daemon_keypair` resolves this
+    // from `DAEMON_KEYPAIR_LABEL` on disk, auto-generating when absent.
+    active_keypair: Option<Arc<crate::identity::keypair::AgentKeypair>>,
 ) {
     let interval = cfg.interval_secs.clamp(60, 86400);
     tracing::info!(
-        "curator daemon started (interval={}s, max_ops={}, dry_run={})",
+        "curator daemon started (interval={}s, max_ops={}, dry_run={}, auto_persona={})",
         interval,
         cfg.max_ops_per_cycle,
-        cfg.dry_run
+        cfg.dry_run,
+        active_keypair.is_some()
     );
 
     while !shutdown.load(Ordering::Relaxed) {
         match Connection::open(&db_path) {
             Ok(conn) => {
                 let llm_ref = llm.as_deref();
-                match run_once(&conn, llm_ref, &cfg) {
+                let kp_ref = active_keypair.as_deref();
+                match run_once(&conn, llm_ref, &cfg, kp_ref) {
                     Ok(report) => tracing::info!(
-                        "curator cycle: scanned={} eligible={} tagged={} contradictions={} errors={} ({}ms, dry_run={})",
+                        "curator cycle: scanned={} eligible={} tagged={} contradictions={} personas={} errors={} ({}ms, dry_run={})",
                         report.memories_scanned,
                         report.memories_eligible,
                         report.auto_tagged,
                         report.contradictions_found,
+                        report.personas_generated,
                         report.errors.len(),
                         report.cycle_duration_ms,
                         report.dry_run
@@ -565,7 +753,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let conn = db::open(tmp.path()).unwrap();
         let cfg = CuratorConfig::default();
-        let report = run_once(&conn, None, &cfg).unwrap();
+        let report = run_once(&conn, None, &cfg, None).unwrap();
         assert_eq!(report.memories_scanned, 0);
         assert_eq!(report.memories_eligible, 0);
         assert_eq!(report.operations_attempted, 0);
@@ -787,7 +975,7 @@ mod tests {
             dry_run: true,
             ..CuratorConfig::default()
         };
-        let report = run_once(&conn, None, &cfg).unwrap();
+        let report = run_once(&conn, None, &cfg, None).unwrap();
         assert!(report.dry_run);
         // No mutations happened — the original metadata is untouched.
         let after = db::get(&conn, &mem.id).unwrap().unwrap();
@@ -860,7 +1048,7 @@ mod tests {
         let daemon_thread = thread::spawn(move || {
             // Record that we're entering the daemon loop.
             *cycle_count_for_test.lock().unwrap() = 1;
-            run_daemon(db_path, None, cfg, shutdown_for_daemon);
+            run_daemon(db_path, None, cfg, shutdown_for_daemon, None);
             // Record that the daemon exited cleanly.
             *cycle_count_for_test.lock().unwrap() = 2;
         });
@@ -1142,7 +1330,7 @@ mod tests {
             include_namespaces: vec!["autotag-ns".to_string()],
             ..CuratorConfig::default()
         };
-        let report = run_once(&conn, Some(&llm), &cfg).unwrap();
+        let report = run_once(&conn, Some(&llm), &cfg, None).unwrap();
 
         assert!(report.memories_eligible >= 1);
         assert!(report.auto_tagged >= 1, "report: {report:?}");
@@ -1173,7 +1361,7 @@ mod tests {
             include_namespaces: vec!["dry-llm-ns".to_string()],
             ..CuratorConfig::default()
         };
-        let report = run_once(&conn, Some(&llm), &cfg).unwrap();
+        let report = run_once(&conn, Some(&llm), &cfg, None).unwrap();
         assert!(report.dry_run);
 
         // No DB writes: original metadata unchanged, no self-report.
@@ -1214,7 +1402,7 @@ mod tests {
             include_namespaces: vec!["capns".to_string()],
             ..CuratorConfig::default()
         };
-        let report = run_once(&conn, Some(&llm), &cfg).unwrap();
+        let report = run_once(&conn, Some(&llm), &cfg, None).unwrap();
         assert_eq!(report.operations_attempted, 1);
         assert!(report.operations_skipped_cap >= 2, "report: {report:?}");
     }
@@ -1238,7 +1426,7 @@ mod tests {
             include_namespaces: vec!["included".to_string()],
             ..CuratorConfig::default()
         };
-        let report = run_once(&conn, Some(&llm), &cfg).unwrap();
+        let report = run_once(&conn, Some(&llm), &cfg, None).unwrap();
         // Both memories are scanned but only the included one is eligible.
         assert!(report.memories_scanned >= 2);
         assert_eq!(report.memories_eligible, 1);
@@ -1264,7 +1452,7 @@ mod tests {
             exclude_namespaces: vec!["dropped".to_string()],
             ..CuratorConfig::default()
         };
-        let report = run_once(&conn, Some(&llm), &cfg).unwrap();
+        let report = run_once(&conn, Some(&llm), &cfg, None).unwrap();
         assert!(report.memories_scanned >= 2);
         // Only the non-dropped namespace is eligible.
         assert_eq!(report.memories_eligible, 1);
@@ -1284,7 +1472,7 @@ mod tests {
         let conn = db::open(tmp.path()).unwrap();
         let cfg = CuratorConfig::default();
 
-        let report = run_once(&conn, Some(&llm), &cfg).unwrap();
+        let report = run_once(&conn, Some(&llm), &cfg, None).unwrap();
         assert_eq!(report.memories_scanned, 0);
         assert_eq!(report.memories_eligible, 0);
         assert_eq!(report.operations_attempted, 0);
@@ -1315,7 +1503,7 @@ mod tests {
             include_namespaces: vec!["dual".to_string()],
             ..CuratorConfig::default()
         };
-        let report = run_once(&conn, Some(&llm), &cfg).unwrap();
+        let report = run_once(&conn, Some(&llm), &cfg, None).unwrap();
         assert!(report.contradictions_found >= 1, "report: {report:?}");
     }
 
@@ -1340,7 +1528,7 @@ mod tests {
             include_namespaces: vec!["fail-ns".to_string()],
             ..CuratorConfig::default()
         };
-        let report = run_once(&conn, Some(&llm), &cfg).unwrap();
+        let report = run_once(&conn, Some(&llm), &cfg, None).unwrap();
         // The cycle finishes despite errors.
         assert!(!report.completed_at.is_empty());
         // At least one auto_tag failure surfaced.
@@ -1374,7 +1562,7 @@ mod tests {
             include_namespaces: vec!["report-ns".to_string()],
             ..CuratorConfig::default()
         };
-        let _ = run_once(&conn, Some(&llm), &cfg).unwrap();
+        let _ = run_once(&conn, Some(&llm), &cfg, None).unwrap();
 
         let reports = db::list(
             &conn,
@@ -1411,9 +1599,9 @@ mod tests {
             include_namespaces: vec!["idem-ns".to_string()],
             ..CuratorConfig::default()
         };
-        let r1 = run_once(&conn, Some(&llm), &cfg).unwrap();
+        let r1 = run_once(&conn, Some(&llm), &cfg, None).unwrap();
         assert_eq!(r1.memories_eligible, 1);
-        let r2 = run_once(&conn, Some(&llm), &cfg).unwrap();
+        let r2 = run_once(&conn, Some(&llm), &cfg, None).unwrap();
         assert!(r2.memories_scanned >= 1);
         assert_eq!(r2.memories_eligible, 0);
         assert_eq!(r2.operations_attempted, 0);
@@ -1439,7 +1627,7 @@ mod tests {
             include_namespaces: vec!["multi-ns".to_string()],
             ..CuratorConfig::default()
         };
-        let report = run_once(&conn, Some(&llm), &cfg).unwrap();
+        let report = run_once(&conn, Some(&llm), &cfg, None).unwrap();
         assert_eq!(report.operations_attempted, 3);
         assert_eq!(report.auto_tagged, 3);
         // `chat_calls` ≥ 3 (one per auto_tag plus contradiction probes).
@@ -1500,11 +1688,150 @@ mod tests {
             include_namespaces: vec!["smart".to_string()],
             ..CuratorConfig::default()
         };
-        let report = run_once(&conn, Some(&llm), &cfg).unwrap();
+        let report = run_once(&conn, Some(&llm), &cfg, None).unwrap();
         // Auto-tag pass + autonomy pass → multiple chat calls.
         assert!(server.chat_calls.load(StdOrdering::Relaxed) >= 3);
         // Autonomy pass found at least the one cluster.
         assert!(report.autonomy.clusters_formed >= 1, "report: {report:?}");
+    }
+
+    /// Issue #816 — auto-persona sweep generates a signed persona row
+    /// for an entity that a recent reflection mentions, when the daemon
+    /// has a signing keypair on disk and the LLM is reachable.
+    ///
+    /// Pre-#816 the curator path produced no persona work at all (the
+    /// `personas_generated` counter didn't even exist) — operators had
+    /// to call `memory_persona_generate` explicitly for every entity.
+    /// This regression pins the new contract:
+    ///
+    ///   * `report.personas_generated >= 1` after one cycle.
+    ///   * A `__persona_<entity_id>_v1` row exists at the entity's
+    ///     namespace with `metadata.persona.attest_level == "self_signed"`
+    ///     and a 64-byte Ed25519 signature in
+    ///     `metadata.persona.signature`.
+    ///   * Each `derived_from` link the persona writes is also
+    ///     `attest_level = "self_signed"`.
+    #[test]
+    fn run_once_persona_sweep_generates_signed_persona_for_new_entity() {
+        let server = FakeOllama::start(FakeOllamaCfg::default());
+        let llm = ollama_for(&server);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+
+        // Seed an observation in the test namespace; this is what the
+        // reflection will reflect_on. PersonaGenerator pulls reflections
+        // via `mentioned_entity_id` not via the source observations,
+        // but the reflects_on edge is required for the reflection to
+        // be a structurally valid reflection memory.
+        let obs = make_eligible_memory("auto-persona-ns", "observation");
+        let obs_id = db::insert(&conn, &obs).unwrap();
+
+        // Seed a reflection. Mark it `memory_kind = Reflection` and
+        // `reflection_depth = 1` so `is_reflection`-style queries find
+        // it, and patch `mentioned_entity_id` post-insert because the
+        // public Memory struct doesn't expose that column today
+        // (`storage::extract_mentioned_entity_id` populates it from
+        // `metadata.entity_mentions` on the real reflect path; the
+        // SQL patch here is the test-side equivalent).
+        let entity_id = "auto-persona-entity-2026-05-16";
+        let mut rfl = make_eligible_memory("auto-persona-ns", "reflection-of-obs");
+        rfl.memory_kind = crate::models::MemoryKind::Reflection;
+        rfl.reflection_depth = 1;
+        rfl.content =
+            "This reflection mentions the entity under test.".to_string();
+        let rfl_id = db::insert(&conn, &rfl).unwrap();
+        conn.execute(
+            "UPDATE memories SET mentioned_entity_id = ?1 WHERE id = ?2",
+            rusqlite::params![entity_id, &rfl_id],
+        )
+        .unwrap();
+        db::create_link(&conn, &rfl_id, &obs_id, "reflects_on").unwrap();
+
+        // Daemon signing keypair — the sweep passes this to
+        // PersonaGenerator as the signer so every `derived_from`
+        // edge lands `self_signed` and the persona's metadata
+        // envelope carries the 64-byte signature.
+        let kp = crate::identity::keypair::generate("daemon").unwrap();
+
+        let cfg = CuratorConfig {
+            include_namespaces: vec!["auto-persona-ns".to_string()],
+            ..CuratorConfig::default()
+        };
+        let report = run_once(&conn, Some(&llm), &cfg, Some(&kp)).unwrap();
+
+        assert!(
+            report.personas_generated >= 1,
+            "expected at least one auto-persona generation, report.errors={:?}",
+            report.errors
+        );
+
+        // Persona row exists and is signed at the artifact level.
+        let persona =
+            crate::persona::get_latest_persona(&conn, entity_id, "auto-persona-ns")
+                .expect("get_latest_persona failed")
+                .expect("persona row must exist after sweep");
+        assert_eq!(
+            persona.attest_level, "self_signed",
+            "persona attest_level must be self_signed (was {:?})",
+            persona.attest_level
+        );
+
+        // The metadata envelope carries the 64-byte signature.
+        let row: String = conn
+            .query_row(
+                "SELECT metadata FROM memories WHERE id = ?1",
+                rusqlite::params![&persona.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&row).unwrap();
+        let sig_b64 = meta
+            .get("persona")
+            .and_then(|p| p.get("signature"))
+            .and_then(|v| v.as_str())
+            .expect("metadata.persona.signature missing");
+        use base64::Engine;
+        let sig_bytes = base64::engine::general_purpose::STANDARD
+            .decode(sig_b64)
+            .expect("signature must be valid base64");
+        assert_eq!(
+            sig_bytes.len(),
+            64,
+            "metadata.persona.signature must decode to 64 bytes (got {})",
+            sig_bytes.len()
+        );
+
+        // Every derived_from link the persona wrote is self_signed.
+        let mut stmt = conn
+            .prepare(
+                "SELECT attest_level, length(signature) \
+                 FROM memory_links \
+                 WHERE source_id = ?1 AND relation = 'derived_from'",
+            )
+            .unwrap();
+        let rows: Vec<(String, Option<i64>)> = stmt
+            .query_map(rusqlite::params![&persona.id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
+            })
+            .unwrap()
+            .map(std::result::Result::unwrap)
+            .collect();
+        assert!(
+            !rows.is_empty(),
+            "persona must emit at least one derived_from edge"
+        );
+        for (attest_level, sig_len) in &rows {
+            assert_eq!(
+                attest_level, "self_signed",
+                "persona derived_from edges must be self_signed"
+            );
+            assert_eq!(
+                sig_len.unwrap_or(0),
+                64,
+                "persona derived_from signature must be 64 bytes"
+            );
+        }
     }
 }
 
@@ -1678,7 +2005,7 @@ fn cycle_aborts_on_database_error() {
     let cfg = CuratorConfig::default();
 
     // run_once returns Ok(report) even when no LLM is available
-    let result = run_once(&conn, None, &cfg);
+    let result = run_once(&conn, None, &cfg, None);
     assert!(result.is_ok());
     let report = result.unwrap();
     // The "no LLM" error is recorded in the report

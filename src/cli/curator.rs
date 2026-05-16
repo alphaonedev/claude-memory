@@ -147,7 +147,7 @@ pub async fn run(
 
     if args.once {
         let conn = db::open(db_path)?;
-        let report = curator::run_once(&conn, llm.as_ref(), &cfg)?;
+        let report = curator::run_once(&conn, llm.as_ref(), &cfg, None)?;
         if args.json {
             writeln!(out.stdout, "{}", serde_json::to_string_pretty(&report)?)?;
         } else {
