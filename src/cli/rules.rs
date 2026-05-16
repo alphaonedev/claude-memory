@@ -280,7 +280,17 @@ pub fn run(
                 signature: None,
                 attest_level: "unsigned".to_string(),
             };
-            let canonical = rules_store::canonical_bytes(&rule)?;
+            // v0.7.0 issue #800 / Form 7 critical fix: sign the
+            // canonical bytes that `verify_rule_signature` will read
+            // back. `canonical_bytes` (without `enabled`) and
+            // `canonical_bytes_for_signing` (with `enabled`) were
+            // out-of-sync between the signer and verifier — the
+            // signatures produced here never validated, the L1-6
+            // gate silently skipped every "operator_signed" rule,
+            // and Form 7 enforcement returned `allow` for every
+            // action. Use `canonical_bytes_for_signing` so the
+            // verifier accepts what we produce.
+            let canonical = rules_store::canonical_bytes_for_signing(&rule)?;
             let sig = signing_key.sign(&canonical);
             rule.signature = Some(sig.to_bytes().to_vec());
             rule.attest_level = OPERATOR_SIGNED_LEVEL.to_string();
@@ -314,7 +324,12 @@ pub fn run(
                 bail!("rules.enable: no rule with id={id}");
             };
             rule.enabled = true;
-            let canonical = rules_store::canonical_bytes(&rule)?;
+            // Issue #800 critical fix: signer must use the same
+            // canonical encoding as `verify_rule_signature`
+            // (otherwise the L1-6 enforcement gate skips every rule
+            // and Form 7 returns `allow` for every action). See the
+            // matching comment in the `Add` arm.
+            let canonical = rules_store::canonical_bytes_for_signing(&rule)?;
             let sig = signing_key.sign(&canonical);
             rules_store::set_enabled(&conn, &id, true)?;
             rules_store::update_signature(&conn, &id, &sig.to_bytes(), OPERATOR_SIGNED_LEVEL)?;
@@ -332,7 +347,9 @@ pub fn run(
                 bail!("rules.disable: no rule with id={id}");
             };
             rule.enabled = false;
-            let canonical = rules_store::canonical_bytes(&rule)?;
+            // Issue #800 critical fix: parity with the Enable arm —
+            // signer + verifier must use the same canonical bytes.
+            let canonical = rules_store::canonical_bytes_for_signing(&rule)?;
             let sig = signing_key.sign(&canonical);
             rules_store::set_enabled(&conn, &id, false)?;
             rules_store::update_signature(&conn, &id, &sig.to_bytes(), OPERATOR_SIGNED_LEVEL)?;

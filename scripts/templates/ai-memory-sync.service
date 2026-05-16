@@ -1,0 +1,54 @@
+# ai-memory-sync.service — systemd user unit for the optional
+# peer-to-peer sync daemon (issue #800 Crack 6, Linux parity of
+# dev.alphaone.ai-memory.sync.plist).
+#
+# The sync daemon implements the "no SaaS, peer-to-peer mesh" structural
+# bet. Disabled by default in the Batman activation recipe because a
+# single-node install has no peers; enable this unit only when you
+# have at least one peer address to mesh with.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user ~/.local/state/ai-memory/log
+#   cp scripts/templates/ai-memory-sync.service \
+#      ~/.config/systemd/user/
+#   sed -i 's|REPLACE_DB|%h/.claude/ai-memory.db|g; \
+#           s|REPLACE_PEER_URLS|https://peer-a.local:9078,https://peer-b.local:9078|g' \
+#       ~/.config/systemd/user/ai-memory-sync.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now ai-memory-sync.service
+#
+# Pair with `loginctl enable-linger $USER` so the unit runs without
+# an active login session on headless hosts.
+#
+# Operations:
+#   systemctl --user status  ai-memory-sync.service
+#   journalctl --user -u     ai-memory-sync.service -f
+#   systemctl --user disable --now ai-memory-sync.service
+#
+# macOS operators: use scripts/templates/dev.alphaone.ai-memory.sync.plist.
+# Windows operators: register a Scheduled Task via install-batman-active.ps1
+# with -EnableSync (TODO).
+
+[Unit]
+Description=ai-memory peer-to-peer sync daemon (Batman Mode, knowledge-mesh)
+After=network.target ai-memory-curator.service
+Wants=ai-memory-curator.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/ai-memory \
+  --db REPLACE_DB sync-daemon \
+  --peer REPLACE_PEER_URLS \
+  --poll-interval-secs 30
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=AI_MEMORY_AUTO_CONFIDENCE=1
+Environment=AI_MEMORY_CONFIDENCE_SHADOW=1
+Environment=AI_MEMORY_CONFIDENCE_DECAY=1
+StandardOutput=append:%h/.local/state/ai-memory/log/sync.log
+StandardError=append:%h/.local/state/ai-memory/log/sync.log
+Restart=on-failure
+RestartSec=60s
+Nice=5
+
+[Install]
+WantedBy=default.target

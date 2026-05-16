@@ -1,0 +1,166 @@
+# docker-compose.batman-active.yml — Batman-active ai-memory stack in
+# containers. Issue #800 Crack 6 + multi-OS support.
+#
+# Two services: the MCP server (long-running, stdio is exposed via the
+# host wrapper, not this compose — it's here for live inspection) and
+# the curator daemon. Both share a volume for the SQLite DB and another
+# for the operator key + namespace governance state.
+#
+# Form 5 env vars wired into the curator (and the MCP service if you
+# expose it). Form 7 operator key is generated on first launch by the
+# init container.
+#
+# Usage:
+#   docker compose -f scripts/docker/docker-compose.batman-active.yml up -d
+#   docker compose -f scripts/docker/docker-compose.batman-active.yml logs -f curator
+#   docker compose -f scripts/docker/docker-compose.batman-active.yml exec curator \
+#       ai-memory --db /data/ai-memory.db rules list
+#
+# Run the acceptance suite from the host or inside an exec:
+#   docker compose -f scripts/docker/docker-compose.batman-active.yml exec curator \
+#       /opt/scripts/batman-mode-acceptance.sh --db /data/ai-memory.db
+#
+# To activate from a fresh container, run the install script inside the
+# init container or against the daemon's shell. The compose file
+# bind-mounts the host's scripts/ into /opt/scripts so the same recipes
+# (install-batman-active.sh + acceptance) work without rebuild.
+
+services:
+
+  # First-launch initializer: keygen + sign-seed + enable R001-R004 +
+  # write a Batman standard memory. Exits 0 after activation. Idempotent.
+  init-batman:
+    image: ${AI_MEMORY_IMAGE:-alphaonedev/ai-memory:0.7.0}
+    container_name: ai-memory-init-batman
+    user: ${AI_MEMORY_UID:-1000}:${AI_MEMORY_GID:-1000}
+    environment:
+      AI_MEMORY_DB: /data/ai-memory.db
+      AI_MEMORY_KEY_DIR: /keys
+      BATMAN_NAMESPACE: ${BATMAN_NAMESPACE:-main}
+    volumes:
+      - ai-memory-data:/data
+      - ai-memory-keys:/keys
+      - ../../scripts:/opt/scripts:ro
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        # init the DB if missing — ai-memory creates schema on first open
+        if [ ! -f /data/ai-memory.db ]; then
+          ai-memory --db /data/ai-memory.db stats >/dev/null 2>&1 || true
+        fi
+        # ensure scripts are executable when mounted from host
+        chmod +x /opt/scripts/*.sh 2>/dev/null || true
+        # run the activator — idempotent
+        bash /opt/scripts/install-batman-active.sh --db /data/ai-memory.db --namespace "$$BATMAN_NAMESPACE"
+        echo "init-batman complete"
+    restart: "no"
+
+  # The MCP server. Default tier=autonomous + profile=full so Forms 1/3/4
+  # are on from the first request; Form 5 env vars come from the
+  # environment block here, picked up by every spawned process.
+  mcp:
+    image: ${AI_MEMORY_IMAGE:-alphaonedev/ai-memory:0.7.0}
+    container_name: ai-memory-mcp
+    user: ${AI_MEMORY_UID:-1000}:${AI_MEMORY_GID:-1000}
+    depends_on:
+      init-batman:
+        condition: service_completed_successfully
+    environment:
+      AI_MEMORY_DB: /data/ai-memory.db
+      AI_MEMORY_KEY_DIR: /keys
+      AI_MEMORY_AUTO_CONFIDENCE: "1"
+      AI_MEMORY_CONFIDENCE_SHADOW: "1"
+      AI_MEMORY_CONFIDENCE_DECAY: "1"
+      AI_MEMORY_PROFILE: full
+    volumes:
+      - ai-memory-data:/data
+      - ai-memory-keys:/keys
+    # Stdio MCP server. Compose isn't the right transport — exec into
+    # this container for ad-hoc CLI calls, and point your MCP-stdio
+    # client at `docker exec -i ai-memory-mcp ai-memory --db /data/ai-memory.db mcp --tier autonomous`.
+    command:
+      - ai-memory
+      - --db
+      - /data/ai-memory.db
+      - serve
+      - --bind
+      - 0.0.0.0:9077
+      - --tier
+      - autonomous
+    ports:
+      - "127.0.0.1:9077:9077"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:9077/api/v1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # The autonomous curator. Form 1 background sweeps, Form 5
+  # freshness-decay sweeps, Form 6 backfills, Rule-5 consolidation.
+  # Always-on. Form 5 env vars baked in.
+  curator:
+    image: ${AI_MEMORY_IMAGE:-alphaonedev/ai-memory:0.7.0}
+    container_name: ai-memory-curator
+    user: ${AI_MEMORY_UID:-1000}:${AI_MEMORY_GID:-1000}
+    depends_on:
+      init-batman:
+        condition: service_completed_successfully
+    environment:
+      AI_MEMORY_DB: /data/ai-memory.db
+      AI_MEMORY_KEY_DIR: /keys
+      AI_MEMORY_AUTO_CONFIDENCE: "1"
+      AI_MEMORY_CONFIDENCE_SHADOW: "1"
+      AI_MEMORY_CONFIDENCE_DECAY: "1"
+    volumes:
+      - ai-memory-data:/data
+      - ai-memory-keys:/keys
+      - ../../scripts:/opt/scripts:ro
+    command:
+      - ai-memory
+      - --db
+      - /data/ai-memory.db
+      - curator
+      - --daemon
+      - --interval-secs
+      - "300"
+      - --max-ops
+      - "100"
+    restart: unless-stopped
+
+  # Optional: peer-to-peer sync daemon (Crack 6 — single-node mesh).
+  # Disabled by default since it needs peer addresses. Enable by
+  # providing --peer addresses via SYNC_PEERS env var, then:
+  #   docker compose --profile sync up -d
+  sync:
+    image: ${AI_MEMORY_IMAGE:-alphaonedev/ai-memory:0.7.0}
+    container_name: ai-memory-sync
+    profiles: ["sync"]
+    user: ${AI_MEMORY_UID:-1000}:${AI_MEMORY_GID:-1000}
+    depends_on:
+      init-batman:
+        condition: service_completed_successfully
+    environment:
+      AI_MEMORY_DB: /data/ai-memory.db
+      AI_MEMORY_KEY_DIR: /keys
+    volumes:
+      - ai-memory-data:/data
+      - ai-memory-keys:/keys
+    command:
+      - sh
+      - -c
+      - >
+        if [ -z "${SYNC_PEERS:-}" ]; then
+          echo "no SYNC_PEERS set — sync daemon idle, exiting";
+          exit 0;
+        fi
+        exec ai-memory --db /data/ai-memory.db sync-daemon ${SYNC_PEERS}
+    restart: unless-stopped
+
+volumes:
+  ai-memory-data:
+    driver: local
+  ai-memory-keys:
+    driver: local

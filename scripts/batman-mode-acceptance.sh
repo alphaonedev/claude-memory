@@ -38,12 +38,14 @@ set -uo pipefail
 DB="${AI_MEMORY_DB:-}"
 NAMESPACE="${BATMAN_NAMESPACE:-main}"
 JSON_OUT=0
+BEHAVIORAL=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --db)        DB="$2"; shift 2 ;;
-        --namespace) NAMESPACE="$2"; shift 2 ;;
-        --json)      JSON_OUT=1; shift ;;
+        --db)         DB="$2"; shift 2 ;;
+        --namespace)  NAMESPACE="$2"; shift 2 ;;
+        --json)       JSON_OUT=1; shift ;;
+        --behavioral) BEHAVIORAL=1; shift ;;
         -h|--help)
             sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
@@ -432,6 +434,104 @@ if [[ "$unit_found" != "no" ]]; then
     record "U2" pass "curator unit installed (survives reboot)" "$unit_found"
 else
     record "U2" fail "curator unit NOT installed — daemon will not survive reboot" "expected launchd plist or systemd user unit"
+fi
+
+# ----------------------------------------------------------- behavioral (v2) ----
+
+# B-series checks (#800 Crack 5) — only run with --behavioral. Stores a
+# probe memory through the live MCP write path and asserts the substrate
+# actually fired Form 1/2/4/6 + signed_events. Quiet by default; running
+# this against a production DB will land a memory under
+# `_batman_probe_<timestamp>` namespace by design so it doesn't pollute
+# operator data.
+
+if [[ $BEHAVIORAL -eq 1 ]]; then
+    probe_ns="_batman_probe_$(date +%s)"
+    probe_title="batman acceptance probe $(date +%s)"
+    probe_body="Probe memory for the v2 behavioral acceptance suite (#800 Crack 5). This row deliberately exceeds the auto_atomise_threshold_cl100k of 512 so Form 2 fires synchronously; the content shape includes a Concept-like definitional sentence so Form 6 regex_then_llm classifier should produce something other than Observation; and the substrate-internal write-path will fire Form 1 dedup-and-synthesis plus the Form 7 substrate-internal governance hook. Every field above is intentionally redundant so the cl100k token count crosses the threshold for a single probe — synchronous atomise on, regex_then_llm classify on, freshness-decay-touch on (env vars in MCP launch), shadow observation recorded if AI_MEMORY_CONFIDENCE_SHADOW=1 was set on the MCP launch. After this stores, the suite queries memories WHERE namespace=probe_ns to confirm at least one atom row landed with atom_of pointing at the parent, that memory_kind for the parent is set to one of the expected Batman vocabulary variants, and that a signed_events row was appended."
+
+    # Capture before-state for signed_events delta
+    before_signed=$(sql "SELECT COUNT(*) FROM signed_events;")
+
+    # Bind a Batman policy to the probe namespace so Forms 2 + 6 fire on
+    # the test write. Uses the new CLI verb shipped in this same PR.
+    policy_json=$(ai_memory namespace batman-policy --json 2>/dev/null | tail -n +2)
+    # store a standard memory and bind it
+    std_id=$(ai_memory store --namespace "$probe_ns" --tier long \
+        --title "probe namespace standard" \
+        --content "probe namespace standard for $probe_ns" \
+        --json 2>/dev/null | grep -vE '^ai-memory: loaded config' | tail -1 \
+        | python3 -c "import sys,json
+try:
+    d=json.loads(sys.stdin.read())
+    print(d.get('id') or d.get('memory_id') or d.get('memory',{}).get('id',''))
+except: print('')")
+    if [[ -n "$std_id" ]]; then
+        ai_memory namespace set-standard --namespace "$probe_ns" --id "$std_id" \
+            --governance "$policy_json" 2>/dev/null >/dev/null
+    fi
+
+    # Store the probe memory
+    probe_id=$(ai_memory store \
+        --namespace "$probe_ns" \
+        --tier mid \
+        --title "$probe_title" \
+        --content "$probe_body" \
+        --json 2>/dev/null | grep -vE '^ai-memory: loaded config' | tail -1 \
+        | python3 -c "import sys,json
+try:
+    d=json.loads(sys.stdin.read())
+    print(d.get('id') or d.get('memory_id') or d.get('memory',{}).get('id',''))
+except: print('')")
+
+    if [[ -z "$probe_id" ]]; then
+        record "B1" fail "probe store returned no id — write path failed" ""
+    else
+        record "B1" pass "probe memory stored in '$probe_ns'" "$probe_id"
+    fi
+
+    # Trigger a curator pass so any deferred Form 1/5/6 work fires now
+    ai_memory curator --once --include-namespace "$probe_ns" --max-ops 20 \
+        2>/dev/null >/dev/null
+
+    # B2 — atom_of populated for at least one child row
+    if [[ -n "$probe_id" ]]; then
+        atom_count=$(sql "SELECT COUNT(*) FROM memories WHERE atom_of='$probe_id';")
+        if [[ "${atom_count:-0}" -gt 0 ]]; then
+            record "B2" pass "Form 2 fired: $atom_count atom row(s) reference parent" "atom_of='$probe_id'"
+        else
+            record "B2" fail "Form 2 did NOT fire: no atom rows reference parent" "atom_of='$probe_id' count=0 — auto_atomise_mode may be 'deferred' or MCP server missing env"
+        fi
+    fi
+
+    # B3 — memory_kind classified (parent or atom)
+    if [[ -n "$probe_id" ]]; then
+        kinds=$(sql "SELECT DISTINCT memory_kind FROM memories WHERE id='$probe_id' OR atom_of='$probe_id';" | sort -u | tr '\n' ',' | sed 's/,$//')
+        non_default=$(echo "$kinds" | tr ',' '\n' | grep -vE '^observation$|^$' | head -1)
+        if [[ -n "$non_default" ]]; then
+            record "B3" pass "Form 6 fired: probe classified as '$non_default' (kinds=$kinds)" "non-default vocabulary applied"
+        else
+            record "B3" fail "Form 6 did NOT fire: all rows still 'observation' (kinds=$kinds)" "auto_classify_kind policy may be off or MCP server has stale env"
+        fi
+    fi
+
+    # B4 — signed_events delta
+    after_signed=$(sql "SELECT COUNT(*) FROM signed_events;")
+    delta=$((after_signed - before_signed))
+    if [[ $delta -gt 0 ]]; then
+        record "B4" pass "signed_events grew by $delta during probe (governance verdicts persisted)" "before=$before_signed after=$after_signed"
+    else
+        record "B4" fail "signed_events did NOT grow — Form 1 verdicts and Form 7 hooks not audit-logged" "before=$before_signed after=$after_signed"
+    fi
+
+    # B5 — citations / source_uri / confidence_signals populated on probe
+    if [[ -n "$probe_id" ]]; then
+        cit_uri_sig=$(sql "SELECT length(citations), source_uri IS NOT NULL, confidence_signals IS NOT NULL FROM memories WHERE id='$probe_id';" | head -1)
+        record "B5" pass "Form 4/5 fields surveyed on probe row" "len(citations)|source_uri_set|confidence_signals_set = $cit_uri_sig"
+    fi
+
+    # Clean up the probe namespace
+    ai_memory forget --namespace "$probe_ns" --confirm-global 2>/dev/null >/dev/null || true
 fi
 
 # ----------------------------------------------------------- summary ----

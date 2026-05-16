@@ -210,6 +210,14 @@ pub enum Command {
     Stats,
     /// List all namespaces
     Namespaces,
+    /// v0.7.0 (issue #800) — operator CRUD for the per-namespace
+    /// standard policy memory pointer (Batman Mode Crack 1). Three
+    /// verbs: `set-standard` / `get-standard` / `clear-standard`, plus
+    /// the `batman-policy` helper that prints the canonical Batman
+    /// `GovernancePolicy` JSON blob. Closes the friction that kept
+    /// Batman Forms 2 + 6 dormant on most installs by replacing the
+    /// MCP-stdio JSON-RPC dance with first-class CLI surface.
+    Namespace(crate::cli::namespace::NamespaceArgs),
     /// Export all memories as JSON
     Export,
     /// Import memories from JSON (stdin)
@@ -886,6 +894,19 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
             let mut out = cli::CliOutput::from_std(&mut so, &mut se);
             cli::gc::run_namespaces(&db_path, j, &mut out)
         }
+        Command::Namespace(a) => {
+            // v0.7.0 (issue #800) — Batman Mode Crack 1. First-class CLI
+            // wrapper around the MCP `memory_namespace_set_standard` /
+            // `_get_standard` / `_clear_standard` tools so operators
+            // don't need to drop into MCP-stdio JSON-RPC just to bind
+            // a `GovernancePolicy` to a namespace.
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            cli::namespace::run(&db_path, a, j, &mut out)
+        }
         Command::Export => {
             let stdout = std::io::stdout();
             let stderr = std::io::stderr();
@@ -1369,6 +1390,12 @@ pub fn is_write_command(cmd: &Command) -> bool {
             // checkpoint keeps the long-lived sqlite file from growing
             // unbounded under register-heavy workloads.
             | Command::Skill(_)
+            // v0.7.0 Batman Mode (issue #800) — `namespace set-standard`
+            // and `clear-standard` write to `namespace_meta`. The
+            // `get-standard` and `batman-policy` verbs are read-only
+            // but we classify the whole family as write-class so the
+            // post-run WAL checkpoint runs.
+            | Command::Namespace(_)
     )
 }
 
