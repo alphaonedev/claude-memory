@@ -208,7 +208,20 @@ jobs:
           # available those tests log a skip and exit 0 (see
           # `tests/age_cte_equivalence.rs` for the gating logic).
           AI_MEMORY_TEST_POSTGRES_URL: postgres://ai_memory:ai_memory_ci@localhost:5432/ai_memory_ci
-        run: cargo test --features sal-postgres --lib
+        # v0.7.0 ship-readiness: serialize postgres tests with
+        # `--test-threads=1`. The 30+ `live_*` postgres integration
+        # tests concurrently call `PostgresStore::connect()` which
+        # runs `CREATE EXTENSION` and `CREATE INDEX` DDLs against the
+        # same postgres service container. Postgres' catalog serializes
+        # EXTENSION + TYPE + INDEX installs at a lower layer than
+        # `IF NOT EXISTS`, so parallel callers collide on
+        # `pg_extension_name_index` / `pg_type_typname_nsp_index` /
+        # deadlock-detected / tuple-concurrently-updated despite the
+        # DDL being idempotent. Per-call retry (added in postgres.rs
+        # init path) handles the init_sql collision; serialising the
+        # test workers eliminates the deeper `migrate_vN()` races at
+        # the cost of slightly longer wallclock.
+        run: cargo test --features sal-postgres --lib -- --test-threads=1
 
   # v0.7.0 Phase D regression closeout — `sal`-only feature gate. The
   # `check` matrix above builds the default (sqlite-bundled only) and
