@@ -2476,6 +2476,47 @@ pub fn create_link_signed(
     Ok(attest_level)
 }
 
+/// v0.7.0 issue #812 / #813 — return the strongest `attest_level`
+/// label across every outbound link rooted at `source_id`.
+///
+/// Strength ladder (highest first):
+///
+///   `peer_attested` > `self_signed` > `unsigned`
+///
+/// The persona-signing path (`PersonaGenerator::generate`) uses this
+/// to stamp the Persona's own `attest_level` metadata so the
+/// downstream `memory_persona` / `memory_persona_generate` wire
+/// response carries the same attestation level the substrate's
+/// `derives_from` edges actually hold — a Persona whose source
+/// links are all signed is itself self-signed, whereas a Persona
+/// whose source links are unsigned cannot truthfully claim
+/// `self_signed` no matter what label the curator stamps on it.
+///
+/// Returns `"unsigned"` for a source with no outbound links — the
+/// only honest default for a row whose attestation surface is
+/// empty.
+///
+/// # Errors
+///
+/// Bubbles up `rusqlite` errors from the SELECT.
+pub fn strongest_attest_level_for_source(conn: &Connection, source_id: &str) -> Result<String> {
+    let mut stmt = conn.prepare(
+        "SELECT attest_level FROM memory_links \
+         WHERE source_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![source_id], |r| r.get::<_, String>(0))?;
+    let mut strongest = "unsigned";
+    for row in rows {
+        let level = row?;
+        match level.as_str() {
+            "peer_attested" => return Ok("peer_attested".to_string()),
+            "self_signed" if strongest == "unsigned" => strongest = "self_signed",
+            _ => {}
+        }
+    }
+    Ok(strongest.to_string())
+}
+
 /// v0.7 H3 — insert an inbound (federation-replicated) link with a
 /// pre-computed signature and attest level.
 ///
@@ -10277,6 +10318,15 @@ mod tests {
         insert(&conn, &s).unwrap();
         insert(&conn, &t).unwrap();
 
+        // v0.7.0 issue #810 / #813 — the CHECK trigger on memory_links
+        // refuses any peer_attested row whose signature blob is NULL /
+        // wrong-length. The pre-#810 test passed a NULL signature here
+        // because the legacy invariant did not police that pairing;
+        // now we synthesise a 64-byte fake signature blob so the row
+        // satisfies the trigger's WHEN clause. The K9-bypass property
+        // under test is orthogonal to whether the signature bytes
+        // actually verify (verification is `memory_verify`'s job, not
+        // this insertion path's).
         let link = MemoryLink {
             source_id: s.id.clone(),
             target_id: t.id.clone(),
@@ -10285,7 +10335,7 @@ mod tests {
             valid_from: None,
             valid_until: None,
             observed_by: Some("peer:remote".to_string()),
-            signature: None,
+            signature: Some(vec![0xAB_u8; 64]),
         };
 
         // Peer-attested inbound bypasses the K9 deny.
@@ -12972,5 +13022,160 @@ mod tests {
             crate::models::MemoryKind::Reflection,
             "upsert with Observation must not overwrite an existing Reflection kind"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // v0.7.0 issue #810 / #812 / #813 — CHECK trigger + strongest_attest
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn strongest_attest_returns_unsigned_for_isolate_source() {
+        // A source with no outbound links — the only honest default
+        // is `unsigned`.
+        let conn = test_db();
+        let lonely = make_memory("lonely", "test", Tier::Long, 5);
+        insert(&conn, &lonely).unwrap();
+        let got = strongest_attest_level_for_source(&conn, &lonely.id).unwrap();
+        assert_eq!(got, "unsigned");
+    }
+
+    #[test]
+    fn strongest_attest_picks_self_signed_over_unsigned() {
+        use crate::identity::keypair;
+        let conn = test_db();
+        let src = make_memory("attest-src", "test", Tier::Long, 5);
+        let a = make_memory("attest-a", "test", Tier::Long, 5);
+        let b = make_memory("attest-b", "test", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &a).unwrap();
+        insert(&conn, &b).unwrap();
+        // One unsigned + one signed outbound link.
+        create_link_signed(&conn, &src.id, &a.id, "related_to", None).unwrap();
+        let kp = keypair::generate("alice").unwrap();
+        create_link_signed(&conn, &src.id, &b.id, "supersedes", Some(&kp)).unwrap();
+        let got = strongest_attest_level_for_source(&conn, &src.id).unwrap();
+        assert_eq!(got, "self_signed", "self_signed beats unsigned");
+    }
+
+    #[test]
+    fn strongest_attest_picks_peer_attested_over_self_signed() {
+        // Construct a peer-attested row by hand-rolling the
+        // create_link_inbound path so we don't depend on a remote
+        // signature. The CHECK trigger requires a 64-byte sig blob
+        // for `peer_attested` — fabricate one.
+        let conn = test_db();
+        let src = make_memory("attest-pa-src", "test", Tier::Long, 5);
+        let a = make_memory("attest-pa-a", "test", Tier::Long, 5);
+        let b = make_memory("attest-pa-b", "test", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &a).unwrap();
+        insert(&conn, &b).unwrap();
+        // Self-signed link.
+        let kp = crate::identity::keypair::generate("alice").unwrap();
+        create_link_signed(&conn, &src.id, &a.id, "related_to", Some(&kp)).unwrap();
+        // Hand-inject a peer_attested row with a 64-byte signature so
+        // the CHECK trigger admits it.
+        let now = chrono::Utc::now().to_rfc3339();
+        let sig = vec![0xAB_u8; 64];
+        conn.execute(
+            "INSERT INTO memory_links \
+                (source_id, target_id, relation, created_at, valid_from, signature, attest_level, observed_by) \
+             VALUES (?1, ?2, 'related_to', ?3, ?3, ?4, 'peer_attested', 'peer-bob')",
+            params![&src.id, &b.id, &now, &sig],
+        )
+        .unwrap();
+        let got = strongest_attest_level_for_source(&conn, &src.id).unwrap();
+        assert_eq!(got, "peer_attested", "peer_attested beats self_signed");
+    }
+
+    #[test]
+    fn ck_trigger_refuses_self_signed_insert_without_signature() {
+        // BUG-A regression test — a direct INSERT that claims
+        // `self_signed` with NULL signature must fail at the SQLite
+        // trigger layer. Closes the phantom-attest-level defect at
+        // the substrate boundary even when a future caller (or
+        // operator UPDATE) bypasses `create_link_signed`'s match arm.
+        let conn = test_db();
+        let s = make_memory("ck-src", "test", Tier::Long, 5);
+        let t = make_memory("ck-tgt", "test", Tier::Long, 5);
+        insert(&conn, &s).unwrap();
+        insert(&conn, &t).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let res = conn.execute(
+            "INSERT INTO memory_links \
+                (source_id, target_id, relation, created_at, valid_from, signature, attest_level) \
+             VALUES (?1, ?2, 'related_to', ?3, ?3, NULL, 'self_signed')",
+            params![&s.id, &t.id, &now],
+        );
+        let err = res.expect_err("CHECK trigger must reject self_signed + NULL signature");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("CHECK constraint failed")
+                || msg.contains("attest_level")
+                || msg.contains("64-byte signature"),
+            "trigger error must name the failure mode, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn ck_trigger_refuses_self_signed_insert_with_wrong_length_signature() {
+        // Same defense for a non-NULL but wrong-length signature
+        // (e.g. truncated by a partial wire-read or a malformed
+        // operator INSERT).
+        let conn = test_db();
+        let s = make_memory("ck-src-wlen", "test", Tier::Long, 5);
+        let t = make_memory("ck-tgt-wlen", "test", Tier::Long, 5);
+        insert(&conn, &s).unwrap();
+        insert(&conn, &t).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let res = conn.execute(
+            "INSERT INTO memory_links \
+                (source_id, target_id, relation, created_at, valid_from, signature, attest_level) \
+             VALUES (?1, ?2, 'related_to', ?3, ?3, ?4, 'self_signed')",
+            params![&s.id, &t.id, &now, &[0u8; 8][..]],
+        );
+        assert!(
+            res.is_err(),
+            "CHECK trigger must reject wrong-length signature"
+        );
+    }
+
+    #[test]
+    fn ck_trigger_refuses_update_to_self_signed_without_signature() {
+        // The CHECK trigger fires on UPDATE as well as INSERT — a
+        // post-hoc UPDATE that flips an unsigned row to self_signed
+        // without supplying signature bytes must be refused.
+        let conn = test_db();
+        let s = make_memory("ck-upd-src", "test", Tier::Long, 5);
+        let t = make_memory("ck-upd-tgt", "test", Tier::Long, 5);
+        insert(&conn, &s).unwrap();
+        insert(&conn, &t).unwrap();
+        create_link_signed(&conn, &s.id, &t.id, "related_to", None).unwrap();
+        let res = conn.execute(
+            "UPDATE memory_links SET attest_level = 'self_signed' \
+             WHERE source_id = ?1 AND target_id = ?2",
+            params![&s.id, &t.id],
+        );
+        assert!(
+            res.is_err(),
+            "CHECK trigger must reject UPDATE to self_signed with NULL signature"
+        );
+    }
+
+    #[test]
+    fn ck_trigger_admits_unsigned_with_null_signature() {
+        // The trigger's `WHEN` clause is scoped to self_signed /
+        // peer_attested — the unsigned path with NULL signature
+        // (the v0.6.4 default) must still admit. Negative-control
+        // test pinning the trigger's narrow scope.
+        let conn = test_db();
+        let s = make_memory("ck-unsigned-src", "test", Tier::Long, 5);
+        let t = make_memory("ck-unsigned-tgt", "test", Tier::Long, 5);
+        insert(&conn, &s).unwrap();
+        insert(&conn, &t).unwrap();
+        // create_link_signed's unsigned branch sets (NULL, "unsigned");
+        // confirm it still works under the new trigger.
+        create_link_signed(&conn, &s.id, &t.id, "related_to", None)
+            .expect("unsigned create must still succeed under the new CHECK trigger");
     }
 }
