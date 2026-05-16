@@ -368,6 +368,33 @@ pub fn build_router_with_timeout(
         .route("/api/v1/subscriptions", delete(handlers::unsubscribe))
         .route("/api/v1/subscriptions", get(handlers::list_subscriptions))
         .route("/api/v1/session/start", post(handlers::session_start))
+        // v0.7.0 Cluster E API-2 (issue #767) — Agent Skills HTTP parity.
+        // Seven routes mirroring the seven L1-5 `memory_skill_*` MCP
+        // tools so HTTP-daemon operators can drive skills without
+        // dropping back to stdio JSON-RPC. No new MCP tools land —
+        // tool count stays at 71/70/Power 22.
+        .route(
+            "/api/v1/skill/register",
+            post(handlers::skill_register_route),
+        )
+        .route("/api/v1/skill/list", get(handlers::skill_list_route))
+        .route("/api/v1/skill/{id}", get(handlers::skill_get_route))
+        .route(
+            "/api/v1/skill/{id}/resource",
+            get(handlers::skill_resource_route),
+        )
+        .route(
+            "/api/v1/skill/{id}/export",
+            post(handlers::skill_export_route),
+        )
+        .route(
+            "/api/v1/skill/{id}/promote",
+            post(handlers::skill_promote_route),
+        )
+        .route(
+            "/api/v1/skill/{id}/compose",
+            post(handlers::skill_compose_route),
+        )
         .layer(axum::middleware::from_fn_with_state(
             api_key_state,
             handlers::api_key_auth,
