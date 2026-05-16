@@ -436,6 +436,9 @@ fn cap_zero_disables_every_reflection_with_audit_row() {
         auto_atomise_mode: None,
         legacy_per_pair_classifier: None,
         auto_classify_kind: None,
+        synthesis_failure_mode: None,
+        synthesis_max_deletes_per_call: None,
+        synthesis_max_candidate_chars: None,
     };
     seed_policy(&conn, "task7-disabled", &policy);
     let src = make_memory("task7-disabled", "depth0-src", 0);

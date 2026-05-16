@@ -190,6 +190,9 @@ mod tests {
             auto_atomise_mode: None,
             legacy_per_pair_classifier: None,
             auto_classify_kind: None,
+            synthesis_failure_mode: None,
+            synthesis_max_deletes_per_call: None,
+            synthesis_max_candidate_chars: None,
         };
         let conn = db::open(db_path).unwrap();
         let now = chrono::Utc::now().to_rfc3339();

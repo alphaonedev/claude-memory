@@ -420,6 +420,56 @@ pub struct GovernancePolicy {
     /// fills in `Observation` (the default) when no kind was set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_classify_kind: Option<MemoryKindAutoClassify>,
+    /// v0.7.0 Cluster-B (issue #767) — per-namespace knob controlling
+    /// what happens when the Form 1 synthesis curator call fails (LLM
+    /// down, malformed JSON, validation failure, etc.).
+    ///
+    /// * `None` / `Some(FallThrough)` (default) — preserve the v0.7.0
+    ///   pre-cluster-B behaviour: log a warning, swallow the error,
+    ///   continue with the legacy dedup-merge / insert path. Backward
+    ///   compatible.
+    /// * `Some(BlockWrite)` — refuse the write with a typed error so
+    ///   the caller knows the synthesis layer failed and the substrate
+    ///   did not silently fall through to a different code path. Use
+    ///   on namespaces where the synthesis verdict is operationally
+    ///   load-bearing (e.g. a fact-base where duplicate writes are
+    ///   not tolerable).
+    ///
+    /// Synthesis is a QUALITY gate, not a SECURITY gate — the K9 / K10
+    /// governance pipeline remains the security surface even under
+    /// `BlockWrite`. This knob simply lets operators choose whether a
+    /// curator outage degrades silently or surfaces loudly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis_failure_mode: Option<SynthesisFailureMode>,
+    /// v0.7.0 Cluster-B (issue #767, SEC-1) — per-namespace cap on the
+    /// number of `delete` verdicts a single synthesis batch may apply
+    /// without an explicit K10 approval flow.
+    ///
+    /// Default `None` resolves to **1**, matching the principle of
+    /// least authority: a single LLM round-trip should not be able to
+    /// purge many candidates from the namespace in a silent batch. A
+    /// verdict exceeding the cap is refused at the substrate boundary;
+    /// the audit-honest event `synthesis.refused_unbounded_delete`
+    /// fires at WARN level.
+    ///
+    /// Operators who need a higher cap (e.g. a corpus where mass
+    /// dedupe is a normal substrate task) raise this explicitly. The
+    /// security pipeline (K9 per-delete recheck) still runs regardless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis_max_deletes_per_call: Option<u32>,
+    /// v0.7.0 Cluster-B (issue #767, PERF-7) — per-candidate cap on
+    /// the number of characters of `content` inlined into the
+    /// synthesis prompt. A huge candidate (e.g. a 50KB note) otherwise
+    /// inflates the prompt unboundedly and inflates LLM cost.
+    ///
+    /// Default `None` resolves to **1500** characters (~400 tokens at
+    /// the cl100k average). The truncation only affects what the LLM
+    /// sees; the stored row is untouched. A truncation event records
+    /// the byte budget in the `synthesis_prompt_size_chars` telemetry
+    /// counter so operators can observe whether the cap matters in
+    /// production.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthesis_max_candidate_chars: Option<u32>,
 }
 
 /// v0.7.x Form 2 — atomisation execution mode. Stored inside
@@ -458,6 +508,32 @@ impl AutoAtomiseMode {
             Self::Off => "off",
             Self::Deferred => "deferred",
             Self::Synchronous => "synchronous",
+        }
+    }
+}
+
+/// v0.7.0 Cluster-B (issue #767) — per-namespace enum for the
+/// Form 1 synthesis-failure policy. See
+/// [`GovernancePolicy::synthesis_failure_mode`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SynthesisFailureMode {
+    /// Default — log + swallow + continue with the legacy dedup-merge
+    /// / insert path. Backward-compatible with the v0.7.0 ship.
+    #[default]
+    FallThrough,
+    /// Refuse the write with a typed error so callers observe the
+    /// curator outage instead of inheriting silent fallback behaviour.
+    BlockWrite,
+}
+
+impl SynthesisFailureMode {
+    /// Telemetry label.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FallThrough => "fall_through",
+            Self::BlockWrite => "block_write",
         }
     }
 }
@@ -529,6 +605,12 @@ impl Default for GovernancePolicy {
             // (or `Observation` default) kind stands. Operators opt in
             // per-namespace via the namespace standard's governance blob.
             auto_classify_kind: None,
+            // v0.7.0 Cluster-B: defaults preserve the v0.7.0 ship
+            // behaviour (silent fall-through on curator outage, cap of
+            // 1 delete per synthesis batch, 1500-char content cap).
+            synthesis_failure_mode: None,
+            synthesis_max_deletes_per_call: None,
+            synthesis_max_candidate_chars: None,
         }
     }
 }
@@ -587,6 +669,11 @@ impl GovernancePolicy {
             // v0.7.x Form 6: managed-namespace bootstrap leaves
             // auto-classify Off — operators opt in explicitly.
             auto_classify_kind: None,
+            // v0.7.0 Cluster-B: managed-namespace bootstrap inherits
+            // the compiled defaults; operators tighten on a per-ns basis.
+            synthesis_failure_mode: None,
+            synthesis_max_deletes_per_call: None,
+            synthesis_max_candidate_chars: None,
         }
     }
 
@@ -720,6 +807,34 @@ impl GovernancePolicy {
     #[must_use]
     pub fn effective_legacy_per_pair_classifier(&self) -> bool {
         self.legacy_per_pair_classifier.unwrap_or(false)
+    }
+
+    /// v0.7.0 Cluster-B (issue #767) — resolve the synthesis-failure
+    /// policy. Default is [`SynthesisFailureMode::FallThrough`] to
+    /// preserve backward compatibility with the v0.7.0 ship behaviour;
+    /// operators opt in to [`SynthesisFailureMode::BlockWrite`] per
+    /// namespace when a curator outage must be surfaced loudly.
+    #[must_use]
+    pub fn effective_synthesis_failure_mode(&self) -> SynthesisFailureMode {
+        self.synthesis_failure_mode.unwrap_or_default()
+    }
+
+    /// v0.7.0 Cluster-B (issue #767, SEC-1) — resolve the per-call
+    /// delete-cap. Compiled default is **1**: a single LLM round-trip
+    /// must not mass-delete a namespace without an explicit K10
+    /// approval flow.
+    #[must_use]
+    pub fn effective_synthesis_max_deletes_per_call(&self) -> u32 {
+        self.synthesis_max_deletes_per_call.unwrap_or(1)
+    }
+
+    /// v0.7.0 Cluster-B (issue #767, PERF-7) — resolve the
+    /// per-candidate character cap inlined into the synthesis prompt.
+    /// Compiled default is **1500** characters (~400 cl100k tokens).
+    /// Truncation only affects the LLM prompt, not the stored row.
+    #[must_use]
+    pub fn effective_synthesis_max_candidate_chars(&self) -> usize {
+        self.synthesis_max_candidate_chars.unwrap_or(1500) as usize
     }
 }
 

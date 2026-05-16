@@ -1006,6 +1006,9 @@ mod tests {
             auto_atomise_mode: None,
             legacy_per_pair_classifier: None,
             auto_classify_kind: None,
+            synthesis_failure_mode: None,
+            synthesis_max_deletes_per_call: None,
+            synthesis_max_candidate_chars: None,
         };
         assert!(validate_governance_policy(&p).is_err());
     }
@@ -1029,6 +1032,9 @@ mod tests {
             auto_atomise_mode: None,
             legacy_per_pair_classifier: None,
             auto_classify_kind: None,
+            synthesis_failure_mode: None,
+            synthesis_max_deletes_per_call: None,
+            synthesis_max_candidate_chars: None,
         };
         assert!(validate_governance_policy(&bad).is_err());
 
@@ -1048,6 +1054,9 @@ mod tests {
             auto_atomise_mode: None,
             legacy_per_pair_classifier: None,
             auto_classify_kind: None,
+            synthesis_failure_mode: None,
+            synthesis_max_deletes_per_call: None,
+            synthesis_max_candidate_chars: None,
         };
         assert!(validate_governance_policy(&good).is_ok());
     }
@@ -1448,6 +1457,9 @@ mod tests {
             auto_atomise_mode: None,
             legacy_per_pair_classifier: None,
             auto_classify_kind: None,
+            synthesis_failure_mode: None,
+            synthesis_max_deletes_per_call: None,
+            synthesis_max_candidate_chars: None,
         };
         assert!(validate_governance_policy(&p).is_err());
     }
