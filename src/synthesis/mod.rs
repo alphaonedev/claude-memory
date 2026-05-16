@@ -87,6 +87,7 @@ use crate::models::Memory;
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// v0.7.0 Cluster-B (issue #767, PERF-7) — compiled default for the
@@ -274,13 +275,23 @@ pub fn build_prompt_with_cap(
     buf.push_str("</USER_CONTENT>\nContent: <USER_CONTENT>");
     buf.push_str(&truncate_chars(incoming_content, max_candidate_chars));
     buf.push_str("</USER_CONTENT>\n\nEXISTING CANDIDATES:\n");
+    // PERF-16 (issue #779): assemble each candidate envelope by writing
+    // directly into `buf` with `push_str` + a single infallible `write!`
+    // call for the `[idx] id=…` header. The previous shape allocated a
+    // fresh `format!` `String` per iteration only to copy it into `buf`;
+    // the byte sequence is preserved verbatim, only the allocation is
+    // dropped.
     for (idx, cand) in candidates.iter().enumerate() {
         let title_clip = truncate_chars(&cand.title, max_candidate_chars);
         let content_clip = truncate_chars(&cand.content, max_candidate_chars);
-        buf.push_str(&format!(
-            "[{}] id={} title=<USER_CONTENT>{}</USER_CONTENT>\n  content: <USER_CONTENT>{}</USER_CONTENT>\n",
-            idx, cand.id, title_clip, content_clip
-        ));
+        // `write!` into a `String` is infallible — the only error path
+        // a `fmt::Write` impl could return is OOM, which the std impl
+        // for `String` does not surface.
+        let _ = write!(buf, "[{}] id={} title=<USER_CONTENT>", idx, cand.id);
+        buf.push_str(&title_clip);
+        buf.push_str("</USER_CONTENT>\n  content: <USER_CONTENT>");
+        buf.push_str(&content_clip);
+        buf.push_str("</USER_CONTENT>\n");
     }
     buf.push_str("\nReturn ONLY the JSON object. No commentary.\n");
 
