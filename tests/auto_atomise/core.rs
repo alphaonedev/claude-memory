@@ -208,6 +208,7 @@ fn opt_in_policy(threshold: u32, max_atom_tokens: u32) -> GovernancePolicy {
         auto_atomise: Some(true),
         auto_atomise_threshold_cl100k: Some(threshold),
         auto_atomise_max_atom_tokens: Some(max_atom_tokens),
+        auto_atomise_max_retries: None,
         auto_persona_trigger_every_n_memories: None,
         auto_export_personas_to_filesystem: None,
         auto_atomise_mode: None,
@@ -231,6 +232,7 @@ fn opt_out_policy() -> GovernancePolicy {
         auto_atomise: Some(false),
         auto_atomise_threshold_cl100k: None,
         auto_atomise_max_atom_tokens: None,
+        auto_atomise_max_retries: None,
         auto_persona_trigger_every_n_memories: None,
         auto_export_personas_to_filesystem: None,
         auto_atomise_mode: None,
@@ -376,7 +378,7 @@ fn test_auto_atomise_disabled_does_nothing() {
     let body = long_body(1000); // well over default threshold
     let mem = insert_memory(&conn, &ns, &body);
 
-    let outcome = maybe_enqueue_auto_atomise(&mem, "ai:test");
+    let outcome = maybe_enqueue_auto_atomise(&conn, &mem, &mem.id, "ai:test");
     match outcome {
         AutoAtomisationOutcome::Skipped { reason } => {
             assert_eq!(reason, "policy_disabled", "expected policy_disabled skip");
@@ -420,7 +422,7 @@ fn test_auto_atomise_below_threshold_does_nothing() {
     );
     let mem = insert_memory(&conn, &ns, &body);
 
-    let outcome = maybe_enqueue_auto_atomise(&mem, "ai:test");
+    let outcome = maybe_enqueue_auto_atomise(&conn, &mem, &mem.id, "ai:test");
     match outcome {
         AutoAtomisationOutcome::UnderThreshold {
             tokens: t,
@@ -465,7 +467,7 @@ fn test_auto_atomise_above_threshold_triggers() {
     let body = long_body(800);
     let mem = insert_memory(&conn, &ns, &body);
 
-    let outcome = maybe_enqueue_auto_atomise(&mem, "ai:test");
+    let outcome = maybe_enqueue_auto_atomise(&conn, &mem, &mem.id, "ai:test");
     match outcome {
         AutoAtomisationOutcome::Enqueued { ref memory_id, .. } => {
             assert_eq!(memory_id, &mem.id);
@@ -532,7 +534,7 @@ fn test_auto_atomise_does_not_block_store_response() {
     for _ in 0..5 {
         let m = insert_memory(&conn, &ns_off, &body);
         let t0 = std::time::Instant::now();
-        let _ = maybe_enqueue_auto_atomise(&m, "ai:test");
+        let _ = maybe_enqueue_auto_atomise(&conn, &m, &m.id, "ai:test");
         samples_off.push(t0.elapsed());
     }
 
@@ -542,7 +544,7 @@ fn test_auto_atomise_does_not_block_store_response() {
     for _ in 0..5 {
         let m = insert_memory(&conn, &ns_on, &body);
         let t0 = std::time::Instant::now();
-        let _ = maybe_enqueue_auto_atomise(&m, "ai:test");
+        let _ = maybe_enqueue_auto_atomise(&conn, &m, &m.id, "ai:test");
         samples_on.push(t0.elapsed());
     }
 
@@ -567,9 +569,16 @@ fn test_auto_atomise_does_not_block_store_response() {
         "on-path median should be sub-50ms (was {m_on:?})"
     );
     // Both medians sub-millisecond is the expected steady state.
-    // Allow on/off ratio up to 10x for hardware jitter; tighten when
-    // sample size is higher in the post-launch perf suite.
-    if m_off > Duration::from_micros(1) {
+    // Cluster-F PERF-1 eliminated the per-hook `db::open` round-trip,
+    // so the off-path median (no policy seeded → short-circuit) often
+    // lands at tens-of-microseconds while the on-path still has to
+    // resolve the namespace policy + spawn a worker thread. The 10x
+    // ratio bound only makes sense when the off-path is in the same
+    // order of magnitude as a worker-spawn (≥1ms); below that the
+    // ratio is dominated by sub-millisecond jitter, not by the hook's
+    // own work. The 50ms absolute ceiling above remains the
+    // load-bearing "non-blocking" assertion.
+    if m_off > Duration::from_millis(1) {
         let ratio_x100 = m_on.as_nanos() * 100 / m_off.as_nanos().max(1);
         assert!(
             ratio_x100 < 1000,
@@ -612,7 +621,7 @@ fn test_auto_atomise_inheritance() {
     let body = long_body(800);
     let mem = insert_memory(&conn, &child, &body);
 
-    let outcome = maybe_enqueue_auto_atomise(&mem, "ai:test");
+    let outcome = maybe_enqueue_auto_atomise(&conn, &mem, &mem.id, "ai:test");
     assert!(
         matches!(outcome, AutoAtomisationOutcome::Enqueued { .. }),
         "expected Enqueued via ancestor inheritance, got {outcome:?}"
@@ -648,7 +657,7 @@ fn test_auto_atomise_child_override() {
     let body = long_body(900);
     let mem = insert_memory(&conn, &child, &body);
 
-    let outcome = maybe_enqueue_auto_atomise(&mem, "ai:test");
+    let outcome = maybe_enqueue_auto_atomise(&conn, &mem, &mem.id, "ai:test");
     match outcome {
         AutoAtomisationOutcome::Skipped { reason } => {
             assert_eq!(reason, "policy_disabled");

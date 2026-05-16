@@ -268,6 +268,7 @@ fn atom_grain_span_falls_within_source_bounds() {
             min_atoms_per_source: 2,
             max_atoms_per_source: 10,
             curator_max_retries: 0,
+            sync_curator_max_retries: 0,
         },
         FeatureTier::Smart,
     );

@@ -356,6 +356,21 @@ pub struct GovernancePolicy {
     /// Resolved via the same leaf-first inheritance walk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_atomise_max_atom_tokens: Option<u32>,
+    /// v0.7.0 Cluster-F (issue #767, PERF-5) — per-namespace override
+    /// for the curator retry budget used by the
+    /// **Synchronous** `pre_store` auto-atomise path. `None` defers to
+    /// the compiled default `AtomiserConfig::sync_curator_max_retries`
+    /// (1 — chosen to keep the operator's `memory_store` latency
+    /// envelope tight; the deferred path keeps the full 3-retry
+    /// budget because it runs on a detached worker thread).
+    ///
+    /// Operators who need higher resilience on a specific
+    /// Synchronous-mode namespace (at the cost of a longer
+    /// worst-case envelope) raise this explicitly. Resolved via the
+    /// same leaf-first inheritance walk as every other field on this
+    /// struct.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_atomise_max_retries: Option<u32>,
     /// v0.7.0 QW-2 — auto-regenerate the Persona artefact for an
     /// entity every N writes to a same-entity Reflection memory.
     /// `None` (default) disables the cadence — operators trigger
@@ -597,6 +612,9 @@ impl Default for GovernancePolicy {
             auto_atomise: None,
             auto_atomise_threshold_cl100k: None,
             auto_atomise_max_atom_tokens: None,
+            // v0.7.0 Cluster-F PERF-5: defer to the compiled
+            // `sync_curator_max_retries` (default 1).
+            auto_atomise_max_retries: None,
             auto_persona_trigger_every_n_memories: None,
             auto_export_personas_to_filesystem: None,
             auto_atomise_mode: None,
@@ -656,6 +674,8 @@ impl GovernancePolicy {
             auto_atomise: None,
             auto_atomise_threshold_cl100k: None,
             auto_atomise_max_atom_tokens: None,
+            // v0.7.0 Cluster-F PERF-5: defer to compiled default.
+            auto_atomise_max_retries: None,
             // v0.7.0 QW-2: persona cadence stays opt-in for managed
             // namespaces too. Operators flip on the cadence
             // explicitly via the namespace standard's metadata.
@@ -751,6 +771,18 @@ impl GovernancePolicy {
     #[must_use]
     pub fn effective_auto_atomise_max_atom_tokens(&self) -> u32 {
         self.auto_atomise_max_atom_tokens.unwrap_or(200)
+    }
+
+    /// v0.7.0 Cluster-F PERF-5 — resolve the Synchronous-mode
+    /// curator retry budget. Returns `None` when the namespace has
+    /// no explicit override; the caller threads this through
+    /// `Atomiser::atomise_sync_with_retries` and falls back to
+    /// `AtomiserConfig::sync_curator_max_retries` (compiled default 1)
+    /// when `None`. Documented in `docs/atomisation.md` alongside the
+    /// Synchronous-mode latency envelope.
+    #[must_use]
+    pub fn effective_auto_atomise_max_retries(&self) -> Option<u32> {
+        self.auto_atomise_max_retries
     }
 
     /// v0.7.0 QW-2 — resolve the auto-persona regeneration cadence.
