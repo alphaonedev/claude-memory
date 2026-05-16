@@ -236,6 +236,173 @@ mod tests {
         assert_eq!(fk, 1, "open() must enable foreign_keys");
     }
 
+    /// Helper: confirm a named index is registered in `sqlite_master`.
+    fn index_present(conn: &Connection, name: &str) -> bool {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                rusqlite::params![name],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        n == 1
+    }
+
+    /// Helper: column existence on a table.
+    fn column_present(conn: &Connection, table: &str, column: &str) -> bool {
+        let sql = format!("PRAGMA table_info({table})");
+        let mut stmt = match conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let mut rows = stmt.query([]).expect("PRAGMA query");
+        while let Some(row) = rows.next().expect("PRAGMA next") {
+            let name: String = row.get(1).expect("col name");
+            if name == column {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Regression for #797: a pre-v36 DB shape (no `atom_of` /
+    /// `atomised_into` / `source_uri` / `confidence_source` /
+    /// `mentioned_entity_id` columns on `memories`) must `open()`
+    /// cleanly. Before the fix, the bootstrap SCHEMA issued
+    /// `CREATE INDEX … ON memories(atom_of)` before `migrate` ran the
+    /// v36 ALTER, so SQLite refused with `no such column: atom_of`.
+    ///
+    /// We synthesise the legacy shape by opening a fresh v42 DB, then
+    /// stripping the v36+ columns and re-stamping `schema_version = 34`.
+    /// Re-opening must drive the migration ladder forward to
+    /// `CURRENT_SCHEMA_VERSION` and re-attach every partial index the
+    /// bootstrap used to crash on.
+    #[test]
+    fn open_succeeds_on_legacy_pre_v36_memories_shape() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        {
+            let conn = open(tmp.path()).expect("seed: fresh open");
+            for ix in [
+                "idx_memories_atom_of",
+                "idx_memories_atomised_into",
+                "idx_personas_by_entity",
+                "idx_memories_source_uri",
+                "idx_memories_confidence_source",
+                "idx_memories_mentioned_entity",
+            ] {
+                conn.execute(&format!("DROP INDEX IF EXISTS {ix}"), [])
+                    .expect("drop index");
+            }
+            for col in [
+                "mentioned_entity_id",
+                "confidence_decayed_at",
+                "confidence_signals",
+                "confidence_source",
+                "source_span",
+                "source_uri",
+                "citations",
+                "persona_version",
+                "entity_id",
+                "atom_of",
+                "atomised_into",
+            ] {
+                conn.execute(&format!("ALTER TABLE memories DROP COLUMN {col}"), [])
+                    .unwrap_or_else(|e| panic!("DROP COLUMN {col}: {e}"));
+            }
+            conn.execute("DROP TABLE IF EXISTS confidence_shadow_observations", [])
+                .expect("drop shadow table");
+            conn.execute("DROP TABLE IF EXISTS signed_events_dlq", [])
+                .expect("drop dlq");
+            conn.execute("DELETE FROM schema_version", [])
+                .expect("clear version");
+            conn.execute("INSERT INTO schema_version (version) VALUES (34)", [])
+                .expect("stamp v34");
+        }
+
+        let conn = open(tmp.path()).expect("legacy-upgrade open must succeed");
+
+        let v: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .expect("read schema_version");
+        assert!(
+            v >= 42,
+            "migrate ladder must reach CURRENT_SCHEMA_VERSION; got {v}"
+        );
+
+        for col in [
+            "atom_of",
+            "atomised_into",
+            "entity_id",
+            "persona_version",
+            "citations",
+            "source_uri",
+            "source_span",
+            "confidence_source",
+            "confidence_signals",
+            "confidence_decayed_at",
+            "mentioned_entity_id",
+        ] {
+            assert!(
+                column_present(&conn, "memories", col),
+                "memories.{col} must be ALTER-added by the migrate ladder"
+            );
+        }
+
+        for ix in [
+            "idx_memories_atom_of",
+            "idx_memories_atomised_into",
+            "idx_memories_source_uri",
+            "idx_memories_confidence_source",
+            "idx_memories_mentioned_entity",
+            "idx_shadow_obs_namespace_source_observed",
+        ] {
+            assert!(
+                index_present(&conn, ix),
+                "index {ix} must exist after legacy upgrade"
+            );
+        }
+    }
+
+    /// Regression for #797: a v39/v40-era shadow table (no `source`
+    /// column) must also `open()` cleanly. Before the fix, the
+    /// bootstrap created `idx_shadow_obs_namespace_source_observed`
+    /// against the missing column.
+    #[test]
+    fn open_succeeds_on_legacy_pre_v41_shadow_shape() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        {
+            let conn = open(tmp.path()).expect("seed: fresh open");
+            conn.execute(
+                "DROP INDEX IF EXISTS idx_shadow_obs_namespace_source_observed",
+                [],
+            )
+            .expect("drop compound shadow index");
+            conn.execute(
+                "ALTER TABLE confidence_shadow_observations DROP COLUMN source",
+                [],
+            )
+            .expect("drop shadow.source");
+            conn.execute("DELETE FROM schema_version", [])
+                .expect("clear version");
+            conn.execute("INSERT INTO schema_version (version) VALUES (40)", [])
+                .expect("stamp v40");
+        }
+
+        let conn = open(tmp.path()).expect("v40 legacy-upgrade open must succeed");
+        assert!(
+            column_present(&conn, "confidence_shadow_observations", "source"),
+            "v41 migrate arm must ALTER-add shadow.source"
+        );
+        assert!(
+            index_present(&conn, "idx_shadow_obs_namespace_source_observed"),
+            "v41 compound shadow index must be re-attached"
+        );
+    }
+
     #[test]
     fn check_trigger_rejects_bad_tier_insert() {
         // R1-M2 trigger contract: a write that violates the closed-set

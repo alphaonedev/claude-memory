@@ -106,42 +106,29 @@ CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace);
 CREATE INDEX IF NOT EXISTS idx_memories_priority ON memories(priority DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_title_ns ON memories(title, namespace);
--- v36 partial indexes on the atomisation columns. Restricted predicates
--- keep legacy-DB index footprint at zero until WT-1-B starts minting
--- atoms.
-CREATE INDEX IF NOT EXISTS idx_memories_atom_of
-    ON memories(atom_of) WHERE atom_of IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_memories_atomised_into
-    ON memories(atomised_into) WHERE atomised_into > 0;
--- v37 (QW-2) partial index covering per-entity persona lookups lives
--- in `migrations/sqlite/0031_v07_persona.sql` and runs from the
--- migrate step's `if version < 37` arm — NOT in this bootstrap
--- SCHEMA, because `db::open` applies SCHEMA before `migrate`, and
--- the index references `entity_id` (a column only present after the
--- v37 ALTER fires on a legacy DB). Fresh installs land the column
--- via the CREATE TABLE above, then the migrate step's v37 arm
--- creates the index a few statements later.
--- v38 (Form 4) partial index covering the `--source-uri-prefix`
--- recall filter. Mirrors the persona pattern: legacy rows have NULL
--- `source_uri`, the partial predicate keeps the index footprint at
--- zero until callers start writing URIs.
-CREATE INDEX IF NOT EXISTS idx_memories_source_uri
-    ON memories(source_uri) WHERE source_uri IS NOT NULL;
--- v39 (Form 5) partial index covering rows whose `confidence_source`
--- is NOT the (overwhelming-majority) `caller_provided` bucket. The
--- calibration CLI scans this slice to enumerate derived / calibrated /
--- decayed rows; the partial predicate keeps the index footprint on
--- legacy DBs at zero until the auto-confidence engine starts writing.
-CREATE INDEX IF NOT EXISTS idx_memories_confidence_source
-    ON memories(confidence_source) WHERE confidence_source != 'caller_provided';
--- v39 (Form 5) — per-recall shadow-mode telemetry. Populated when
--- AI_MEMORY_CONFIDENCE_SHADOW=1 and sampled at
--- AI_MEMORY_CONFIDENCE_SHADOW_SAMPLE_RATE. The calibration CLI reads
--- this table to compute per-(namespace, source) baselines.
--- v40 (Cluster G) added the denormalised `source` column + compound
--- `(namespace, source, observed_at)` index so the calibration scan
--- streams a single-table SQL aggregation (was: full-window Vec materialise
--- + Rust grouping, PERF-12).
+-- Partial indexes referencing v36+ columns (`atom_of`, `atomised_into`,
+-- `source_uri`, `confidence_source`, `mentioned_entity_id`) and the v41
+-- compound shadow-observations index are NOT in this bootstrap SCHEMA
+-- (issue #797). They live exclusively in their migration .sql files
+-- (`migrations/sqlite/0030_v07_atomisation.sql`,
+-- `0032_v07_form4_provenance.sql`,
+-- `0033_v07_form5_confidence_calibration.sql`,
+-- `0035_v07_shadow_retention.sql`,
+-- `0036_v07_auto_persona_entity_id.sql`) and run from the matching
+-- `if version < N` arms of `migrate()` AFTER the ALTER TABLE that adds
+-- the column.
+--
+-- `db::open` applies SCHEMA before `migrate`, so any `CREATE INDEX` here
+-- that references a v36+ column crashes on a legacy DB whose pre-v36
+-- `memories` row leaves the `CREATE TABLE IF NOT EXISTS` as a no-op
+-- (the new columns never land). The maintainers caught this for the v37
+-- `entity_id` index from the start; v36/v38/v39/v41/v42 were brought
+-- under the same discipline in #797.
+--
+-- Fresh installs are unaffected: the `CREATE TABLE` above lands every
+-- v42-era column, then every `if version < N` arm runs its .sql file
+-- (idempotent `CREATE INDEX IF NOT EXISTS`) to attach the partial
+-- indexes.
 CREATE TABLE IF NOT EXISTS confidence_shadow_observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     memory_id TEXT NOT NULL,
@@ -160,18 +147,9 @@ CREATE INDEX IF NOT EXISTS idx_shadow_obs_observed_at
     ON confidence_shadow_observations(observed_at);
 CREATE INDEX IF NOT EXISTS idx_shadow_obs_memory
     ON confidence_shadow_observations(memory_id);
-CREATE INDEX IF NOT EXISTS idx_shadow_obs_namespace_source_observed
-    ON confidence_shadow_observations(namespace, source, observed_at);
--- v42 (PERF-8 #781) — partial index covering the auto-persona matcher's
--- `WHERE memory_kind = 'reflection' AND mentioned_entity_id = ?
--- AND namespace = ?` lookup. The partial predicate matches the literal
--- `memory_kind = 'reflection'` constraint in the matcher SQL so the
--- SQLite planner reliably picks this index over a sequential scan
--- (the `mentioned_entity_id = ?` equality predicate prunes NULL rows
--- from the result set; the partial predicate just keeps the index
--- narrow). Non-reflection rows contribute zero index pages.
-CREATE INDEX IF NOT EXISTS idx_memories_mentioned_entity
-    ON memories(mentioned_entity_id, namespace) WHERE memory_kind = 'reflection';
+-- `idx_shadow_obs_namespace_source_observed` references the v41
+-- `confidence_shadow_observations.source` column and lives in
+-- `migrations/sqlite/0035_v07_shadow_retention.sql` (see comment above).
 
 CREATE TABLE IF NOT EXISTS memory_links (
     source_id    TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
