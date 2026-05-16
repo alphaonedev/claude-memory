@@ -1150,4 +1150,154 @@ limit = 25
             .collect();
         assert!(nses.len() >= 2 || nses.contains("other-ns"));
     }
+
+    // -----------------------------------------------------------------
+    // v0.7-polish coverage recovery (issue #767) — Form 4 + Form 6
+    // filter coverage. Drives apply_form4_recall_filters every-branch
+    // and the run() integration of --source-uri-prefix / --has-citations
+    // / --kind no-match paths.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn apply_form4_recall_filters_no_filter_passes_through() {
+        // Both filters absent → original results returned verbatim.
+        let m = crate::models::Memory {
+            id: "id".to_string(),
+            ..Default::default()
+        };
+        let input = vec![(m.clone(), 0.5)];
+        let out = apply_form4_recall_filters(input, false, None);
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn apply_form4_recall_filters_has_citations_drops_empty_citations() {
+        let mut a = crate::models::Memory {
+            id: "a".to_string(),
+            ..Default::default()
+        };
+        a.citations = vec![crate::models::Citation {
+            uri: "doc:x".to_string(),
+            accessed_at: "2026-01-01T00:00:00Z".to_string(),
+            hash: None,
+            span: None,
+        }];
+        let b = crate::models::Memory {
+            id: "b".to_string(),
+            ..Default::default()
+        };
+        let input = vec![(a, 0.9), (b, 0.8)];
+        let out = apply_form4_recall_filters(input, true, None);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0.id, "a");
+    }
+
+    #[test]
+    fn apply_form4_recall_filters_source_uri_prefix_drops_non_matches() {
+        let mut a = crate::models::Memory {
+            id: "a".to_string(),
+            ..Default::default()
+        };
+        a.source_uri = Some("uri:https://example.com/path".to_string());
+        let mut b = crate::models::Memory {
+            id: "b".to_string(),
+            ..Default::default()
+        };
+        b.source_uri = Some("uri:https://other.org/elsewhere".to_string());
+        let c = crate::models::Memory {
+            id: "c".to_string(),
+            ..Default::default()
+        };
+        // c has source_uri = None → excluded by prefix filter.
+        let input = vec![(a, 1.0), (b, 0.9), (c, 0.8)];
+        let out = apply_form4_recall_filters(input, false, Some("uri:https://example.com"));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0.id, "a");
+    }
+
+    #[test]
+    fn apply_form4_recall_filters_source_uri_prefix_no_matches_returns_empty() {
+        // The 0.2% gap closure for cli/recall.rs — drives the
+        // "filter declared, nothing matches" path.
+        let mut a = crate::models::Memory {
+            id: "a".to_string(),
+            ..Default::default()
+        };
+        a.source_uri = Some("uri:https://example.com/path".to_string());
+        let input = vec![(a, 1.0)];
+        let out =
+            apply_form4_recall_filters(input, false, Some("uri:https://nothing-matches.invalid"));
+        assert!(out.is_empty(), "expected no matches for unrelated prefix");
+    }
+
+    #[test]
+    fn apply_form4_recall_filters_combined_has_citations_and_prefix() {
+        let mut a = crate::models::Memory {
+            id: "a".to_string(),
+            ..Default::default()
+        };
+        a.citations = vec![crate::models::Citation {
+            uri: "doc:x".to_string(),
+            accessed_at: "2026-01-01T00:00:00Z".to_string(),
+            hash: None,
+            span: None,
+        }];
+        a.source_uri = Some("uri:https://example.com/x".to_string());
+        // Has citations but wrong prefix.
+        let mut b = crate::models::Memory {
+            id: "b".to_string(),
+            ..Default::default()
+        };
+        b.citations = vec![crate::models::Citation {
+            uri: "doc:y".to_string(),
+            accessed_at: "2026-01-01T00:00:00Z".to_string(),
+            hash: None,
+            span: None,
+        }];
+        b.source_uri = Some("uri:https://other.org/y".to_string());
+        let input = vec![(a, 0.9), (b, 0.8)];
+        let out = apply_form4_recall_filters(input, true, Some("uri:https://example.com"));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0.id, "a");
+    }
+
+    #[test]
+    fn recall_with_source_uri_prefix_no_match_returns_empty_envelope() {
+        // End-to-end via run(): seed two memories without source_uri,
+        // then ask for source_uri_prefix that never matches.
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        seed_memory(&db, "test", "needle title", "haystack content");
+        let mut args = default_args();
+        args.source_uri_prefix = Some("uri:https://no-such-source.invalid".to_string());
+        let cfg = AppConfig::default();
+        {
+            let mut out = env.output();
+            run(&db, &args, true, &cfg, &mut out).unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        assert_eq!(v["count"].as_u64().unwrap(), 0);
+        assert!(v["memories"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn recall_with_kind_filter_all_keyword_is_noop() {
+        // --kind=all parses to None → no filter applied.
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        seed_memory(&db, "test", "needle title", "haystack content");
+        let mut args = default_args();
+        args.kind = Some("ALL".to_string());
+        let cfg = AppConfig::default();
+        {
+            let mut out = env.output();
+            run(&db, &args, true, &cfg, &mut out).unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        // The "all" sentinel passes through every memory (no kind filter).
+        assert!(
+            v["count"].as_u64().unwrap() >= 1,
+            "expected at least one match under --kind=all"
+        );
+    }
 }
