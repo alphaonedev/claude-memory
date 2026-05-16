@@ -315,6 +315,14 @@ See also: [`docs/MIGRATION_v0.7.md` §"Federation hardening"](MIGRATION_v0.7.md#
 the canonical inventory in
 [`docs/internal/v070-feature-inventory.md` §"Feature: Federation hardening"](internal/v070-feature-inventory.md),
 the V-4 audit chain that records peer-write events at
-[`docs/signed-events-v4.md`](signed-events-v4.md), and the
-governance pipeline that consumes federated rule writes at
-[`docs/governance.md`](governance.md).
+[`docs/signed-events-v4.md`](signed-events-v4.md), the governance
+pipeline that consumes federated rule writes at
+[`docs/governance.md`](governance.md), the hook pipeline that fires
+on every inbound peer write at
+[`docs/hook-pipeline.md`](hook-pipeline.md), the K8 quotas substrate
+that gates inbound peer writes per claimed agent_id at
+[`docs/k8-quotas.md`](k8-quotas.md), the K10 SSE approvals path that
+streams federated approval requests at
+[`docs/k10-sse-approvals.md`](k10-sse-approvals.md), and the sidechain
+transcripts whose decompression cap protects against peer zstd-bomb
+DOS at [`docs/sidechain-transcripts.md`](sidechain-transcripts.md).

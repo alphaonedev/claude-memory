@@ -360,6 +360,12 @@ permissions pipeline, [`docs/MIGRATION_v0.7.md` §"K10 SSE approvals"](MIGRATION
 the canonical inventory in
 [`docs/internal/v070-feature-inventory.md` §"Feature: K1/G1 namespace-inheritance"](internal/v070-feature-inventory.md),
 the hook pipeline that emits `AskUser` decisions feeding the
-approvals queue at [`docs/hook-pipeline.md`](hook-pipeline.md), and
-the signed-events chain that records every approval as an
-append-only audit row at [`docs/signed-events-v4.md`](signed-events-v4.md).
+approvals queue at [`docs/hook-pipeline.md`](hook-pipeline.md), the
+signed-events chain that records every approval as an append-only
+audit row at [`docs/signed-events-v4.md`](signed-events-v4.md), the
+K8 quotas substrate that paired-blocks an over-quota agent's
+pending-action queue at [`docs/k8-quotas.md`](k8-quotas.md), the
+federation hardening that propagates approval decisions to peers at
+[`docs/federation.md`](federation.md), and the sidechain transcripts
+that capture the context of each approved write at
+[`docs/sidechain-transcripts.md`](sidechain-transcripts.md).

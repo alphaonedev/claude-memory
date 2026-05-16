@@ -316,6 +316,12 @@ See also: [`docs/MIGRATION_v0.7.md` §"K8 quota tool"](MIGRATION_v0.7.md),
 the canonical inventory in
 [`docs/internal/v070-feature-inventory.md` §"Feature: K8 quota status tool"](internal/v070-feature-inventory.md),
 the K9 governance pipeline that complements quota with rule-based
-refusal at [`docs/governance.md`](governance.md), and the
-SSE-approvals path that surfaces governance refusals to operators at
-[`docs/k10-sse-approvals.md`](k10-sse-approvals.md).
+refusal at [`docs/governance.md`](governance.md), the SSE-approvals
+path that surfaces governance refusals to operators at
+[`docs/k10-sse-approvals.md`](k10-sse-approvals.md), the hook pipeline
+that gates pre-write decisions before quota check at
+[`docs/hook-pipeline.md`](hook-pipeline.md), the federated peer that
+quota-checks inbound writes per-peer at
+[`docs/federation.md`](federation.md), and the signed-events chain
+that records each quota refusal as an auditable event at
+[`docs/signed-events-v4.md`](signed-events-v4.md).

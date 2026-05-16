@@ -353,6 +353,12 @@ See also: [`docs/MIGRATION_v0.7.md` §"Sidechain transcripts"](MIGRATION_v0.7.md
 the canonical inventory in
 [`docs/internal/v070-feature-inventory.md` §"Feature: Sidechain transcripts"](internal/v070-feature-inventory.md),
 the hook pipeline that drives the R5 pre_store extraction at
-[`docs/hook-pipeline.md`](hook-pipeline.md), and the signed-events
+[`docs/hook-pipeline.md`](hook-pipeline.md), the signed-events
 chain that records transcript-store events at
-[`docs/signed-events-v4.md`](signed-events-v4.md).
+[`docs/signed-events-v4.md`](signed-events-v4.md), the federation
+hardening that prevents zstd-bomb decompression DOS over the peer
+mesh at [`docs/federation.md`](federation.md), the K10 approvals
+path that gates transcript-write rules at
+[`docs/k10-sse-approvals.md`](k10-sse-approvals.md), and the K8
+quotas substrate that bounds per-agent transcript byte volume at
+[`docs/k8-quotas.md`](k8-quotas.md).
