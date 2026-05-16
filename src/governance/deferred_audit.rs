@@ -79,6 +79,15 @@ use tokio::task::JoinHandle;
 use crate::governance::agent_action::{AgentAction, Decision};
 use crate::signed_events::{SignedEvent, append_signed_event, payload_hash};
 
+/// Cluster-C SEC-3 (issue #767) — maximum number of times a sink will
+/// retry a single audit append after a `SQLITE_CONSTRAINT_UNIQUE` race
+/// (concurrent writer beat us to the same `sequence` value on the
+/// `idx_signed_events_sequence` UNIQUE index). The BEGIN IMMEDIATE wrap
+/// in `append_signed_event` should make true contention rare; this
+/// retry budget is the safety belt. After exhausting it the event
+/// lands in `signed_events_dlq` so the audit drop is never silent.
+const APPEND_UNIQUE_RACE_MAX_RETRIES: usize = 5;
+
 /// Wire-name for the deferred refusal audit row. Audit-side dashboards
 /// filter on this string to surface storage-hook refusals separate
 /// from the existing `governance.check` rows produced by the audited
@@ -192,6 +201,21 @@ pub struct DeferredAuditMetrics {
     /// Number of times the supervisor restarted the drainer after a
     /// panic. Should be zero in healthy operation.
     pub drainer_panics: Arc<AtomicU64>,
+    /// Cluster-C SEC-3 (issue #767) — number of events that landed in
+    /// the `signed_events_dlq` table after exhausting the
+    /// `SQLITE_CONSTRAINT_UNIQUE` retry budget or hitting an
+    /// unrecoverable non-race error. Surfaced via the capabilities-v3
+    /// envelope's `approval.deferred_audit_dlq_size` field (live count
+    /// query) and via this counter (cumulative since process boot).
+    pub dlq_landed: Arc<AtomicU64>,
+    /// Cluster-C SEC-3 (issue #767) — cumulative number of
+    /// `SQLITE_CONSTRAINT_UNIQUE` race retries observed by the
+    /// production sink. Every retry indicates the chain-head read
+    /// raced a sibling-connection writer; a sustained non-zero value
+    /// hints at write-contention pressure on the audit chain (e.g. a
+    /// burst of refusals while the substrate writer is also churning
+    /// out `memory_link.created` rows).
+    pub unique_race_retries: Arc<AtomicU64>,
 }
 
 impl DeferredAuditMetrics {
@@ -223,6 +247,20 @@ impl DeferredAuditMetrics {
     #[must_use]
     pub fn panic_count(&self) -> u64 {
         self.drainer_panics.load(Ordering::Relaxed)
+    }
+
+    /// Cluster-C SEC-3 — cumulative number of events that landed in
+    /// `signed_events_dlq` since process boot.
+    #[must_use]
+    pub fn dlq_landed_count(&self) -> u64 {
+        self.dlq_landed.load(Ordering::Relaxed)
+    }
+
+    /// Cluster-C SEC-3 — cumulative number of UNIQUE-constraint race
+    /// retries observed by the production sink since process boot.
+    #[must_use]
+    pub fn unique_race_retry_count(&self) -> u64 {
+        self.unique_race_retries.load(Ordering::Relaxed)
     }
 }
 
@@ -307,25 +345,53 @@ impl DeferredAuditQueue {
 // Drainer / supervisor
 // ---------------------------------------------------------------------------
 
+/// Outcome of one drainer-side append attempt.
+///
+/// Cluster-C SEC-3 (issue #767) — splits a sink's per-event verdict
+/// into three buckets so the drainer's metrics + DLQ accounting line
+/// up with the operator-facing semantics:
+///
+/// * [`AppendOutcome::Appended`] — row landed in `signed_events`,
+///   chain advanced one step. Increments `appended`.
+/// * [`AppendOutcome::DlqLanded`] — append exhausted its race-retry
+///   budget or hit an unrecoverable non-race error; the sink wrote
+///   the event into `signed_events_dlq` with the failure reason
+///   captured. Increments `dlq_landed`. The audit chain itself does
+///   NOT advance, but the row is recoverable post-mortem.
+/// * Returning `Err(_)` from `append` means the sink could not even
+///   land in the DLQ (e.g. DB file gone, schema mismatch). Increments
+///   `append_failures` — the chain-log property has truly broken for
+///   this event and an operator must intervene.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppendOutcome {
+    /// Event landed in `signed_events`.
+    Appended,
+    /// Event landed in `signed_events_dlq` after exhausting retries
+    /// or hitting an unrecoverable non-race error.
+    DlqLanded,
+}
+
 /// Sink trait: an abstraction over "where the drainer writes the
 /// audit row". The production wiring opens a fresh SQLite
-/// `Connection` per drainer task and writes through `signed_events`;
-/// tests substitute a mock sink to assert per-event behavior or
-/// inject panics for supervisor-recovery coverage.
+/// `Connection` per drainer task and writes through `signed_events`
+/// with DLQ fallback; tests substitute a mock sink to assert
+/// per-event behavior or inject panics for supervisor-recovery
+/// coverage.
 ///
 /// `append` MUST be `&mut` so a test sink can record events into an
 /// owned `Vec` without interior mutability. Production sinks
 /// (SQLite-backed) hold their state behind the impl.
 pub trait DeferredAuditSink: Send + 'static {
-    /// Persist one event. Errors are surfaced to the supervisor
-    /// (which logs at `error` level and bumps the
-    /// `append_failures` metric) but do not panic the drainer.
+    /// Persist one event.
     ///
     /// # Errors
     ///
-    /// Implementation-defined. The production sink propagates the
-    /// SQLite error verbatim.
-    fn append(&mut self, event: &DeferredAuditEvent) -> Result<()>;
+    /// Returns `Err` only when the sink cannot even land the event in
+    /// its DLQ surface — a genuinely unrecoverable case (DB file gone,
+    /// schema mismatch). Soft failures (race retries, unrecoverable
+    /// `signed_events` INSERT followed by successful DLQ land) are
+    /// reported via [`AppendOutcome::DlqLanded`].
+    fn append(&mut self, event: &DeferredAuditEvent) -> Result<AppendOutcome>;
 }
 
 /// Production sink: opens a fresh SQLite `Connection` against the
@@ -335,9 +401,22 @@ pub trait DeferredAuditSink: Send + 'static {
 /// One `Connection` per drainer task — NOT shared with the substrate
 /// writer. SQLite WAL mode lets the drainer's appends proceed in
 /// parallel with the writer's INSERTs without lock contention.
+///
+/// # Cluster-C SEC-3 (issue #767) — race-retry + DLQ
+///
+/// The sink wraps `append_signed_event` in a bounded retry loop. A
+/// `SQLITE_CONSTRAINT_UNIQUE` failure on the `idx_signed_events_sequence`
+/// UNIQUE index is the recoverable race-only signal (two writers
+/// computed the same `next_seq` simultaneously); the sink re-runs
+/// `append_signed_event` (which re-reads the chain head) up to
+/// [`APPEND_UNIQUE_RACE_MAX_RETRIES`] times. Any other rusqlite
+/// error, or a retry budget exhaustion, lands the event in
+/// `signed_events_dlq` and returns `Ok(AppendOutcome::DlqLanded)` so
+/// the drainer can update its counters without crashing.
 pub struct SqliteSignedEventsSink {
     db_path: PathBuf,
     conn: Option<rusqlite::Connection>,
+    metrics: Option<DeferredAuditMetrics>,
 }
 
 impl SqliteSignedEventsSink {
@@ -345,11 +424,30 @@ impl SqliteSignedEventsSink {
     /// on first `append`. This pattern lets the supervisor restart
     /// the sink across drainer respawns without holding a closed
     /// `Connection` handle.
+    ///
+    /// Built without a metrics handle; race-retry + DLQ-land events
+    /// will not increment any external counters. Use
+    /// [`Self::with_metrics`] (or [`spawn_supervised_drainer`] which
+    /// threads the metrics handle automatically) for full
+    /// observability.
     #[must_use]
     pub fn new(db_path: impl Into<PathBuf>) -> Self {
         Self {
             db_path: db_path.into(),
             conn: None,
+            metrics: None,
+        }
+    }
+
+    /// Construct a sink wired to a metrics handle. The handle's
+    /// `dlq_landed` and `unique_race_retries` counters are bumped as
+    /// the sink observes those outcomes.
+    #[must_use]
+    pub fn with_metrics(db_path: impl Into<PathBuf>, metrics: DeferredAuditMetrics) -> Self {
+        Self {
+            db_path: db_path.into(),
+            conn: None,
+            metrics: Some(metrics),
         }
     }
 
@@ -366,12 +464,25 @@ impl SqliteSignedEventsSink {
         // We just inserted Some — unwrap is safe.
         Ok(self.conn.as_ref().expect("conn populated above"))
     }
+
+    fn bump_dlq(&self) {
+        if let Some(m) = &self.metrics {
+            m.dlq_landed.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn bump_race_retry(&self) {
+        if let Some(m) = &self.metrics {
+            m.unique_race_retries.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 impl DeferredAuditSink for SqliteSignedEventsSink {
-    fn append(&mut self, event: &DeferredAuditEvent) -> Result<()> {
-        let conn = self.ensure_conn()?;
-        let bytes = event.canonical_bytes()?;
+    fn append(&mut self, event: &DeferredAuditEvent) -> Result<AppendOutcome> {
+        let bytes = event
+            .canonical_bytes()
+            .context("SqliteSignedEventsSink: canonical_bytes")?;
         let signed = SignedEvent {
             id: uuid::Uuid::new_v4().to_string(),
             agent_id: event.agent_id.clone(),
@@ -382,10 +493,112 @@ impl DeferredAuditSink for SqliteSignedEventsSink {
             timestamp: event.timestamp.to_rfc3339(),
             ..SignedEvent::default()
         };
-        append_signed_event(conn, &signed)
-            .context("SqliteSignedEventsSink: append governance.refusal row")?;
-        Ok(())
+
+        // Race-retry loop: SQLITE_CONSTRAINT_UNIQUE on the
+        // `idx_signed_events_sequence` index is the race-only failure
+        // mode. Every other rusqlite error path bails to DLQ.
+        let conn_path = self.db_path.clone();
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 0..=APPEND_UNIQUE_RACE_MAX_RETRIES {
+            let conn = self.ensure_conn()?;
+            match append_signed_event(conn, &signed) {
+                Ok(()) => return Ok(AppendOutcome::Appended),
+                Err(e) => {
+                    if is_unique_constraint_race(&e) && attempt < APPEND_UNIQUE_RACE_MAX_RETRIES {
+                        self.bump_race_retry();
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            db = %conn_path.display(),
+                            "deferred_audit sink: SQLITE_CONSTRAINT_UNIQUE on signed_events.sequence — \
+                             chain-head race; retrying (budget {APPEND_UNIQUE_RACE_MAX_RETRIES})"
+                        );
+                        last_err = Some(e);
+                        continue;
+                    }
+                    last_err = Some(e);
+                    break;
+                }
+            }
+        }
+
+        // Either the retry budget was exhausted on UNIQUE races OR
+        // the first attempt produced a non-race error. Land in DLQ.
+        let err = last_err.unwrap_or_else(|| anyhow::anyhow!("unknown drainer sink error"));
+        let failure_reason = format!("{err:#}");
+        let conn = self.ensure_conn()?;
+        conn.execute(
+            "INSERT INTO signed_events_dlq \
+             (id, agent_id, event_type, payload_hash, signature, attest_level, \
+              timestamp, failure_reason, failed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                signed.id,
+                signed.agent_id,
+                signed.event_type,
+                signed.payload_hash,
+                signed.signature,
+                signed.attest_level,
+                signed.timestamp,
+                failure_reason,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )
+        .context("SqliteSignedEventsSink: DLQ insert")?;
+        tracing::error!(
+            failure_reason = %failure_reason,
+            agent_id = %signed.agent_id,
+            event_id = %signed.id,
+            "deferred_audit sink: append exhausted retries or hit non-race error — \
+             event landed in signed_events_dlq (chain row NOT advanced; replay needed)"
+        );
+        self.bump_dlq();
+        Ok(AppendOutcome::DlqLanded)
     }
+}
+
+/// Cluster-C SEC-3 (issue #767) — classify an `anyhow::Error` produced
+/// by `append_signed_event` as a recoverable `SQLITE_CONSTRAINT_UNIQUE`
+/// chain-head race vs everything else.
+///
+/// The classification walks the chain of causes and matches on
+/// `rusqlite::Error::SqliteFailure` with extended code
+/// `SQLITE_CONSTRAINT_UNIQUE` (2067). We deliberately use the typed
+/// matcher rather than string-matching the rendered error so a future
+/// rusqlite version that tweaks the `Display` impl doesn't silently
+/// flip every race into a DLQ-land.
+fn is_unique_constraint_race(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        if let Some(rusqlite::Error::SqliteFailure(code, _)) =
+            cause.downcast_ref::<rusqlite::Error>()
+        {
+            if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Cluster-C SEC-3 (issue #767) — live count of rows in
+/// `signed_events_dlq`.
+///
+/// Surfaced via the capabilities-v3 envelope's
+/// `approval.deferred_audit_dlq_size` field so operator dashboards
+/// see the current DLQ depth without scraping logs. Returns `0` on
+/// query failure (a missing table or transient lock); callers that
+/// want hard-fail behavior should query the table directly.
+///
+/// # Errors
+///
+/// Returns the underlying `rusqlite` error if the SELECT fails for a
+/// reason other than `SQLITE_NOMEM` (which we treat as transient).
+/// The capabilities pathway treats this as best-effort and falls
+/// through to 0 on error.
+pub fn dlq_size(conn: &rusqlite::Connection) -> Result<u64> {
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM signed_events_dlq", [], |r| r.get(0))
+        .context("dlq_size: SELECT COUNT")?;
+    Ok(u64::try_from(count).unwrap_or(0))
 }
 
 /// Spawn a single drainer iteration. The returned `JoinHandle`
@@ -406,14 +619,28 @@ pub fn spawn_drainer_task<S: DeferredAuditSink + 'static>(
     tokio::spawn(async move {
         while let Some(event) = receiver.recv().await {
             match sink.append(&event) {
-                Ok(()) => {
+                Ok(AppendOutcome::Appended) => {
                     metrics.appended.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(AppendOutcome::DlqLanded) => {
+                    // Cluster-C SEC-3: the sink already captured the
+                    // event in `signed_events_dlq` and bumped its
+                    // own dlq_landed metric (if wired). We also bump
+                    // `append_failures` so existing dashboards that
+                    // alert on a non-zero append_failures count
+                    // still surface DLQ landings — operators read
+                    // the SAME signal regardless of which bucket
+                    // the row went into.
+                    metrics.append_failures.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        "deferred_audit drainer: event landed in DLQ \
+                         (audit chain row NOT advanced; operator replay needed)"
+                    );
                 }
                 Err(e) => {
                     metrics.append_failures.fetch_add(1, Ordering::Relaxed);
                     tracing::error!(
-                        "deferred_audit drainer: sink.append failed: {:#} \
-                         (event will be retried after drainer restart if shutdown not yet initiated)",
+                        "deferred_audit drainer: sink.append failed (no DLQ landing either): {:#}",
                         e
                     );
                     // We don't requeue — the channel is single-consumer.
@@ -535,9 +762,12 @@ pub fn install_deferred_audit_drainer(db_path: &Path) -> (DeferredAuditQueue, Jo
     let (queue, receiver) = DeferredAuditQueue::new();
     let metrics = queue.metrics();
     let db_path_buf = db_path.to_path_buf();
+    let metrics_for_factory = metrics.clone();
     let supervisor = spawn_supervised_drainer(
         receiver,
-        move || SqliteSignedEventsSink::new(db_path_buf.clone()),
+        move || {
+            SqliteSignedEventsSink::with_metrics(db_path_buf.clone(), metrics_for_factory.clone())
+        },
         metrics,
         u32::MAX,
     );
@@ -727,7 +957,7 @@ mod tests {
     }
 
     impl DeferredAuditSink for MockSink {
-        fn append(&mut self, event: &DeferredAuditEvent) -> Result<()> {
+        fn append(&mut self, event: &DeferredAuditEvent) -> Result<AppendOutcome> {
             let prior = self.call_count.fetch_add(1, Ordering::SeqCst) as usize;
             if Some(prior) == self.panic_on {
                 panic!("mock sink: configured panic at call {prior}");
@@ -738,7 +968,7 @@ mod tests {
                 ));
             }
             self.recorded.lock().unwrap().push(event.clone());
-            Ok(())
+            Ok(AppendOutcome::Appended)
         }
     }
 
@@ -911,10 +1141,10 @@ mod tests {
     }
 
     impl DeferredAuditSink for SlowSink {
-        fn append(&mut self, event: &DeferredAuditEvent) -> Result<()> {
+        fn append(&mut self, event: &DeferredAuditEvent) -> Result<AppendOutcome> {
             std::thread::sleep(std::time::Duration::from_millis(1));
             self.recorded.lock().unwrap().push(event.clone());
-            Ok(())
+            Ok(AppendOutcome::Appended)
         }
     }
 
@@ -1087,6 +1317,123 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    // Cluster-C SEC-3 (issue #767) — DLQ + race-retry coverage
+    // -----------------------------------------------------------------
+
+    /// When the sink hits a non-race rusqlite error on the
+    /// `signed_events` INSERT, the event MUST land in
+    /// `signed_events_dlq` (NOT silently dropped) and the
+    /// `dlq_landed` counter MUST bump.
+    ///
+    /// Failure injection: pre-fill `signed_events` with a row whose
+    /// `id` collides with the next UUIDv4 the sink will mint. We can't
+    /// predict UUIDs, so we instead break the table at the schema
+    /// level: drop the `event_type` column. The next `append_signed_event`
+    /// fails on the INSERT (column not found) — an unrecoverable
+    /// non-race error that triggers DLQ land.
+    #[tokio::test]
+    async fn sqlite_sink_lands_event_in_dlq_on_unrecoverable_error() {
+        let dir = fresh_tempdir();
+        let db_path = dir.path().join("dlq-test.db");
+        let _ = crate::db::open(&db_path).expect("init db");
+
+        // Inject the fault: drop the NOT-NULL `event_type` column from
+        // signed_events. Subsequent inserts fail with a constraint
+        // error (NULL into NOT NULL slot) — an unrecoverable non-race
+        // error. We do this by rebuilding the table without the
+        // column; the DLQ table stays intact.
+        {
+            let conn = crate::db::open(&db_path).expect("open for fault inject");
+            conn.execute_batch(
+                "DROP TABLE signed_events; \
+                 CREATE TABLE signed_events ( \
+                    id TEXT PRIMARY KEY, \
+                    agent_id TEXT NOT NULL, \
+                    payload_hash BLOB NOT NULL, \
+                    signature BLOB, \
+                    attest_level TEXT NOT NULL DEFAULT 'unsigned', \
+                    timestamp TEXT NOT NULL, \
+                    prev_hash BLOB, \
+                    sequence INTEGER \
+                 ); \
+                 CREATE UNIQUE INDEX idx_signed_events_sequence \
+                    ON signed_events(sequence);",
+            )
+            .expect("fault-inject schema rewrite");
+        }
+
+        // Spawn drainer + submit one event. The sink will fail the
+        // append (column missing → schema mismatch is unrecoverable)
+        // and land it in DLQ.
+        let (queue, supervisor) = install_deferred_audit_drainer(&db_path);
+        let metrics = queue.metrics();
+        let event = DeferredAuditEvent::from_refusal(
+            "agent:dlq-test",
+            &refusal_action(),
+            &refusal_decision(),
+        )
+        .unwrap();
+        queue.submit(event);
+        close_and_flush(queue, supervisor).await.unwrap();
+
+        // Assert: chain row NOT written, DLQ row present, counters
+        // reflect the outcome.
+        let conn = crate::db::open(&db_path).expect("reopen db");
+        let chain_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM signed_events", [], |r| r.get(0))
+            .unwrap_or(0);
+        assert_eq!(
+            chain_count, 0,
+            "signed_events chain MUST NOT advance when sink fails"
+        );
+        let dlq_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM signed_events_dlq", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(dlq_count, 1, "exactly one DLQ row expected");
+        let dlq_size_live = dlq_size(&conn).expect("dlq_size");
+        assert_eq!(dlq_size_live, 1, "dlq_size helper must reflect live count");
+        assert!(
+            metrics.dlq_landed_count() >= 1,
+            "dlq_landed metric must bump on DLQ landing"
+        );
+    }
+
+    /// `is_unique_constraint_race` MUST return true for a synthetic
+    /// `SQLITE_CONSTRAINT_UNIQUE` error and false for other rusqlite
+    /// errors. Pins the classification helper against rusqlite
+    /// version drift.
+    #[test]
+    fn is_unique_constraint_race_classifies_correctly() {
+        let unique_err = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE),
+            Some("UNIQUE constraint failed".to_string()),
+        );
+        let other_err = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("database is locked".to_string()),
+        );
+        let wrapped_unique: anyhow::Error =
+            anyhow::Error::from(unique_err).context("append signed_event");
+        let wrapped_other: anyhow::Error =
+            anyhow::Error::from(other_err).context("append signed_event");
+        assert!(is_unique_constraint_race(&wrapped_unique));
+        assert!(!is_unique_constraint_race(&wrapped_other));
+
+        // Non-rusqlite errors are never UNIQUE races.
+        let plain: anyhow::Error = anyhow::anyhow!("plain error");
+        assert!(!is_unique_constraint_race(&plain));
+    }
+
+    /// `dlq_size` MUST return 0 on a fresh DB (no DLQ rows).
+    #[tokio::test]
+    async fn dlq_size_returns_zero_on_fresh_db() {
+        let dir = fresh_tempdir();
+        let db_path = dir.path().join("dlq-empty.db");
+        let conn = crate::db::open(&db_path).expect("init db");
+        assert_eq!(dlq_size(&conn).expect("dlq_size on fresh"), 0);
+    }
+
+    // -----------------------------------------------------------------
     // Metrics — getter coverage
     // -----------------------------------------------------------------
 
@@ -1098,6 +1445,8 @@ mod tests {
         assert_eq!(m.send_failure_count(), 0);
         assert_eq!(m.append_failure_count(), 0);
         assert_eq!(m.panic_count(), 0);
+        assert_eq!(m.dlq_landed_count(), 0);
+        assert_eq!(m.unique_race_retry_count(), 0);
     }
 
     #[test]

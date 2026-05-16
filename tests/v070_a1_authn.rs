@@ -36,7 +36,7 @@ use tower::ServiceExt as _;
 /// `tests/k10_approval_http.rs::K10_HTTP_LOCK`.
 static A1_HMAC_LOCK: Mutex<()> = Mutex::new(());
 
-/// Synthesise a K10 approval signature binding method + pending_id per
+/// Synthesise a K10 approval signature binding method + `pending_id` per
 /// release/v0.7.0 commit 99ffacc. Canonical: `<ts>.<METHOD>.<pending_id>.<body>`.
 fn sign(secret: &str, timestamp: &str, method: &str, pending_id: &str, body: &str) -> String {
     use sha2::Digest;

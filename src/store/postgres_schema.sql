@@ -551,6 +551,33 @@ CREATE INDEX IF NOT EXISTS idx_signed_events_timestamp ON signed_events (timesta
 CREATE UNIQUE INDEX IF NOT EXISTS idx_signed_events_sequence ON signed_events (sequence);
 
 -- ─────────────────────────────────────────────────────────────────────
+-- signed_events_dlq — deferred-audit drainer dead-letter queue
+-- (v0.7.0 Cluster-C SEC-3, issue #767, schema v39 Postgres / v40 SQLite).
+--
+-- Mirrors `migrations/postgres/0021_v07_signed_events_dlq.sql`. See
+-- the SQLite migration in `migrations/sqlite/0034_v07_signed_events_dlq.sql`
+-- for the design rationale (failure-split between race-on-UNIQUE
+-- requeue and DLQ-land; non-append-only invariant carve-out).
+
+CREATE TABLE IF NOT EXISTS signed_events_dlq (
+    dlq_id          BIGSERIAL PRIMARY KEY,
+    id              TEXT NOT NULL,
+    agent_id        TEXT NOT NULL,
+    event_type      TEXT NOT NULL,
+    payload_hash    BYTEA NOT NULL,
+    signature       BYTEA,
+    attest_level    TEXT NOT NULL DEFAULT 'unsigned',
+    timestamp       TEXT NOT NULL,
+    failure_reason  TEXT NOT NULL,
+    failed_at       TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_signed_events_dlq_failed_at
+    ON signed_events_dlq(failed_at);
+CREATE INDEX IF NOT EXISTS idx_signed_events_dlq_agent
+    ON signed_events_dlq(agent_id);
+
+-- ─────────────────────────────────────────────────────────────────────
 -- subscription_events / subscription_dlq — A2A correlation IDs, ACK
 -- semantics, retry, and dead-letter queue (v0.7.0 K6, schema v27).
 --

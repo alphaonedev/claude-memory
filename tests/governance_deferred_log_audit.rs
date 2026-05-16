@@ -35,9 +35,9 @@ use std::time::{Duration, Instant};
 use ai_memory::db;
 use ai_memory::governance::agent_action::{AgentAction, Decision, check_agent_action_deferred};
 use ai_memory::governance::deferred_audit::{
-    DeferredAuditEvent, DeferredAuditQueue, DeferredAuditSink, GOVERNANCE_REFUSAL_EVENT_TYPE,
-    SqliteSignedEventsSink, close_and_flush, install_deferred_audit_drainer, spawn_drainer_task,
-    spawn_supervised_drainer,
+    AppendOutcome, DeferredAuditEvent, DeferredAuditQueue, DeferredAuditSink,
+    GOVERNANCE_REFUSAL_EVENT_TYPE, SqliteSignedEventsSink, close_and_flush,
+    install_deferred_audit_drainer, spawn_drainer_task, spawn_supervised_drainer,
 };
 use ai_memory::governance::rules_store::{self, Rule};
 
@@ -195,13 +195,13 @@ struct PanicOnceSink {
 }
 
 impl DeferredAuditSink for PanicOnceSink {
-    fn append(&mut self, _event: &DeferredAuditEvent) -> anyhow::Result<()> {
+    fn append(&mut self, _event: &DeferredAuditEvent) -> anyhow::Result<AppendOutcome> {
         let prior = self.call_count.fetch_add(1, Ordering::SeqCst);
         assert!(
             prior != self.panic_after,
             "PanicOnceSink: configured panic at call {prior}"
         );
-        Ok(())
+        Ok(AppendOutcome::Appended)
     }
 }
 
