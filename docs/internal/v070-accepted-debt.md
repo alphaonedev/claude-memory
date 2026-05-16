@@ -20,10 +20,10 @@
 
 | Bucket | Count |
 |---|---|
-| Already-fixed-by-sibling-cluster | 6 |
-| Deferred-to-v0.7.x (issue filed) | 9 |
+| Already-fixed-by-sibling-cluster | 7 (6 review findings + 1 cluster-level resolution) |
+| Deferred-to-v0.7-polish (issue filed) | 10 findings rolled into 6 issues ([#779](https://github.com/alphaonedev/ai-memory-mcp/issues/779), [#780](https://github.com/alphaonedev/ai-memory-mcp/issues/780), [#781](https://github.com/alphaonedev/ai-memory-mcp/issues/781), [#782](https://github.com/alphaonedev/ai-memory-mcp/issues/782), [#783](https://github.com/alphaonedev/ai-memory-mcp/issues/783), [#784](https://github.com/alphaonedev/ai-memory-mcp/issues/784)) |
 | Accepted-debt-permanent | 8 |
-| **Total triaged** | **23** |
+| **Total triaged** | **25 findings → 7 sibling + 6 issues + 8 permanent + 4 API net-zero confirmations (no-action)** |
 
 ## Already-fixed-by-sibling-cluster
 
@@ -45,16 +45,13 @@ filing.
 
 | Finding | Title | Severity | Rationale for defer | Issue |
 |---|---|---|---|---|
-| PERF-16 | `format!` in Form 1 candidate loop (5-iter bound) | LOW | Bounded iteration (5 candidates per synthesis); replacing with `String::new` + `push_str` saves microseconds against an LLM round-trip already in the millisecond-to-second envelope. Real but invisible. | filed |
-| COR-11 / SEC-15 | auto-export detached-thread silent failure | LOW | Hook is best-effort by design. Counter add (`auto_export.spawn_failed_total`) is the right defense-in-depth; the surface is the v0.7.x metric expansion. | filed |
-| COV-15 | opportunistic test add (synthesis verdict diff coverage) | LOW | Cluster B's regression suite is sufficient at v0.7.0 ship; the deeper coverage matrix lives in v0.7.x. | filed |
-| COV-16 | opportunistic test add (calibration window edge cases) | LOW | Cluster G's 4 new tests pin the baseline + decay paths; the window-edge matrix is v0.7.x. | filed |
-| COV-17 | opportunistic test add (skills round-trip across federation) | LOW | Skills CLI+HTTP+MCP parity tests landed in Cluster E; federation-round-trip is a v0.7.x story alongside the federation hardening climb-back. | filed |
-| COV-18 | opportunistic test add (offload TTL sweep against postgres) | LOW | sqlite TTL sweep covered in Cluster I; postgres parity is opportunistic (the trait is identical, the row count + retention column are identical). | filed |
-| PERF-8 | `auto_persona` `LIKE %X%` scan | MEDIUM | Requires a schema column extension + backfill (canonical entity-id-as-column). Migration risk is real; defer the schema change to v0.7.x. | filed |
-| PERF-11 | Form 3 content duplication across stages | MEDIUM | Cluster B addressed the synthesis-side prompt truncation (PERF-7); Form 3 multi-step ingest carries the same pattern. Refactor lives alongside the Form 3 maturation in v0.7.x. | filed |
-| PERF-17 | `auto_persona resolve_entity_id` JSON parse | LOW | Subordinate to PERF-8 (the entity-id column extension also subsumes this hot path). Defer together. | filed |
-| Cluster H long-form doc expansion | 12-20h tutorial / tuning / troubleshooting depth | INFO | ADR-2 ships MVPs at 200-500 lines each; the long-form depth matures on real operator deployment feedback. v0.7.x patch releases. | filed |
+| PERF-16 | `format!` in Form 1 candidate loop (5-iter bound) | LOW | Bounded iteration (5 candidates per synthesis); replacing with `String::new` + `push_str` saves microseconds against an LLM round-trip already in the millisecond-to-second envelope. Real but invisible. | [#779](https://github.com/alphaonedev/ai-memory-mcp/issues/779) |
+| COR-11 / SEC-15 | auto-export detached-thread silent failure | LOW | Hook is best-effort by design. Counter add (`auto_export.spawn_failed_total`) is the right defense-in-depth; the surface is the v0.7-polish metric expansion. | [#780](https://github.com/alphaonedev/ai-memory-mcp/issues/780) |
+| PERF-8 | `auto_persona` `LIKE %X%` scan | MEDIUM | Requires a schema column extension + backfill (canonical entity-id-as-column). Migration risk is real; defer the schema change to v0.7-polish. Subsumes PERF-17. | [#781](https://github.com/alphaonedev/ai-memory-mcp/issues/781) |
+| PERF-11 | Form 3 content duplication across stages | MEDIUM | Cluster B addressed the synthesis-side prompt truncation (PERF-7); Form 3 multi-step ingest carries the same pattern. Refactor lives alongside the Form 3 maturation in v0.7-polish. | [#782](https://github.com/alphaonedev/ai-memory-mcp/issues/782) |
+| PERF-17 | `auto_persona resolve_entity_id` JSON parse | LOW | Subordinate to PERF-8 (the entity-id column extension also subsumes this hot path). Tracked under the same issue. | [#781](https://github.com/alphaonedev/ai-memory-mcp/issues/781) |
+| COV-15 / COV-16 / COV-17 / COV-18 | opportunistic coverage matrix expansion | LOW | Cluster B/G/E/I baseline acceptance suites pin the v0.7.0 contract; the deeper coverage matrix is the v0.7-polish reviewer-time lane. Rolled up as one issue. | [#783](https://github.com/alphaonedev/ai-memory-mcp/issues/783) |
+| Cluster H long-form doc expansion | 12-20h tutorial / tuning / troubleshooting depth | INFO | ADR-2 ships MVPs at 200-500 lines each; the long-form depth matures on real operator deployment feedback. v0.7-polish patch releases. | [#784](https://github.com/alphaonedev/ai-memory-mcp/issues/784) |
 
 ## Accepted-debt-permanent
 
