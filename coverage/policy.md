@@ -431,6 +431,96 @@ the database mid-test (rejected as too brittle).
   real sqlite daemon, taking the happy path through each defensive
   closure (which is never reached because the sqlite call succeeds).
 
+### v0.7-polish #767 — `src/mcp/tools/store.rs` synthesis-gatekeeper + defensive-closure ceiling (Tier B — PARTIAL EXCEPTION)
+
+After the coverage-recovery pass (PR #795) lifted `mcp/tools/store.rs`
+to 92.74%, a follow-up pass tried to close the remaining gap to the
+tier-B 96% floor. Eight new lib/integration tests were landed:
+
+| Test                                                                              | Lines covered |
+|-----------------------------------------------------------------------------------|---------------|
+| `store_failing_embedder_warns_but_completes`                                      | 890-891       |
+| `store_quota_exhausted_returns_quota_exceeded_error`                              | 802           |
+| `store_invalid_source_propagates_validate_source_error`                           | 201 closure   |
+| `legacy_classifier_handles_no_and_error_responses`                                | 941, 942-948  |
+| `synthesis_update_with_embedder_re_embeds_merged_content` (in `form_1_synthesis`) | 655-665       |
+| `mcp_store_surfaces_governance_refused_prefix_on_substrate_hook_refusal`          | 807-834       |
+
+Two pieces of test infrastructure were added to unblock the above:
+
+1. `embeddings::test_support::FailingEmbedder` — `Embed` trait impl that
+   always returns `Err`, unblocking the `emb.embed(...)` failure-warn
+   arm at lines 890-891. The production `Embedder` only errors on
+   tokeniser/model-forward faults that don't happen against in-memory
+   fixtures, and `MockEmbedder` is documented to never error.
+2. The Test 6 in `tests/governance_storage_insert_hook.rs` extends the
+   existing `OnceLock`-dispatcher pattern (in-process hook dispatcher
+   keyed on a per-test `HookMode` mutex) to drive
+   `mcp::tools::handle_store_for_tests` against a refusing substrate
+   pre-write hook. This is the only path from unit-test scope that can
+   exercise the `GovernanceRefusal` downcast at lines 827-833.
+
+The residual gap to the 96% floor is composed of synthesis-batch arms
+the LLM-response parser (`synthesis::parse_response`) gatekeeps out:
+
+- `src/mcp/tools/store.rs:624-628` — `synthesis update target {id} not
+  found in candidate set` warn. `parse_response` rejects fabricated
+  candidate_ids (returns `Err`), so the verdict-honourer never sees an
+  id outside `cands`. The arm is defence-in-depth against future
+  parser evolution; structurally unreachable today.
+- `src/mcp/tools/store.rs:647-652` — `synthesis update failed for {id}`
+  warn. Triggered when `db::update` on an existing row fails, which
+  requires the row to vanish between `existing.iter().find` and the
+  update call (a concurrent delete race the synthesis path doesn't
+  spawn against itself). Structurally unreachable from unit tests.
+- `src/mcp/tools/store.rs:672` — `if del_id == primary_id { continue; }`
+  guard against the curator emitting both `update` and `delete` for the
+  same id in a single batch. `parse_response` rejects duplicate
+  candidate_ids, so this arm cannot fire.
+- `src/mcp/tools/store.rs:675, 717-723` — `synthesis delete failed for
+  {id}` warns on both the update-batch and delete-only paths.
+  `db::delete` against an existing id requires concurrent deletion to
+  fail; structurally unreachable.
+- `src/mcp/tools/store.rs:703-707` — `synthesis_failed_reason` populated
+  inside the `primary_update.is_some()` branch. `synthesis_updates` is
+  populated only on a successful `synthesise_with_cap` call; the
+  failure path sets `synthesis_failed_reason` AND leaves
+  `synthesis_updates` empty. So `if Some(reason) = &synthesis_failed_reason`
+  inside the `Some(primary_update)` branch is mutually exclusive at
+  construction.
+- `src/mcp/tools/store.rs:883` — `db::set_embedding` failure warn after
+  successful insert. SQLite UPDATE against a just-inserted row requires
+  concurrent schema corruption.
+- `src/mcp/tools/store.rs:937` — `if cand.id == actual_id || cand.id ==
+  mem.id { continue; }` self-reference skip in the legacy classifier
+  loop. `mem.id` is a fresh UUID never seen by `find_contradictions`;
+  `actual_id` was just inserted AFTER the recall ran. Both conditions
+  are structurally false on the post-insert legacy-classifier path.
+- `src/mcp/tools/store.rs:965, 978-984` — autonomy-hook metadata-update
+  failure warn. Same `db::update` against a healthy row pattern as
+  647-652.
+
+**Ship-gate compensation**:
+
+- Phase 1 functional cell exercises `memory_store` end-to-end against a
+  real sqlite daemon with autonomous hooks wired, taking the happy path
+  through every gatekept arm above (which is never reached because
+  `parse_response` rejects the offending verdict shapes and sqlite
+  succeeds on healthy rows).
+- `tests/form_1_synthesis.rs` (15 tests, all green) exercises the
+  synthesis batch happy path + every documented failure mode + the K9
+  delete recheck + the per-call delete cap.
+
+**Threshold disposition**: lowered from 96 to 94 per `floor(measured -
+0.5)` discipline after the test additions land. The new floor pins
+the synthesis-gatekeeper-+-defensive-closure ceiling at the
+unit-testable maximum. A future regression below 94 still trips CI;
+v0.8.0 climb-back to the tier-B 95-96% target requires either (a) a
+mock-storage layer that can return synthetic sqlite errors, OR (b)
+relaxing `synthesis::parse_response` to accept the duplicate-candidate
+verdict shape so 672 + 624-628 become exercisable end-to-end. Both
+require substrate-shape work out of scope for v0.7.
+
 ## Process
 
 When a Tier E module changes:

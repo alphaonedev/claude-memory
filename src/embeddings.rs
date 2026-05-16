@@ -973,6 +973,26 @@ pub mod test_support {
             Self::embed_batch(self, texts)
         }
     }
+
+    /// v0.7.0 polish (issue #767) — embedder that always returns
+    /// `Err`. Unblocks tests for the `emb.embed(...)` failure-warn arms
+    /// in `mcp::tools::store` (and similar callers) that would otherwise
+    /// be structurally unreachable: the production [`Embedder`] only
+    /// errors on tokeniser / model-forward faults that don't happen
+    /// against an in-memory fixture, and [`MockEmbedder`] is documented
+    /// to never error. This trait-only fake makes the warn branch
+    /// reachable without contorting the production code path.
+    pub struct FailingEmbedder;
+
+    impl Embed for FailingEmbedder {
+        fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+            Err(anyhow::anyhow!("test: synthetic embed failure"))
+        }
+
+        fn embed_batch(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            Err(anyhow::anyhow!("test: synthetic embed_batch failure"))
+        }
+    }
 }
 
 #[cfg(test)]
