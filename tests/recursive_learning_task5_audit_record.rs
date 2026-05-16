@@ -442,6 +442,7 @@ fn cap_zero_disable_path_still_emits_audit_row() {
         synthesis_failure_mode: None,
         synthesis_max_deletes_per_call: None,
         synthesis_max_candidate_chars: None,
+        multistep_max_content_chars: None,
     };
     seed_policy(&conn, "task5-cap-zero", &policy);
     let src = make_memory("task5-cap-zero", "src-d0", 0);

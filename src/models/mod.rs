@@ -335,6 +335,7 @@ mod tests {
             synthesis_failure_mode: None,
             synthesis_max_deletes_per_call: None,
             synthesis_max_candidate_chars: None,
+            multistep_max_content_chars: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         let back: GovernancePolicy = serde_json::from_str(&json).unwrap();

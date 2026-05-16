@@ -440,6 +440,7 @@ fn cap_zero_disables_every_reflection_with_audit_row() {
         synthesis_failure_mode: None,
         synthesis_max_deletes_per_call: None,
         synthesis_max_candidate_chars: None,
+        multistep_max_content_chars: None,
     };
     seed_policy(&conn, "task7-disabled", &policy);
     let src = make_memory("task7-disabled", "depth0-src", 0);

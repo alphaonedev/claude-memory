@@ -318,6 +318,230 @@ fn helpers_degrade_cleanly_with_empty_candidates_and_namespace() {
 }
 
 // ---------------------------------------------------------------------------
+// v0.7.0 polish (issue #782, PERF-11) — Phase 1 deterministic helpers
+// MUST receive the incoming `content` by **borrow**, not as a per-stage
+// `String` clone. Regression pin: the executor used to do
+// `effective.content = content.to_string()` on every helper iteration,
+// duplicating the entire content blob `N` times for an `N`-helper
+// pipeline. This test asserts the executor records the SAME pointer
+// for every helper invocation within a single `run()`.
+//
+// The pointer recorder is exposed via a `cfg(test)` accessor on the
+// executor (`helper_content_ptrs()`); production callers never see
+// the recorder.
+// ---------------------------------------------------------------------------
+#[test]
+fn multistep_phase_1_helpers_receive_content_borrow_not_clone() {
+    let mock = MockLlmDispatch::new(vec![Ok(
+        r#"{"title":"T","summary":"S","tags":[],"atoms":[]}"#.to_string(),
+    )]);
+    let exec = IngestExecutor::new(Arc::new(mock));
+    let pipeline = two_phase_default(); // 2 helpers + 1 LLM.
+
+    // Pick a non-trivial content string so any accidental clone would
+    // certainly land at a different heap address.
+    let content = "the quick brown fox jumps over the lazy dog ".repeat(64);
+    let expected_ptr = content.as_str().as_ptr() as usize;
+
+    let trace = exec
+        .run(
+            &pipeline,
+            content.as_str(),
+            &[
+                handle("c1", "a quick brown fox runs"),
+                handle("c2", "lazy dog naps under tree"),
+            ],
+            None,
+            Some("global"),
+        )
+        .expect("two-phase pipeline runs");
+
+    // The executor recorded one pointer per helper stage.
+    let ptrs = exec.helper_content_ptrs();
+    assert_eq!(
+        ptrs.len(),
+        2,
+        "two-phase default has 2 helper stages; got {} pointer recordings",
+        ptrs.len()
+    );
+
+    // CRITICAL: every recorded pointer is the SAME address as the
+    // caller's `content` slice. A clone would land at a different
+    // address; a borrow keeps the address stable.
+    for (idx, ptr) in ptrs.iter().enumerate() {
+        assert_eq!(
+            *ptr, expected_ptr,
+            "helper stage {idx}: content was cloned (ptr {ptr:#x} != caller {expected_ptr:#x}). \
+             Form 3 PERF-11 invariant violated — helpers must borrow, not clone."
+        );
+    }
+
+    // Cross-check: the per-stage `content_bytes` telemetry on every
+    // helper stage equals `content.len()` — proves the helpers saw the
+    // full backing slice (no implicit truncation).
+    for stage in &trace.stages {
+        if let ai_memory::multistep_ingest::executor::StageOutcome::Helper {
+            content_bytes, ..
+        } = stage
+        {
+            assert_eq!(
+                *content_bytes,
+                content.len(),
+                "helper stage content_bytes must match the caller's content.len()"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// v0.7.0 polish (issue #782, PERF-11) — Phase 2 LLM stages MUST
+// truncate the content slot at the `multistep_max_content_chars` cap
+// before inlining it into the prompt. Mirror of Cluster B's PERF-7
+// synthesis cap. Default cap is 1500 characters; the executor exposes
+// a builder setter so operators can thread the per-namespace policy
+// override.
+// ---------------------------------------------------------------------------
+#[test]
+fn multistep_llm_stage_truncates_content_at_cap() {
+    use ai_memory::multistep_ingest::executor::{
+        DEFAULT_MULTISTEP_MAX_CONTENT_CHARS, StageOutcome,
+    };
+
+    // Build a content blob WAY larger than the default cap so a
+    // truncation event is unambiguous.
+    let huge = "a".repeat(10_000);
+    assert!(huge.chars().count() > DEFAULT_MULTISTEP_MAX_CONTENT_CHARS);
+
+    // Default-cap path: confirm the executor truncates without an
+    // explicit override.
+    {
+        let mock = MockLlmDispatch::new(vec![Ok(
+            r#"{"title":"T","summary":"S","tags":[],"atoms":[]}"#.to_string(),
+        )]);
+        let exec = IngestExecutor::new(Arc::new(mock));
+        let pipeline = two_phase_default();
+        let trace = exec
+            .run(&pipeline, huge.as_str(), &[], None, Some("global"))
+            .expect("ok");
+
+        let llm_stage = trace
+            .stages
+            .iter()
+            .find(|s| matches!(s, StageOutcome::LlmCall { .. }))
+            .expect("two-phase has an LLM stage");
+        let (prompt, content_bytes, content_truncated) = match llm_stage {
+            StageOutcome::LlmCall {
+                prompt,
+                content_bytes,
+                content_truncated,
+                ..
+            } => (prompt, *content_bytes, *content_truncated),
+            StageOutcome::Helper { .. } => unreachable!("filtered above"),
+        };
+
+        assert!(
+            content_truncated,
+            "LLM stage MUST flag content_truncated when content exceeds the cap"
+        );
+        // post-truncation byte count is bounded by the default cap +
+        // the truncation marker tail (~32 chars).
+        assert!(
+            content_bytes <= DEFAULT_MULTISTEP_MAX_CONTENT_CHARS + 64,
+            "post-truncation content_bytes {content_bytes} must be <= cap ({DEFAULT_MULTISTEP_MAX_CONTENT_CHARS}) + marker tail"
+        );
+        assert!(
+            prompt.contains("[...truncated"),
+            "truncation marker must appear in the LLM prompt"
+        );
+        // The full 10k 'a' run cannot appear verbatim — the prompt
+        // would have to contain a 10k 'a' run, but the cap stops it.
+        assert!(
+            !prompt.contains(&"a".repeat(2000)),
+            "prompt must not carry the full content past the cap"
+        );
+
+        // Helper stages still get the FULL borrowed slice (no LLM cap
+        // applies to them — they're substrate-side).
+        let helper_content_bytes: Vec<usize> = trace
+            .stages
+            .iter()
+            .filter_map(|s| match s {
+                StageOutcome::Helper { content_bytes, .. } => Some(*content_bytes),
+                StageOutcome::LlmCall { .. } => None,
+            })
+            .collect();
+        for cb in &helper_content_bytes {
+            assert_eq!(
+                *cb,
+                huge.len(),
+                "helper stages MUST see the full caller content (no LLM cap on helpers)"
+            );
+        }
+    }
+
+    // Builder-override path: confirm an operator-supplied cap takes
+    // effect end-to-end.
+    {
+        let mock = MockLlmDispatch::new(vec![Ok(
+            r#"{"title":"T","summary":"S","tags":[],"atoms":[]}"#.to_string(),
+        )]);
+        let cap: usize = 250;
+        let exec = IngestExecutor::new(Arc::new(mock)).with_max_content_chars(cap);
+        let pipeline = two_phase_default();
+        let trace = exec
+            .run(&pipeline, huge.as_str(), &[], None, Some("global"))
+            .expect("ok");
+
+        let llm = trace
+            .stages
+            .iter()
+            .find_map(|s| match s {
+                StageOutcome::LlmCall {
+                    content_bytes,
+                    content_truncated,
+                    ..
+                } => Some((*content_bytes, *content_truncated)),
+                StageOutcome::Helper { .. } => None,
+            })
+            .expect("LLM stage present");
+        assert!(llm.1, "tighter cap must still flag truncated");
+        assert!(
+            llm.0 <= cap + 64,
+            "post-truncation content_bytes {} must be <= override cap ({cap}) + marker tail",
+            llm.0
+        );
+    }
+
+    // No-truncation path: content well within the cap goes through
+    // verbatim, no marker, `content_truncated == false`.
+    {
+        let mock = MockLlmDispatch::new(vec![Ok(
+            r#"{"title":"T","summary":"S","tags":[],"atoms":[]}"#.to_string(),
+        )]);
+        let exec = IngestExecutor::new(Arc::new(mock));
+        let pipeline = two_phase_default();
+        let tiny = "short content";
+        let trace = exec
+            .run(&pipeline, tiny, &[], None, Some("global"))
+            .expect("ok");
+        let llm_truncated = trace
+            .stages
+            .iter()
+            .find_map(|s| match s {
+                StageOutcome::LlmCall {
+                    content_truncated, ..
+                } => Some(*content_truncated),
+                StageOutcome::Helper { .. } => None,
+            })
+            .expect("LLM stage present");
+        assert!(
+            !llm_truncated,
+            "short content must not be flagged truncated"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Cross-cut: helper kinds round-trip through the public surface.
 // Sanity that `HelperKind::as_str()` is in sync with the trace's
 // `helper` field.

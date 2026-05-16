@@ -506,6 +506,7 @@ fn install_synthesis_policy(
         synthesis_failure_mode: failure_mode,
         synthesis_max_deletes_per_call: max_deletes_per_call,
         synthesis_max_candidate_chars: max_candidate_chars,
+        multistep_max_content_chars: None,
     };
     let now = Utc::now().to_rfc3339();
     let mut metadata = default_metadata();

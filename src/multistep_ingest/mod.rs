@@ -53,7 +53,7 @@ pub use cache::{CacheKey, PromptCacheTelemetry};
 pub use executor::{
     ExecutionTrace, ExecutorError, IngestExecutor, LlmDispatch, MockLlmDispatch, StageOutcome,
 };
-pub use helpers::{HelperKind, HelperOutput, HelperParams, MemoryHandle};
+pub use helpers::{HelperContext, HelperKind, HelperOutput, HelperParams, MemoryHandle};
 pub use pipeline::{
     HelperOutputRef, Pipeline, PipelineVariant, Stage, four_step_default, two_phase_default,
 };

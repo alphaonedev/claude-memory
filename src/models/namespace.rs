@@ -485,6 +485,25 @@ pub struct GovernancePolicy {
     /// production.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub synthesis_max_candidate_chars: Option<u32>,
+    /// v0.7.0 Cluster v0.7-polish (issue #782, PERF-11) — per-namespace
+    /// cap on the number of characters of `content` inlined into a Form
+    /// 3 multistep-ingest LLM-stage prompt. Form 3's deterministic
+    /// helper stages already receive the content by **borrow**, so the
+    /// cap only affects LLM stages where the content is actually
+    /// templated into the prompt body.
+    ///
+    /// Default `None` resolves to **1500** characters (~400 tokens at
+    /// the cl100k average) — the same cap Cluster B settled on for the
+    /// synthesis prompt cap (PERF-7). The two caps are independent
+    /// knobs so operators can tune the synthesis and multistep paths
+    /// separately, but the shared default keeps reasoning about prompt
+    /// budgets straightforward.
+    ///
+    /// The truncation only affects what the LLM sees; the helper
+    /// payloads, helper-stage inputs, and the caller-visible final
+    /// output are untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multistep_max_content_chars: Option<u32>,
 }
 
 /// v0.7.x Form 2 — atomisation execution mode. Stored inside
@@ -629,6 +648,10 @@ impl Default for GovernancePolicy {
             synthesis_failure_mode: None,
             synthesis_max_deletes_per_call: None,
             synthesis_max_candidate_chars: None,
+            // v0.7.0 polish (issue #782 PERF-11): Form 3 multistep
+            // ingest defers to the compiled default (1500 chars) when
+            // unset — mirrors the synthesis cap rationale.
+            multistep_max_content_chars: None,
         }
     }
 }
@@ -694,6 +717,10 @@ impl GovernancePolicy {
             synthesis_failure_mode: None,
             synthesis_max_deletes_per_call: None,
             synthesis_max_candidate_chars: None,
+            // v0.7.0 polish (issue #782 PERF-11): managed-namespace
+            // bootstrap defers to the compiled default; operators
+            // tighten on a per-ns basis.
+            multistep_max_content_chars: None,
         }
     }
 
@@ -867,6 +894,20 @@ impl GovernancePolicy {
     #[must_use]
     pub fn effective_synthesis_max_candidate_chars(&self) -> usize {
         self.synthesis_max_candidate_chars.unwrap_or(1500) as usize
+    }
+
+    /// v0.7.0 polish (issue #782, PERF-11) — resolve the per-stage
+    /// character cap inlined into a Form 3 multistep-ingest LLM-stage
+    /// prompt. Compiled default is **1500** characters (~400 cl100k
+    /// tokens), matching the synthesis cap (PERF-7) so operators have
+    /// a single reasonable prompt-budget shape to reason about.
+    /// Truncation only affects the LLM prompt content slot; the
+    /// helper payloads (which carry their own preview truncation
+    /// inside the helper) and the caller-visible final output are
+    /// untouched.
+    #[must_use]
+    pub fn effective_multistep_max_content_chars(&self) -> usize {
+        self.multistep_max_content_chars.unwrap_or(1500) as usize
     }
 }
 
