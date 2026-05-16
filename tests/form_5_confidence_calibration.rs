@@ -676,6 +676,140 @@ fn shadow_observations_gc_sweeper_drops_old_rows() {
 // 14. Cluster G PERF-9 — shadow_observe uses cached config (no per-call env).
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// v0.7-polish #783 — COV-16: calibration window edge cases.
+//
+// Pins `calibrate_from_shadow`'s behaviour at the boundary values the
+// public CLI / MCP surface accepts: days=1 (smallest useful window),
+// days=3650 (10-year, the loose upper bound the API documents), and
+// days=0 (degenerate / opt-out). The substrate as shipped does NOT
+// clamp the `days` parameter; these tests document and pin that
+// observed behaviour so a future clamp lands as a deliberate change
+// (and a test diff) rather than a silent regression.
+// ---------------------------------------------------------------------------
+
+/// COV-16a — `days=1` returns a window containing only the most recent
+/// 24h of observations. Observations stamped 25h ago must NOT contribute.
+#[test]
+fn calibrate_with_days_1_returns_single_day_window() {
+    let (_tmp, conn) = fresh_db();
+    let m_fresh = fixture_memory("ns-cov16-1d", "fresh");
+    let m_stale = fixture_memory("ns-cov16-1d", "stale");
+    db::insert(&conn, &m_fresh).expect("ins fresh");
+    db::insert(&conn, &m_stale).expect("ins stale");
+
+    let s = ConfidenceSignals::default();
+    // Fresh observation (default observed_at = now via `observe`).
+    observe(
+        &conn,
+        &m_fresh.id,
+        "ns-cov16-1d",
+        "user",
+        0.9,
+        0.5,
+        &s,
+        None,
+    )
+    .expect("observe fresh");
+    // Stale observation: backdate observed_at to 25 hours ago.
+    let stale_at = (Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
+    conn.execute(
+        "INSERT INTO confidence_shadow_observations
+            (memory_id, namespace, source, caller_confidence,
+             derived_confidence, signals, recall_outcome, observed_at)
+         VALUES (?1, 'ns-cov16-1d', 'user', 0.9, 0.7, '{}', NULL, ?2)",
+        rusqlite::params![&m_stale.id, &stale_at],
+    )
+    .expect("backdate stale");
+
+    let report = calibrate_from_shadow(&conn, 1, Utc::now()).expect("calibrate");
+    assert_eq!(report.window_days, 1, "window_days echoes the input");
+    assert_eq!(
+        report.total_observations, 1,
+        "only the fresh observation falls inside the 1-day window",
+    );
+    let user = report
+        .baselines
+        .iter()
+        .find(|b| b.source == "user")
+        .expect("user baseline");
+    // Only the 0.5 sample contributed; median == 0.5.
+    assert!((user.median - 0.5).abs() < 1e-6, "got {}", user.median);
+}
+
+/// COV-16b — `days=3650` (10 years) is accepted verbatim. The substrate
+/// does NOT clamp at any internal MAX_WINDOW; the SQL `observed_at >=
+/// now - 3650 days` predicate keeps every observation in scope. Pinning
+/// the no-clamp contract so a future tightening lands as a visible diff.
+#[test]
+fn calibrate_with_days_3650_clamps_at_max() {
+    let (_tmp, conn) = fresh_db();
+    let m = fixture_memory("ns-cov16-10y", "old");
+    db::insert(&conn, &m).expect("insert");
+
+    // Insert an observation 9 years (3285 days) ago — well outside any
+    // reasonable shorter window, but inside a 3650-day window.
+    let very_old = (Utc::now() - chrono::Duration::days(3285)).to_rfc3339();
+    conn.execute(
+        "INSERT INTO confidence_shadow_observations
+            (memory_id, namespace, source, caller_confidence,
+             derived_confidence, signals, recall_outcome, observed_at)
+         VALUES (?1, 'ns-cov16-10y', 'user', 0.9, 0.42, '{}', NULL, ?2)",
+        rusqlite::params![&m.id, &very_old],
+    )
+    .expect("insert old observation");
+
+    let report = calibrate_from_shadow(&conn, 3650, Utc::now()).expect("calibrate");
+    assert_eq!(
+        report.window_days, 3650,
+        "window_days is echoed verbatim (no clamp)",
+    );
+    assert_eq!(
+        report.total_observations, 1,
+        "9-year-old observation falls inside the 10-year window",
+    );
+    let baseline = &report.baselines[0];
+    assert_eq!(baseline.namespace, "ns-cov16-10y");
+    assert_eq!(baseline.source, "user");
+    assert!((baseline.median - 0.42).abs() < 1e-6);
+
+    // Sanity: the same observation falls OUT of a tighter window so the
+    // assertion above genuinely exercises the wide-window code path
+    // (rather than tautologically passing because the SQL ignores days).
+    let tight = calibrate_from_shadow(&conn, 30, Utc::now()).expect("calibrate tight");
+    assert_eq!(
+        tight.total_observations, 0,
+        "9-year-old observation must fall outside a 30-day window",
+    );
+}
+
+/// COV-16c — `days=0` collapses the window to "since now". Observations
+/// stamped strictly in the past fall outside; the report comes back
+/// empty rather than erroring. This is the substrate's opt-out shape
+/// (mirrors `gc_observations(retention_days=0)` no-op semantics in test
+/// `shadow_observations_gc_sweeper_drops_old_rows` above).
+#[test]
+fn calibrate_with_days_0_rejects_or_returns_empty() {
+    let (_tmp, conn) = fresh_db();
+    let m = fixture_memory("ns-cov16-zero", "any");
+    db::insert(&conn, &m).expect("insert");
+
+    let s = ConfidenceSignals::default();
+    // A real observation stamped a few seconds ago.
+    observe(&conn, &m.id, "ns-cov16-zero", "user", 0.9, 0.55, &s, None).expect("observe");
+
+    let report = calibrate_from_shadow(&conn, 0, Utc::now()).expect("calibrate days=0");
+    assert_eq!(report.window_days, 0, "window_days echoes the input");
+    assert_eq!(
+        report.total_observations, 0,
+        "days=0 collapses the window — no observations contribute",
+    );
+    assert!(
+        report.baselines.is_empty(),
+        "days=0 returns an empty baselines list (opt-out shape)",
+    );
+}
+
 #[test]
 fn shadow_observe_uses_cached_config() {
     // Pre-Cluster-G, every `shadow_enabled()` / `sample_rate()` call
