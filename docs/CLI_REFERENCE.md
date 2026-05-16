@@ -537,6 +537,85 @@ ai-memory migrate \
   --dry-run
 ```
 
+## v0.7.0 net-new CLI subcommands
+
+These subcommands joined the CLI surface between v0.6.4 and v0.7.0
+HEAD `c9472c1`. Source files in `src/cli/` (and `src/cli/commands/`
+for the WT-1/QW/Form additions).
+
+### `atomise` — Form 2 / WT-1-C decomposition
+
+Decomposes a long memory into 2-10 atomic propositions. Backs the
+`memory_atomise` MCP tool. See [`docs/atomisation.md`](atomisation.md).
+
+### `calibrate-confidence` — Form 5 sweep
+
+Per-source baseline calibration. Backs `memory_calibrate_confidence`.
+See [`docs/confidence-calibration.md`](confidence-calibration.md).
+
+### `export-reflections` — QW-1 file-backed export
+
+Walks the reflection-chain and writes Markdown to
+`~/.ai-memory/reflections/<ns>/<id>.md` by default. Pair with
+`auto_export_reflections_to_filesystem = true` for hands-off operation.
+
+### `persona` — QW-2 persona-as-artifact
+
+Build a persona from observation-kind memories for a given entity.
+Backs `memory_persona` / `memory_persona_generate`.
+
+### `offload` — QW-3 context offload
+
+Move a large blob out of the agent context window. Pairs with the
+background `offload_ttl_sweep` worker.
+
+### `identity` — Ed25519 keypair management (H-track)
+
+| Subcommand | Notes |
+|---|---|
+| `ai-memory identity generate --agent-id <id>` | Create a keypair under `~/.config/ai-memory/keys/<agent_id>.{pub,priv}`. |
+| `ai-memory identity list` | List enrolled keypairs. |
+| `ai-memory identity export-pub --agent-id <id>` | Print the public key. |
+| `ai-memory identity suggest-id` | Print the canonical `ai:<harness>@<host>:pid-<pid>` form. |
+
+### `verify-signed-events-chain` — V-4 closeout verifier
+
+Walks the `signed_events` cross-row hash chain end-to-end. Supports
+`--since N` (skip the first N rows) and `--format text|json`. See
+[`docs/signed-events-v4.md`](signed-events-v4.md).
+
+### `schema-init` — postgres + AGE bootstrap
+
+Idempotent schema bootstrap for a fresh postgres store, including the
+AGE projection. Supports `--skip-age` for the CTE fallback. See
+[`docs/postgres-age-guide.md`](postgres-age-guide.md).
+
+### `governance` subcommands
+
+| Subcommand | Notes |
+|---|---|
+| `ai-memory governance migrate-to-permissions` | Dry-run by default; `--apply` to commit the v0.6.x governance → v0.7 permissions migration. Idempotent. |
+| `ai-memory governance install-defaults` | Install the operator-signed seed rules `R001..R004`. |
+
+### `rules` subcommand (7th-form)
+
+| Subcommand | Notes |
+|---|---|
+| `ai-memory rules sign <rule.json>` | Sign a rule with the operator key for `attest_level = "signed"`. |
+| `ai-memory rules list` | List the active rule corpus (CLI equivalent of `memory_rule_list`). |
+
+### `export-forensic-bundle` / `verify-forensic-bundle` — L2-5
+
+Deterministic in-process POSIX-ustar tar with byte-identical mod
+timestamps. Operator-signed when an operator keypair is present. See
+[`docs/forensic-export.md`](forensic-export.md).
+
+### `install --enforce-policy` flag
+
+The `ai-memory install --harness <h>` command gains an
+`--enforce-policy` flag that wires the 7th-form policy file at install
+time.
+
 ## Shell, completions, man
 
 ```bash
