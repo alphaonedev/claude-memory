@@ -135,9 +135,22 @@ pub fn install_auto_atomise_dispatch(
 ///    is `<= threshold`, return `UnderThreshold`.
 /// 5. Threshold exceeded → spawn a detached worker thread, return
 ///    `Enqueued` synchronously.
+///
+/// # Cluster-F PERF-1 fix
+///
+/// The hook now accepts the caller's already-held `&Connection` instead
+/// of opening a fresh one against `dispatch.db_path`. The MCP / HTTP /
+/// CLI store handlers already hold the connection lock at the call
+/// site; reusing it eliminates the per-store SQLite open + WAL +
+/// PRAGMA syscall round-trip on every namespace that opts into the
+/// auto-atomise hook. The detached worker thread (spawned below for
+/// the curator pass) still opens its own connection because rusqlite
+/// handles are not `Send`.
 #[must_use]
 pub fn maybe_enqueue_auto_atomise(
+    conn: &rusqlite::Connection,
     memory: &Memory,
+    actual_id: &str,
     calling_agent_id: &str,
 ) -> AutoAtomisationOutcome {
     let Some(dispatch) = AUTO_ATOMISE_DISPATCH.get() else {
@@ -146,22 +159,11 @@ pub fn maybe_enqueue_auto_atomise(
         };
     };
 
-    // Resolve policy from a fresh connection. The hook is called
-    // post-commit so the namespace standard (if any) is visible.
-    let policy = match db::open(&dispatch.db_path) {
-        Ok(conn) => db::resolve_governance_policy(&conn, &memory.namespace).unwrap_or_default(),
-        Err(e) => {
-            tracing::warn!(
-                target: "pre_store.auto_atomise",
-                "policy resolve: failed to open db at {}: {}",
-                dispatch.db_path.display(),
-                e
-            );
-            return AutoAtomisationOutcome::Skipped {
-                reason: "db_open_failed",
-            };
-        }
-    };
+    // Cluster-F PERF-1 — reuse caller's connection for policy
+    // resolution. The hook is called post-commit so the namespace
+    // standard (if any) is visible on the caller's transaction
+    // boundary too.
+    let policy = db::resolve_governance_policy(conn, &memory.namespace).unwrap_or_default();
 
     if !policy.effective_auto_atomise() {
         return AutoAtomisationOutcome::Skipped {
@@ -178,7 +180,10 @@ pub fn maybe_enqueue_auto_atomise(
     let max_atom_tokens = policy.effective_auto_atomise_max_atom_tokens();
 
     let dispatch_for_thread = Arc::clone(dispatch);
-    let memory_id = memory.id.clone();
+    // Cluster-F PERF-10 — only the id + namespace cross the thread
+    // boundary; the multi-KB content / tags / metadata blob stays on
+    // the caller's stack frame.
+    let memory_id = actual_id.to_string();
     let namespace = memory.namespace.clone();
     let agent_id = calling_agent_id.to_string();
 
@@ -193,7 +198,7 @@ pub fn maybe_enqueue_auto_atomise(
     });
 
     AutoAtomisationOutcome::Enqueued {
-        memory_id: memory.id.clone(),
+        memory_id: actual_id.to_string(),
         namespace,
     }
 }
@@ -222,13 +227,14 @@ pub fn maybe_enqueue_auto_atomise(
 pub fn run_synchronous_auto_atomise(
     conn: &rusqlite::Connection,
     memory: &Memory,
+    actual_id: &str,
     calling_agent_id: &str,
 ) -> &'static str {
     let Some(dispatch) = AUTO_ATOMISE_DISPATCH.get() else {
         tracing::info!(
             target: "pre_store.auto_atomise.sync",
             "synchronous-mode dispatch unset for memory={}; substrate stays quiet",
-            memory.id,
+            actual_id,
         );
         return "skipped_dispatch_unset";
     };
@@ -240,11 +246,24 @@ pub fn run_synchronous_auto_atomise(
         return "skipped_under_threshold";
     }
     let max_atom_tokens = policy.effective_auto_atomise_max_atom_tokens();
+    // Cluster-F PERF-5 — Synchronous path latency envelope: the
+    // curator retry budget defaults to `sync_curator_max_retries` (1)
+    // when the namespace policy does not override. This caps the
+    // worst-case latency added inside the operator's `memory_store`
+    // call to a single backoff (100ms) instead of the deferred-path
+    // 3-retry schedule (100ms + 500ms + 2500ms ≈ 3.1s).
+    let max_retries = policy
+        .effective_auto_atomise_max_retries()
+        .unwrap_or(dispatch.atomiser.sync_curator_max_retries());
 
-    match dispatch
-        .atomiser
-        .atomise_sync(conn, &memory.id, max_atom_tokens, false, calling_agent_id)
-    {
+    match dispatch.atomiser.atomise_sync_with_retries(
+        conn,
+        actual_id,
+        max_atom_tokens,
+        false,
+        calling_agent_id,
+        max_retries,
+    ) {
         Ok(result) => {
             tracing::info!(
                 target: "pre_store.auto_atomise.sync",
@@ -258,7 +277,7 @@ pub fn run_synchronous_auto_atomise(
             tracing::info!(
                 target: "pre_store.auto_atomise.sync",
                 "synchronous-atomise skipped: source={} body too small",
-                memory.id,
+                actual_id,
             );
             "skipped_source_too_small"
         }
@@ -266,7 +285,7 @@ pub fn run_synchronous_auto_atomise(
             tracing::info!(
                 target: "pre_store.auto_atomise.sync",
                 "synchronous-atomise skipped: source={} already atomised",
-                memory.id,
+                actual_id,
             );
             "skipped_already_atomised"
         }
@@ -274,7 +293,7 @@ pub fn run_synchronous_auto_atomise(
             tracing::error!(
                 target: "pre_store.auto_atomise.sync",
                 "synchronous-atomise failed for source={}: {:?}",
-                memory.id,
+                actual_id,
                 e,
             );
             "failed"
@@ -465,6 +484,7 @@ mod tests {
             auto_atomise: Some(true),
             auto_atomise_threshold_cl100k: Some(50),
             auto_atomise_max_atom_tokens: Some(20),
+            auto_atomise_max_retries: None,
             auto_persona_trigger_every_n_memories: None,
             auto_export_personas_to_filesystem: None,
             auto_atomise_mode: None,
@@ -502,8 +522,9 @@ mod tests {
         // The process-wide dispatch slot is empty in the unit-test
         // harness (no daemon bootstrap, no install_auto_atomise_dispatch
         // call). The hook MUST be a zero-cost no-op.
+        let (conn, _dir, _path) = fresh_db();
         let mem = make_memory("any-ns", "any body");
-        let outcome = maybe_enqueue_auto_atomise(&mem, "ai:test");
+        let outcome = maybe_enqueue_auto_atomise(&conn, &mem, &mem.id, "ai:test");
         // We can't assert exact reason because the integration tests
         // may have installed a dispatch — but in the unit-test
         // crate boundary the dispatch is process-wide. We accept
@@ -513,9 +534,7 @@ mod tests {
         match outcome {
             AutoAtomisationOutcome::Skipped { reason } => {
                 assert!(
-                    reason == "dispatch_unset"
-                        || reason == "policy_disabled"
-                        || reason == "db_open_failed",
+                    reason == "dispatch_unset" || reason == "policy_disabled",
                     "unexpected skip reason: {reason}"
                 );
             }

@@ -196,8 +196,15 @@ pub struct SynthesisResponse {
 /// content cap ([`DEFAULT_MAX_CANDIDATE_CHARS`]). Thin pass-through to
 /// [`build_prompt_with_cap`]; preserved for callers that don't yet
 /// resolve the per-namespace policy.
+///
+/// Cluster-F PERF-14 — accepts `&[&Memory]` so the caller doesn't
+/// have to clone the recall hit-set just to feed the synthesiser.
 #[must_use]
-pub fn build_prompt(incoming_title: &str, incoming_content: &str, candidates: &[Memory]) -> String {
+pub fn build_prompt(
+    incoming_title: &str,
+    incoming_content: &str,
+    candidates: &[&Memory],
+) -> String {
     build_prompt_with_cap(
         incoming_title,
         incoming_content,
@@ -231,7 +238,7 @@ pub fn build_prompt(incoming_title: &str, incoming_content: &str, candidates: &[
 pub fn build_prompt_with_cap(
     incoming_title: &str,
     incoming_content: &str,
-    candidates: &[Memory],
+    candidates: &[&Memory],
     max_candidate_chars: usize,
 ) -> String {
     let mut buf = String::with_capacity(
@@ -352,7 +359,7 @@ fn extract_json_object(raw: &str) -> Option<&str> {
 /// On any validation failure returns `Err`; the caller falls back to
 /// the legacy code path (a structurally-degraded LLM does NOT block
 /// the store).
-pub fn parse_response(raw: &str, candidates: &[Memory]) -> Result<SynthesisResponse> {
+pub fn parse_response(raw: &str, candidates: &[&Memory]) -> Result<SynthesisResponse> {
     let json_str =
         extract_json_object(raw).ok_or_else(|| anyhow!("synthesis: no JSON object in response"))?;
     let parsed: Value =
@@ -415,7 +422,7 @@ pub fn synthesise(
     llm: &OllamaClient,
     incoming_title: &str,
     incoming_content: &str,
-    candidates: &[Memory],
+    candidates: &[&Memory],
 ) -> Result<SynthesisResponse> {
     synthesise_with_cap(
         llm,
@@ -437,7 +444,7 @@ pub fn synthesise_with_cap(
     llm: &OllamaClient,
     incoming_title: &str,
     incoming_content: &str,
-    candidates: &[Memory],
+    candidates: &[&Memory],
     max_candidate_chars: usize,
 ) -> Result<SynthesisResponse> {
     if candidates.is_empty() {
@@ -554,7 +561,8 @@ mod tests {
             cand("a", "title-a", "content-a"),
             cand("b", "title-b", "content-b"),
         ];
-        let p = build_prompt("incoming-title", "incoming-content", &cs);
+        let cs_ref: Vec<&Memory> = cs.iter().collect();
+        let p = build_prompt("incoming-title", "incoming-content", &cs_ref);
         assert!(p.contains("incoming-title"));
         assert!(p.contains("incoming-content"));
         assert!(p.contains("title-a"));
@@ -576,7 +584,8 @@ mod tests {
         // the cap with an explicit `…[truncated N chars]` suffix.
         let long_content = "x".repeat(10_000);
         let cs = vec![cand("a", "ta", &long_content)];
-        let p = build_prompt_with_cap("incoming", "body", &cs, 100);
+        let cs_ref: Vec<&Memory> = cs.iter().collect();
+        let p = build_prompt_with_cap("incoming", "body", &cs_ref, 100);
         assert!(p.contains("…[truncated"));
         // The full 10K xs must NOT appear verbatim.
         assert!(
@@ -626,11 +635,12 @@ mod tests {
     #[test]
     fn parse_response_valid_batch() {
         let cs = vec![cand("a", "ta", "ca"), cand("b", "tb", "cb")];
+        let cs_ref: Vec<&Memory> = cs.iter().collect();
         let raw = r#"{"verdicts":[
             {"candidate_id":"a","verb":"no_op"},
             {"candidate_id":"b","verb":"delete"}
         ]}"#;
-        let r = parse_response(raw, &cs).unwrap();
+        let r = parse_response(raw, &cs_ref).unwrap();
         assert_eq!(r.verdicts.len(), 2);
         assert_eq!(r.verdicts[0].verb, SynthesisVerb::NoOp);
         assert_eq!(r.verdicts[1].verb, SynthesisVerb::Delete);
@@ -639,32 +649,36 @@ mod tests {
     #[test]
     fn parse_response_rejects_fabricated_id() {
         let cs = vec![cand("a", "ta", "ca")];
+        let cs_ref: Vec<&Memory> = cs.iter().collect();
         let raw = r#"{"verdicts":[{"candidate_id":"FAKE","verb":"add"}]}"#;
-        assert!(parse_response(raw, &cs).is_err());
+        assert!(parse_response(raw, &cs_ref).is_err());
     }
 
     #[test]
     fn parse_response_rejects_missing_merged_content_for_update() {
         let cs = vec![cand("a", "ta", "ca")];
+        let cs_ref: Vec<&Memory> = cs.iter().collect();
         let raw = r#"{"verdicts":[{"candidate_id":"a","verb":"update"}]}"#;
-        assert!(parse_response(raw, &cs).is_err());
+        assert!(parse_response(raw, &cs_ref).is_err());
     }
 
     #[test]
     fn parse_response_rejects_partial_coverage() {
         let cs = vec![cand("a", "ta", "ca"), cand("b", "tb", "cb")];
+        let cs_ref: Vec<&Memory> = cs.iter().collect();
         let raw = r#"{"verdicts":[{"candidate_id":"a","verb":"add"}]}"#;
-        assert!(parse_response(raw, &cs).is_err());
+        assert!(parse_response(raw, &cs_ref).is_err());
     }
 
     #[test]
     fn parse_response_rejects_duplicate_verdicts() {
         let cs = vec![cand("a", "ta", "ca")];
+        let cs_ref: Vec<&Memory> = cs.iter().collect();
         let raw = r#"{"verdicts":[
             {"candidate_id":"a","verb":"add"},
             {"candidate_id":"a","verb":"no_op"}
         ]}"#;
-        assert!(parse_response(raw, &cs).is_err());
+        assert!(parse_response(raw, &cs_ref).is_err());
     }
 
     #[test]

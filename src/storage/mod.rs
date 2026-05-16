@@ -886,6 +886,86 @@ pub fn touch(conn: &Connection, id: &str, short_extend: i64, mid_extend: i64) ->
     }
 }
 
+/// Cluster-F PERF-6 — batched touch.
+///
+/// Equivalent to invoking [`touch`] K times in sequence, but
+/// collapses the per-row `BEGIN IMMEDIATE` … `COMMIT` cycle into a
+/// SINGLE outer transaction so a K-row recall pays the SQLite
+/// write-lock + commit cost ONCE instead of K times. The three
+/// per-row UPDATE statements still run (same semantics: access bump
+/// + TTL extend, mid→long promotion at `PROMOTION_THRESHOLD`,
+/// priority+1 every 10 accesses); only the transaction framing
+/// changes.
+///
+/// A failure mid-batch rolls back the entire transaction (no partial
+/// touches survive) and surfaces a single error to the caller — which
+/// matches the existing behaviour where any failed touch surfaces
+/// to the recall log path.
+///
+/// Returns the number of rows successfully touched (always equal to
+/// `ids.len()` on success).
+pub fn touch_many(
+    conn: &Connection,
+    ids: &[&str],
+    short_extend: i64,
+    mid_extend: i64,
+) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let now = Utc::now();
+    let now_str = now.to_rfc3339();
+    let short_expires = (now + chrono::Duration::seconds(short_extend)).to_rfc3339();
+    let mid_expires = (now + chrono::Duration::seconds(mid_extend)).to_rfc3339();
+
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+
+    let result = (|| -> Result<()> {
+        // Cache the three prepared statements once for the whole
+        // batch; each `execute` reuses the cached query plan instead
+        // of re-parsing per row.
+        let mut bump_stmt = conn.prepare_cached(
+            "UPDATE memories SET
+                access_count = MIN(access_count + 1, 1000000),
+                last_accessed_at = ?1,
+                expires_at = CASE
+                    WHEN tier = 'long' THEN expires_at
+                    WHEN tier = 'short' AND expires_at IS NOT NULL THEN ?2
+                    WHEN tier = 'mid' AND expires_at IS NOT NULL THEN ?3
+                    ELSE expires_at
+                END
+             WHERE id = ?4",
+        )?;
+        let mut promote_stmt = conn.prepare_cached(
+            "UPDATE memories SET tier = 'long', expires_at = NULL, updated_at = ?1
+             WHERE id = ?2 AND tier = 'mid' AND access_count >= ?3",
+        )?;
+        let mut priority_stmt = conn.prepare_cached(
+            "UPDATE memories SET priority = MIN(priority + 1, 10)
+             WHERE id = ?1 AND access_count > 0 AND access_count % 10 = 0 AND priority < 10",
+        )?;
+        for id in ids {
+            bump_stmt.execute(params![now_str, short_expires, mid_expires, id])?;
+            promote_stmt.execute(params![now_str, id, PROMOTION_THRESHOLD])?;
+            priority_stmt.execute(params![id])?;
+        }
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(ids.len())
+        }
+        Err(e) => {
+            if let Err(rb) = conn.execute_batch("ROLLBACK") {
+                tracing::error!("ROLLBACK failed in touch_many: {}", rb);
+            }
+            Err(e)
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Update a memory by ID. Returns (found, `content_changed`) so callers can
 /// re-generate embeddings when the searchable text has changed.
@@ -1759,12 +1839,13 @@ pub fn recall(
     // (AFTER proximity). Returns BudgetOutcome with all R1 meta fields.
     let (budgeted, outcome) = apply_token_budget(boosted, budget_tokens);
 
-    // Touch all recalled memories that SURVIVED the budget cut — no sense
-    // bumping access counts on memories the caller will never see.
-    for (mem, _) in &budgeted {
-        if let Err(e) = touch(conn, &mem.id, short_extend, mid_extend) {
-            tracing::warn!("touch failed for memory {}: {}", &mem.id, e);
-        }
+    // Cluster-F PERF-6 — collapse K per-row touches into a single
+    // `BEGIN IMMEDIATE` transaction. Same semantics (access bump,
+    // TTL extend, promotion, priority bump every 10 accesses); the
+    // 3K UPDATE round-trips now share one commit instead of K.
+    let touch_ids: Vec<&str> = budgeted.iter().map(|(mem, _)| mem.id.as_str()).collect();
+    if let Err(e) = touch_many(conn, &touch_ids, short_extend, mid_extend) {
+        tracing::warn!("touch_many failed for recall set: {}", e);
     }
     Ok((budgeted, outcome))
 }
@@ -5247,51 +5328,63 @@ pub fn recall_hybrid_with_telemetry(
     // Collect FTS results with scores
     let mut scored: HashMap<String, (Memory, f64, f64)> = HashMap::new(); // id -> (memory, fts_score, cosine_score)
 
+    // Cluster-F PERF-2 — the FTS SELECT already pulls `m.embedding` as
+    // the 26th column (index 25). Extract the bytes inline so the
+    // result-set walk below can compute cosine WITHOUT issuing a
+    // per-row `get_embedding` query — eliminating an N+1 round-trip
+    // against the `memories` table on every hybrid recall.
+    //
     // Conditional binding: SQLite errors on parameter-count mismatch,
     // so when source_uri_prefix is None we must NOT bind ?12.
-    let fts_row_handler = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(Memory, f64)> {
-        let mem = row_to_memory(row)?;
-        let fts_score: f64 = row.get("fts_score")?;
-        Ok((mem, fts_score))
-    };
-    let fts_results: Vec<(Memory, f64)> = if let Some(ref uri_param) = source_uri_like_param {
-        let rows = fts_stmt.query_map(
-            params![
-                fts_query,
-                effective_namespace,
-                now,
-                tags_filter,
-                since,
-                until,
-                fts_limit,
-                vis_p,
-                vis_t,
-                vis_u,
-                vis_o,
-                uri_param,
-            ],
-            fts_row_handler,
-        )?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    } else {
-        let rows = fts_stmt.query_map(
-            params![
-                fts_query,
-                effective_namespace,
-                now,
-                tags_filter,
-                since,
-                until,
-                fts_limit,
-                vis_p,
-                vis_t,
-                vis_u,
-                vis_o,
-            ],
-            fts_row_handler,
-        )?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
+    let fts_row_handler =
+        |row: &rusqlite::Row<'_>| -> rusqlite::Result<(Memory, f64, Option<Vec<u8>>)> {
+            let mem = row_to_memory(row)?;
+            let fts_score: f64 = row.get("fts_score")?;
+            // Index 25 = `m.embedding` (the SELECT list above places it
+            // after `confidence_decayed_at`). Pull as `Option<Vec<u8>>`
+            // so legacy rows without embeddings surface as `None`.
+            let embedding_bytes: Option<Vec<u8>> = row.get(25)?;
+            Ok((mem, fts_score, embedding_bytes))
+        };
+    let fts_results: Vec<(Memory, f64, Option<Vec<u8>>)> =
+        if let Some(ref uri_param) = source_uri_like_param {
+            let rows = fts_stmt.query_map(
+                params![
+                    fts_query,
+                    effective_namespace,
+                    now,
+                    tags_filter,
+                    since,
+                    until,
+                    fts_limit,
+                    vis_p,
+                    vis_t,
+                    vis_u,
+                    vis_o,
+                    uri_param,
+                ],
+                fts_row_handler,
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            let rows = fts_stmt.query_map(
+                params![
+                    fts_query,
+                    effective_namespace,
+                    now,
+                    tags_filter,
+                    since,
+                    until,
+                    fts_limit,
+                    vis_p,
+                    vis_t,
+                    vis_u,
+                    vis_o,
+                ],
+                fts_row_handler,
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
 
     // v0.6.3.1 (P3): pre-fusion candidate-pool counters surfaced to the
     // MCP `meta` block. Counted here at retrieval time, not after fusion,
@@ -5301,18 +5394,33 @@ pub fn recall_hybrid_with_telemetry(
     let mut hnsw_candidates_count: usize = 0;
 
     let mut max_fts_score: f64 = 1.0;
-    for row in fts_results {
-        let (mem, fts_score) = (row.0, row.1);
+    for (mem, fts_score, embedding_bytes) in fts_results {
         if fts_score > max_fts_score {
             max_fts_score = fts_score;
         }
-        // Compute cosine similarity if embedding exists
-        let cosine = get_embedding(conn, &mem.id)?.map_or(0.0, |emb| {
-            f64::from(crate::embeddings::Embedder::cosine_similarity(
-                query_embedding,
-                &emb,
-            ))
-        });
+        // Cluster-F PERF-2 — cosine from the inline-fetched embedding
+        // bytes. The bytes decoder matches the contract in
+        // `get_embedding` (v0.6.3.1 P2 magic-byte tolerant); malformed
+        // BLOBs degrade to cosine=0 + warn-log so a single corrupt row
+        // does not poison the whole recall.
+        let cosine = match embedding_bytes {
+            Some(bytes) if !bytes.is_empty() => {
+                match crate::embeddings::decode_embedding_blob(&bytes) {
+                    Ok(emb) => f64::from(crate::embeddings::Embedder::cosine_similarity(
+                        query_embedding,
+                        &emb,
+                    )),
+                    Err(_) => {
+                        tracing::warn!(
+                            memory_id = %mem.id,
+                            "skipping malformed embedding BLOB during hybrid recall (FTS branch)"
+                        );
+                        0.0
+                    }
+                }
+            }
+            _ => 0.0,
+        };
         scored.insert(mem.id.clone(), (mem, fts_score, cosine));
         fts_candidates_count += 1;
     }
@@ -5413,10 +5521,17 @@ pub fn recall_hybrid_with_telemetry(
         let sem_row_handler =
             |row: &rusqlite::Row<'_>| -> rusqlite::Result<(Memory, Option<Vec<u8>>)> {
                 let mem = row_to_memory(row)?;
-                // v0.7.x Form 6: bumped from 15 to 16 when `memory_kind`
-                // was inserted between `reflection_depth` and `embedding`
-                // in the SELECT list above.
-                let emb_bytes: Option<Vec<u8>> = row.get(16)?;
+                // v0.7.x Form 6: `memory_kind` was inserted between
+                // `reflection_depth` and `embedding` in the SELECT list
+                // above. The semantic SELECT's column order is
+                // [id, tier, namespace, title, content, tags, priority,
+                //  confidence, source, access_count, created_at,
+                //  updated_at, last_accessed_at, expires_at, metadata,
+                //  reflection_depth, memory_kind, embedding] — embedding
+                // sits at zero-based index 17 (Cluster-F regression
+                // pin caught the prior `row.get(16)` reading the
+                // `memory_kind` TEXT column as `Option<Vec<u8>>`).
+                let emb_bytes: Option<Vec<u8>> = row.get(17)?;
                 Ok((mem, emb_bytes))
             };
         let sem_results: Vec<(Memory, Option<Vec<u8>>)> =
@@ -5556,11 +5671,11 @@ pub fn recall_hybrid_with_telemetry(
     // proximity). Returns BudgetOutcome with all R1 meta fields.
     let (budgeted, outcome) = apply_token_budget(boosted, budget_tokens);
 
-    // Touch surviving memories only.
-    for (mem, _) in &budgeted {
-        if let Err(e) = touch(conn, &mem.id, short_extend, mid_extend) {
-            tracing::warn!("touch failed for memory {}: {}", &mem.id, e);
-        }
+    // Cluster-F PERF-6 — batched touch for the hybrid surviving set
+    // (see [`touch_many`] for the contract).
+    let touch_ids: Vec<&str> = budgeted.iter().map(|(mem, _)| mem.id.as_str()).collect();
+    if let Err(e) = touch_many(conn, &touch_ids, short_extend, mid_extend) {
+        tracing::warn!("touch_many failed for hybrid recall set: {}", e);
     }
 
     // v0.6.3.1 (P3): summarize per-stage candidate counts and the average
@@ -10684,6 +10799,7 @@ mod tests {
             auto_atomise: None,
             auto_atomise_threshold_cl100k: None,
             auto_atomise_max_atom_tokens: None,
+            auto_atomise_max_retries: None,
             auto_persona_trigger_every_n_memories: None,
             auto_export_personas_to_filesystem: None,
             auto_atomise_mode: None,
@@ -10830,6 +10946,7 @@ mod tests {
             auto_atomise: None,
             auto_atomise_threshold_cl100k: None,
             auto_atomise_max_atom_tokens: None,
+            auto_atomise_max_retries: None,
             auto_persona_trigger_every_n_memories: None,
             auto_export_personas_to_filesystem: None,
             auto_atomise_mode: None,

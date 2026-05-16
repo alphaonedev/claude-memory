@@ -224,7 +224,8 @@ Set the policy on a namespace standard's `metadata.governance` blob:
     "write": "any",
     "auto_atomise_mode": "synchronous",
     "auto_atomise_threshold_cl100k": 500,
-    "auto_atomise_max_atom_tokens": 200
+    "auto_atomise_max_atom_tokens": 200,
+    "auto_atomise_max_retries": 1
   }
 }
 ```
@@ -234,6 +235,44 @@ path; the only new field on the wire is `auto_atomise_mode`. Federation
 peers running pre-Form-2 v0.7.0 deserialise the absent field as `None`
 and fall back to the legacy `auto_atomise` boolean resolution, so no
 replication drift occurs during a phased rollout.
+
+### Synchronous-mode latency envelope (Cluster-F PERF-5)
+
+When `auto_atomise_mode = "synchronous"`, the curator round-trip runs
+INSIDE the operator's `memory_store` call. The curator-retry budget
+therefore directly inflates the worst-case `memory_store` latency
+envelope by the per-retry exponential backoff (100 ms → 500 ms →
+2500 ms).
+
+The substrate splits the retry budget by execution mode so the
+Synchronous envelope stays tight without compromising the deferred
+path's resilience:
+
+| Mode | Default retries | Total attempts | Worst-case extra latency |
+|------|-----------------|----------------|--------------------------|
+| Deferred (worker thread) | 3 | 4 | n/a (off the hot path) |
+| Synchronous (`pre_store`) | **1** | 2 | ~100 ms backoff |
+
+The Synchronous default of **1** retry (the `AtomiserConfig::sync_curator_max_retries`
+compiled default) caps the worst-case at a single backoff (100 ms).
+Operators who need higher resilience on a specific Synchronous-mode
+namespace at the cost of longer envelopes override per-namespace via
+`auto_atomise_max_retries`:
+
+```json
+{
+  "governance": {
+    "auto_atomise_mode": "synchronous",
+    "auto_atomise_max_retries": 3
+  }
+}
+```
+
+Setting `auto_atomise_max_retries: 3` restores the pre-Cluster-F
+behaviour (4 total attempts, up to ~3.1 s extra envelope). The
+deferred path ignores this override; it always uses
+`AtomiserConfig::curator_max_retries` (default 3) since it runs on a
+detached worker thread.
 
 ## See also
 

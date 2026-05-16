@@ -56,11 +56,19 @@ use curator::Curator;
 /// Tunables for the atomiser. Plumbed from `AppConfig` in the daemon
 /// path; tests construct one directly.
 ///
-/// Defaults mirror the WT-1-B brief:
+/// Defaults mirror the WT-1-B brief (with the Cluster-F PERF-5 envelope
+/// trim for the Synchronous mode):
 /// * `default_max_atom_tokens = 200`
 /// * `min_atoms_per_source = 2`
 /// * `max_atoms_per_source = 10`
-/// * `curator_max_retries = 3`
+/// * `curator_max_retries = 3`  (deferred path baseline)
+/// * `sync_curator_max_retries = 1`  (Cluster-F PERF-5 — Synchronous
+///   mode runs inside the operator's `memory_store` envelope; the
+///   3-retry default added up to 3× worst-case latency before the
+///   response could return. The Synchronous path now defaults to a
+///   SINGLE retry — the second failure surfaces an error and the
+///   operator either reruns explicitly or moves on. Per-namespace
+///   override via `GovernancePolicy::auto_atomise_max_retries`.)
 #[derive(Debug, Clone)]
 pub struct AtomiserConfig {
     /// Default per-atom token budget when the caller does not supply
@@ -75,10 +83,19 @@ pub struct AtomiserConfig {
     /// where the LLM emits dozens of trivial atoms. Matches the prompt
     /// envelope ("2 to 10 atoms").
     pub max_atoms_per_source: usize,
-    /// Max retries on a malformed curator response. Total attempts =
+    /// Max retries on a malformed curator response in the deferred /
+    /// CLI / explicit `memory_atomise` path. Total attempts =
     /// 1 + this value. See [`curator::backoff_for_attempt`] for the
     /// exponential-backoff schedule.
     pub curator_max_retries: u32,
+    /// Cluster-F PERF-5 — Max retries on a malformed curator response
+    /// inside the **Synchronous** `pre_store` path (latency-sensitive).
+    /// Default `1` (i.e. 2 total attempts). The full 3-retry budget
+    /// otherwise inflated the operator's `memory_store` envelope by up
+    /// to the curator backoff schedule (100ms + 500ms + 2500ms ≈ 3.1s).
+    /// Per-namespace override via
+    /// [`crate::models::GovernancePolicy::auto_atomise_max_retries`].
+    pub sync_curator_max_retries: u32,
 }
 
 impl Default for AtomiserConfig {
@@ -88,6 +105,7 @@ impl Default for AtomiserConfig {
             min_atoms_per_source: 2,
             max_atoms_per_source: 10,
             curator_max_retries: 3,
+            sync_curator_max_retries: 1,
         }
     }
 }
@@ -224,6 +242,16 @@ impl Atomiser {
         }
     }
 
+    /// Cluster-F PERF-5 — accessor for the configured Synchronous-mode
+    /// curator retry budget. Used by the `pre_store::auto_atomise.rs`
+    /// hook to honour `AtomiserConfig::sync_curator_max_retries`
+    /// (compiled default `1`) when the namespace policy has no
+    /// explicit `auto_atomise_max_retries` override.
+    #[must_use]
+    pub fn sync_curator_max_retries(&self) -> u32 {
+        self.config.sync_curator_max_retries
+    }
+
     /// Atomise the memory named by `source_id`.
     ///
     /// `max_atom_tokens` overrides the per-call token budget; pass 0
@@ -258,7 +286,8 @@ impl Atomiser {
     }
 
     /// Sync entry-point — body of [`Self::atomise`]. Exposed for tests
-    /// that prefer to call without tokio scaffolding.
+    /// that prefer to call without tokio scaffolding. Uses the
+    /// configured `curator_max_retries` (deferred-path default).
     pub fn atomise_sync(
         &self,
         conn: &Connection,
@@ -266,6 +295,36 @@ impl Atomiser {
         max_atom_tokens: u32,
         force: bool,
         calling_agent_id: &str,
+    ) -> Result<AtomiseResult, AtomiseError> {
+        self.atomise_sync_with_retries(
+            conn,
+            source_id,
+            max_atom_tokens,
+            force,
+            calling_agent_id,
+            self.config.curator_max_retries,
+        )
+    }
+
+    /// Cluster-F PERF-5 — variant of [`Self::atomise_sync`] that takes
+    /// an explicit per-call `max_retries` override. The Synchronous
+    /// `pre_store` path uses this with `sync_curator_max_retries`
+    /// (default 1) so the operator's `memory_store` envelope is not
+    /// inflated by the full deferred-path retry budget. Per-namespace
+    /// override via `GovernancePolicy::auto_atomise_max_retries`
+    /// flows through this entry-point.
+    ///
+    /// # Errors
+    ///
+    /// See [`AtomiseError`] for the closed enum.
+    pub fn atomise_sync_with_retries(
+        &self,
+        conn: &Connection,
+        source_id: &str,
+        max_atom_tokens: u32,
+        force: bool,
+        calling_agent_id: &str,
+        max_retries: u32,
     ) -> Result<AtomiseResult, AtomiseError> {
         // Step 3 — tier check (pulled forward of step 1 so we don't burn
         // a DB read when the daemon is on keyword tier).
@@ -307,10 +366,14 @@ impl Atomiser {
             return Err(AtomiseError::SourceTooSmall);
         }
 
-        // Step 5 + 6 — curator round-trip.
+        // Step 5 + 6 — curator round-trip. `max_retries` is the
+        // per-call override (Cluster-F PERF-5): the deferred path
+        // passes `config.curator_max_retries` (3 by default), the
+        // Synchronous `pre_store` path passes
+        // `config.sync_curator_max_retries` (1 by default).
         let atoms = self
             .curator
-            .decompose(&source.content, budget, self.config.curator_max_retries)
+            .decompose(&source.content, budget, max_retries)
             .map_err(|e| match e {
                 curator::CuratorError::LlmUnavailable(d)
                 | curator::CuratorError::MalformedResponse(d) => AtomiseError::CuratorFailed(d),

@@ -389,7 +389,7 @@ fn verb_no_op_keeps_candidate_and_inserts_new() {
 /// the insert-then-classify behaviour).
 #[test]
 fn synthesis_parse_response_round_trips() {
-    let cands = vec![Memory {
+    let cands = [Memory {
         id: "c1".into(),
         tier: ai_memory::models::Tier::Mid,
         namespace: "ns".into(),
@@ -417,7 +417,8 @@ fn synthesis_parse_response_round_trips() {
         confidence_decayed_at: None,
     }];
     let raw = r#"{"verdicts":[{"candidate_id":"c1","verb":"delete","reason":"stale"}]}"#;
-    let parsed: SynthesisResponse = parse_response(raw, &cands).unwrap();
+    let cands_ref: Vec<&Memory> = cands.iter().collect();
+    let parsed: SynthesisResponse = parse_response(raw, &cands_ref).unwrap();
     assert_eq!(parsed.verdicts.len(), 1);
     assert_eq!(parsed.verdicts[0].verb, SynthesisVerb::Delete);
     assert_eq!(parsed.verdicts[0].candidate_id, "c1");
@@ -496,6 +497,7 @@ fn install_synthesis_policy(
         auto_atomise: None,
         auto_atomise_threshold_cl100k: None,
         auto_atomise_max_atom_tokens: None,
+        auto_atomise_max_retries: None,
         auto_persona_trigger_every_n_memories: None,
         auto_export_personas_to_filesystem: None,
         auto_atomise_mode: None,
@@ -759,7 +761,7 @@ fn synthesis_prompt_truncates_candidate_content_at_cap() {
     };
 
     let cap = 200_usize;
-    let prompt = synthesis::build_prompt_with_cap("incoming", "body", &[cand], cap);
+    let prompt = synthesis::build_prompt_with_cap("incoming", "body", &[&cand], cap);
 
     // Untruncated content (10K zs) must not appear verbatim.
     assert!(
