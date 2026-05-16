@@ -202,6 +202,7 @@ fn install_permissive_synthesis_policy(conn: &Connection, ns: &str) {
         synthesis_failure_mode: None,
         synthesis_max_deletes_per_call: Some(64),
         synthesis_max_candidate_chars: None,
+        multistep_max_content_chars: None,
     };
     let now = Utc::now().to_rfc3339();
     let mut metadata = default_metadata();
