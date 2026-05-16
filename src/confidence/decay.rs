@@ -10,9 +10,19 @@
 //! `AI_MEMORY_CONFIDENCE_DECAY=1` or the namespace policy carries
 //! `confidence_decay_half_life_days`.
 //!
-//! Audit-honest contract: this module is pure. The caller owns the
-//! substrate touch (UPDATE the row, stamp `confidence_decayed_at`,
-//! flip `confidence_source` to [`crate::models::ConfidenceSource::Decayed`]).
+//! The recall-time substrate touch lives in [`apply_decay_touch`]:
+//! when `AI_MEMORY_CONFIDENCE_DECAY=1` and a memory is recalled,
+//! `crate::store::sqlite::touch_after_recall` calls this helper to
+//! UPDATE the row in place, stamp `confidence_decayed_at`, overwrite
+//! `confidence` with the decayed value, and flip `confidence_source`
+//! to [`crate::models::ConfidenceSource::Decayed`].
+//!
+//! Audit-honest contract: this module is pure (the math) plus one
+//! tightly-scoped substrate writer ([`apply_decay_touch`]) that lives
+//! here — not in `src/storage/mod.rs` — so the Cluster F recall SQL
+//! stays untouched.
+
+use rusqlite::{Connection, params};
 
 /// Environment-variable opt-in for the recall-time decay updater.
 pub const ENV_DECAY: &str = "AI_MEMORY_CONFIDENCE_DECAY";
@@ -44,6 +54,65 @@ pub fn decayed(base: f64, age_days: f64, half_life_days: f64) -> f64 {
     let half_life = half_life_days.max(f64::EPSILON);
     let factor = (-age * std::f64::consts::LN_2 / half_life).exp();
     (base * factor).clamp(0.0, 1.0)
+}
+
+/// Substrate-side decay touch fired from `touch_after_recall` when
+/// `AI_MEMORY_CONFIDENCE_DECAY=1`. Reads the row's current
+/// `confidence`, `created_at`, and `confidence_decayed_at`, computes
+/// the decayed value via [`decayed`] using
+/// [`crate::confidence::DEFAULT_HALF_LIFE_DAYS`] (per-namespace
+/// half-life override is a future-Cluster knob), and writes back the
+/// new value, the `'decayed'` source marker, and a fresh
+/// `confidence_decayed_at` timestamp.
+///
+/// Idempotent — re-running on a row that has already been decayed
+/// uses the most recent `confidence_decayed_at` as the age anchor, so
+/// repeated touches converge rather than collapsing the value to zero.
+/// Returns `Ok(true)` when a row was updated, `Ok(false)` when no row
+/// matched the id (silently swallowed by the caller).
+///
+/// # Errors
+///
+/// Returns the underlying `rusqlite` error on SQL failure.
+pub fn apply_decay_touch(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    use chrono::{DateTime, Utc};
+    // Read the row's age anchor + current confidence in one shot. The
+    // anchor is `confidence_decayed_at` when present (subsequent
+    // decays compute from the last decay timestamp, not creation),
+    // falling back to `created_at` for first-touch rows.
+    let row: Option<(f64, String, Option<String>)> = conn
+        .query_row(
+            "SELECT confidence, created_at, confidence_decayed_at
+             FROM memories WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .ok();
+    let Some((current_confidence, created_at, decayed_at)) = row else {
+        return Ok(false);
+    };
+
+    let now = Utc::now();
+    let anchor_str = decayed_at.unwrap_or(created_at);
+    let anchor = DateTime::parse_from_rfc3339(&anchor_str)
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or(now);
+    let age_days = (now - anchor).num_seconds() as f64 / 86_400.0;
+    let new_value = decayed(
+        current_confidence,
+        age_days,
+        crate::confidence::DEFAULT_HALF_LIFE_DAYS,
+    );
+    let stamp = now.to_rfc3339();
+    let n = conn.execute(
+        "UPDATE memories
+         SET confidence = ?1,
+             confidence_source = 'decayed',
+             confidence_decayed_at = ?2
+         WHERE id = ?3",
+        params![new_value, stamp, id],
+    )?;
+    Ok(n > 0)
 }
 
 #[cfg(test)]

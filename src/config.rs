@@ -2400,6 +2400,14 @@ pub struct AppConfig {
     /// pre-cluster-D contract for the install-script deploy where
     /// no operator pubkey is yet on disk.
     pub governance: Option<GovernanceConfig>,
+    /// v0.7.0 Cluster G (#767) — `[confidence]` block. Carries the
+    /// retention window for `confidence_shadow_observations` consumed
+    /// by the periodic GC sweep (`shadow_retention_days`, default 30).
+    /// Unset → the compiled default applies. Closes PERF-4: the v0.7.0
+    /// Form 5 closeout (#758) shipped the shadow-mode table but did
+    /// NOT ship retention, so a long-running shadow-enabled deployment
+    /// would see unbounded growth.
+    pub confidence: Option<ConfidenceConfig>,
 }
 
 /// v0.7.0 SEC-2 (Cluster D, issue #767) — `[governance]` top-level
@@ -2518,6 +2526,41 @@ pub struct RecallScope {
     /// degrades gracefully.
     #[serde(default)]
     pub limit: Option<u32>,
+}
+
+/// v0.7.0 Cluster G (#767) — `[confidence]` config block. Carries the
+/// retention window for `confidence_shadow_observations` consumed by
+/// the periodic GC sweep wired into `daemon_runtime::spawn_gc_loop`.
+///
+/// Wire format:
+/// ```toml
+/// [confidence]
+/// shadow_retention_days = 30
+/// ```
+///
+/// `None` → the compiled default
+/// ([`crate::confidence::shadow::DEFAULT_SHADOW_RETENTION_DAYS`] = 30)
+/// applies. Set to `0` or a negative value to disable the sweep
+/// (matches the audit-honest "do-nothing-on-zero" convention used by
+/// `archive_max_days`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ConfidenceConfig {
+    /// Retention window (in days) for shadow-mode observation rows.
+    /// Rows whose `observed_at` is older than `now - N days` are
+    /// deleted by the GC sweep. `None` → compiled default of 30 days.
+    /// `Some(0)` or `Some(<0)` → sweep is a no-op (operator opt-out
+    /// for compliance / forensic-retention scenarios).
+    pub shadow_retention_days: Option<i64>,
+}
+
+impl ConfidenceConfig {
+    /// Effective retention window, honoring the compiled default when
+    /// the config block is absent or `shadow_retention_days` is unset.
+    #[must_use]
+    pub fn effective_shadow_retention_days(&self) -> i64 {
+        self.shadow_retention_days
+            .unwrap_or(crate::confidence::shadow::DEFAULT_SHADOW_RETENTION_DAYS)
+    }
 }
 
 /// v0.7.0 H7 (round-2) — compiled default per-request HTTP timeout.
@@ -3511,6 +3554,7 @@ impl AppConfig {
             "verify",
             "mcp_federation_forward_url",
             "agents",
+            "confidence",
         ];
 
         let value: toml::Value = match toml::from_str(contents) {
@@ -5026,6 +5070,7 @@ legacy_scoring = false
             mcp_federation_forward_url: Some(String::new()),
             agents: Some(AgentsConfig::default()),
             governance: Some(GovernanceConfig::default()),
+            confidence: Some(ConfidenceConfig::default()),
         };
 
         let serialised = toml::to_string(&cfg).expect("serialise AppConfig to TOML");
@@ -5069,6 +5114,7 @@ legacy_scoring = false
             "mcp_federation_forward_url",
             "agents",
             "governance",
+            "confidence",
         ];
 
         for key in table.keys() {

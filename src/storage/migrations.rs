@@ -7,7 +7,7 @@
 //! constant, and the `migrate` function out of `src/db.rs` into
 //! this sub-module. Pure refactor — semantics unchanged. The
 //! `MAX_SUPPORTED_SCHEMA` constant in `cli::boot` must still bump
-//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 40).
+//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 41).
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
@@ -123,10 +123,15 @@ CREATE INDEX IF NOT EXISTS idx_memories_confidence_source
 -- AI_MEMORY_CONFIDENCE_SHADOW=1 and sampled at
 -- AI_MEMORY_CONFIDENCE_SHADOW_SAMPLE_RATE. The calibration CLI reads
 -- this table to compute per-(namespace, source) baselines.
+-- v40 (Cluster G) added the denormalised `source` column + compound
+-- `(namespace, source, observed_at)` index so the calibration scan
+-- streams a single-table SQL aggregation (was: full-window Vec materialise
+-- + Rust grouping, PERF-12).
 CREATE TABLE IF NOT EXISTS confidence_shadow_observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     memory_id TEXT NOT NULL,
     namespace TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'unknown',
     caller_confidence REAL NOT NULL,
     derived_confidence REAL NOT NULL,
     signals TEXT NOT NULL,
@@ -140,6 +145,8 @@ CREATE INDEX IF NOT EXISTS idx_shadow_obs_observed_at
     ON confidence_shadow_observations(observed_at);
 CREATE INDEX IF NOT EXISTS idx_shadow_obs_memory
     ON confidence_shadow_observations(memory_id);
+CREATE INDEX IF NOT EXISTS idx_shadow_obs_namespace_source_observed
+    ON confidence_shadow_observations(namespace, source, observed_at);
 
 CREATE TABLE IF NOT EXISTS memory_links (
     source_id    TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
@@ -395,7 +402,22 @@ CREATE INDEX IF NOT EXISTS idx_signed_events_dlq_agent
 //       SCHEMA; pre-v40 deployments pick it up here. The DLQ is
 //       intentionally NOT append-only (operator-driven replay deletes
 //       rows after re-append).
-const CURRENT_SCHEMA_VERSION: i64 = 40;
+// v41 = v0.7.0 Cluster G — shadow-mode retention + denormalised
+//       `source` column + compound `(namespace, source, observed_at)`
+//       index supporting the calibration scan (issue #767, PERF-4 +
+//       PERF-12). The ALTER adding `source` is emitted from Rust
+//       (SQLite has no `ADD COLUMN IF NOT EXISTS`); the SQL file
+//       0035 holds the compound index. The backfill UPDATE
+//       (copying `memories.source` into legacy observation rows)
+//       runs from Rust so the column-existence probe gates it.
+//       Pure additive — every pre-Cluster-G observation row keeps
+//       its existing fields; the new `source` column lands with the
+//       backfill or `'unknown'` (defense in depth) for orphan rows
+//       whose source memory has already been CASCADE-deleted.
+//       (Renumbered from v40 to v41 during rebase onto trunk: Cluster C
+//       SEC-3 closeout #770 landed first and claimed v40 for the
+//       `signed_events_dlq` table.)
+const CURRENT_SCHEMA_VERSION: i64 = 41;
 
 const MIGRATION_V15_SQLITE: &str =
     include_str!("../../migrations/sqlite/0010_v063_hierarchy_kg.sql");
@@ -646,6 +668,15 @@ const MIGRATION_V39_SQLITE: &str =
 // path (race-on-UNIQUE requeue; non-race errors land here).
 const MIGRATION_V40_SQLITE: &str =
     include_str!("../../migrations/sqlite/0034_v07_signed_events_dlq.sql");
+// v0.7.0 Cluster G — shadow-mode retention + denormalised `source`
+// column + compound `(namespace, source, observed_at)` index supporting
+// the calibration scan (issue #767, PERF-4 + PERF-12). The ALTER
+// adding `source` is emitted from Rust (SQLite has no
+// `ADD COLUMN IF NOT EXISTS`); this file holds the compound index. The
+// backfill UPDATE (copying `memories.source` into legacy observation
+// rows) also runs from Rust so the column-existence probe gates it.
+const MIGRATION_V41_SQLITE: &str =
+    include_str!("../../migrations/sqlite/0035_v07_shadow_retention.sql");
 
 // COVERAGE: per-version ALTER/CREATE branches inside this function
 // are guarded by `has_X` column-existence probes and `IF NOT EXISTS`
@@ -1583,6 +1614,46 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             conn.execute_batch(MIGRATION_V40_SQLITE)?;
         }
 
+        if version < 41 {
+            // v0.7.0 Cluster G — shadow-mode retention + denormalised
+            // `source` column + compound `(namespace, source,
+            // observed_at)` index supporting the calibration scan
+            // (issue #767, PERF-4 + PERF-12). Probe for the
+            // `source` column on `confidence_shadow_observations` and
+            // ADD it when absent. SQLite has no
+            // `ADD COLUMN IF NOT EXISTS`, so the probe lives in Rust;
+            // the compound index lives in the .sql file.
+            let mut has_source = false;
+            let mut stmt = conn.prepare("PRAGMA table_info(confidence_shadow_observations)")?;
+            let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            for col in cols {
+                if col?.as_str() == "source" {
+                    has_source = true;
+                }
+            }
+            drop(stmt);
+            if !has_source {
+                conn.execute(
+                    "ALTER TABLE confidence_shadow_observations \
+                     ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'",
+                    [],
+                )?;
+                // Backfill from the joined memories row. Orphan
+                // observation rows (whose source memory has already
+                // been CASCADE-deleted; impossible under the v39 FK
+                // but defense in depth) stay at the 'unknown' default.
+                conn.execute(
+                    "UPDATE confidence_shadow_observations \
+                     SET source = COALESCE( \
+                         (SELECT m.source FROM memories m \
+                          WHERE m.id = confidence_shadow_observations.memory_id), \
+                         'unknown')",
+                    [],
+                )?;
+            }
+            conn.execute_batch(MIGRATION_V41_SQLITE)?;
+        }
+
         conn.execute("DELETE FROM schema_version", [])?;
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?1)",
@@ -1788,8 +1859,8 @@ mod tests {
         // other is a documented foot-gun. We pin the relationship
         // so a future bump is loud.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 40,
-            "module docstring advertises 40; bump the docstring when this number changes"
+            CURRENT_SCHEMA_VERSION, 41,
+            "module docstring advertises 41; bump the docstring when this number changes"
         );
     }
 

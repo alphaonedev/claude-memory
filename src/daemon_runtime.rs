@@ -1692,14 +1692,41 @@ fn ensure_and_load_daemon_keypair() -> (
 // Background tasks (GC, WAL checkpoint)
 // ---------------------------------------------------------------------------
 
-/// Spawn the periodic GC loop. Sleeps `interval`, then runs `db::gc` and
-/// `db::auto_purge_archive` against the daemon's shared connection. The
-/// returned [`JoinHandle`] is owned by the caller; `serve()` aborts it on
-/// shutdown.
+/// Spawn the periodic GC loop. Sleeps `interval`, then runs `db::gc`,
+/// `db::auto_purge_archive`, and (Cluster G, #767) the shadow-
+/// observation retention sweep against the daemon's shared connection.
+/// The returned [`JoinHandle`] is owned by the caller; `serve()` aborts
+/// it on shutdown.
+///
+/// `shadow_retention_days` honors the operator-tunable
+/// `[confidence] shadow_retention_days` from `config.toml`, falling
+/// back to [`crate::confidence::shadow::DEFAULT_SHADOW_RETENTION_DAYS`]
+/// (30) when unset. `<= 0` disables the sweep (matches the
+/// `archive_max_days` convention).
 #[must_use]
 pub fn spawn_gc_loop(
     state: Db,
     archive_max_days: Option<i64>,
+    interval: Duration,
+) -> JoinHandle<()> {
+    spawn_gc_loop_with_shadow_retention(
+        state,
+        archive_max_days,
+        crate::confidence::shadow::DEFAULT_SHADOW_RETENTION_DAYS,
+        interval,
+    )
+}
+
+/// Cluster G (#767) — `spawn_gc_loop` variant that takes an explicit
+/// shadow-observation retention window. Used by `bootstrap_serve` so
+/// the operator-tunable `[confidence] shadow_retention_days` from
+/// `config.toml` flows through. `spawn_gc_loop` is the no-arg wrapper
+/// that picks the compiled default for legacy call sites (tests).
+#[must_use]
+pub fn spawn_gc_loop_with_shadow_retention(
+    state: Db,
+    archive_max_days: Option<i64>,
+    shadow_retention_days: i64,
     interval: Duration,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -1714,6 +1741,15 @@ pub fn spawn_gc_loop(
             match db::auto_purge_archive(&lock.0, archive_max_days) {
                 Ok(n) if n > 0 => tracing::info!("gc: purged {n} old archived memories"),
                 _ => {}
+            }
+            // Cluster G (#767, PERF-4) — shadow-mode observation
+            // retention sweep. `<= 0` is a no-op (operator opt-out).
+            match crate::confidence::shadow::gc_observations(&lock.0, shadow_retention_days) {
+                Ok(n) if n > 0 => tracing::info!(
+                    "gc: purged {n} shadow observations older than {shadow_retention_days}d"
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("shadow observation gc failed: {e}"),
             }
         }
     })
@@ -2613,10 +2649,18 @@ pub async fn bootstrap_serve(
     // expected count accordingly.
     task_handles.push(deferred_audit_supervisor);
 
-    // Automatic GC.
-    task_handles.push(spawn_gc_loop(
+    // Automatic GC. Cluster G (#767) — pass through the operator-
+    // tunable `[confidence] shadow_retention_days` so the periodic
+    // sweep on `confidence_shadow_observations` runs at the configured
+    // window (default 30 days).
+    let shadow_retention_days = app_config.confidence.as_ref().map_or(
+        crate::confidence::shadow::DEFAULT_SHADOW_RETENTION_DAYS,
+        crate::config::ConfidenceConfig::effective_shadow_retention_days,
+    );
+    task_handles.push(spawn_gc_loop_with_shadow_retention(
         db_state.clone(),
         app_config.archive_max_days,
+        shadow_retention_days,
         Duration::from_secs(GC_INTERVAL_SECS),
     ));
 

@@ -217,10 +217,15 @@ CREATE INDEX IF NOT EXISTS idx_memories_confidence_source
 -- AI_MEMORY_CONFIDENCE_SHADOW=1 and sampled at
 -- AI_MEMORY_CONFIDENCE_SHADOW_SAMPLE_RATE. The calibration CLI reads
 -- this table to compute per-(namespace, source) baselines.
+-- v0.7.0 Cluster G — added the denormalised `source` column + compound
+-- `(namespace, source, observed_at)` index so the calibration sweep
+-- streams a single-table SQL aggregation instead of materialising the
+-- full window into Rust memory (PERF-12).
 CREATE TABLE IF NOT EXISTS confidence_shadow_observations (
     id BIGSERIAL PRIMARY KEY,
     memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
     namespace TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'unknown',
     caller_confidence DOUBLE PRECISION NOT NULL,
     derived_confidence DOUBLE PRECISION NOT NULL,
     signals TEXT NOT NULL,
@@ -234,6 +239,8 @@ CREATE INDEX IF NOT EXISTS idx_shadow_obs_observed_at
     ON confidence_shadow_observations(observed_at);
 CREATE INDEX IF NOT EXISTS idx_shadow_obs_memory
     ON confidence_shadow_observations(memory_id);
+CREATE INDEX IF NOT EXISTS idx_shadow_obs_namespace_source_observed
+    ON confidence_shadow_observations(namespace, source, observed_at);
 
 -- Full-text search. English stemming; matches the SQLite FTS5 setup.
 CREATE INDEX IF NOT EXISTS memories_content_fts ON memories

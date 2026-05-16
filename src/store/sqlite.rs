@@ -401,9 +401,23 @@ impl MemoryStore for SqliteStore {
             return Ok(());
         }
         let conn = self.state.lock().await;
+        // v0.7.0 Form 5 / Cluster G — opportunistic freshness-decay
+        // update on touch. Gated on `AI_MEMORY_CONFIDENCE_DECAY=1`
+        // (default-off; audit-honest contract). When enabled, the
+        // recall path stamps `confidence_decayed_at`, overwrites
+        // `confidence` with the decayed value, and flips
+        // `confidence_source` to `'decayed'` so the forensic bundle
+        // reflects the provenance change. The pure decay math lives
+        // in `crate::confidence::decay::decayed`; this site is the
+        // substrate-side wiring (UPDATE).
+        let decay_enabled = crate::confidence::decay::decay_enabled();
         for id in ids {
             if let Err(e) = db::touch(&conn, id, 3600, 86_400) {
                 tracing::warn!("touch failed for memory {id}: {e}");
+            }
+            if decay_enabled && let Err(e) = crate::confidence::decay::apply_decay_touch(&conn, id)
+            {
+                tracing::warn!("confidence decay touch failed for memory {id}: {e}");
             }
         }
         Ok(())
