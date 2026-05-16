@@ -1,0 +1,71 @@
+-- v0.7.0 WT-1-A — schema v36 atomisation foundation.
+--
+-- Substrate-level atomisation primitive (the first hard prereq for
+-- WT-1-B through WT-1-G). This migration is purely additive on the
+-- `memories` table — two nullable columns + two partial indexes — plus
+-- a CHECK-constraint extension on `memory_links.relation` to admit
+-- the new `derives_from` variant on the typed relation enum.
+--
+-- # Columns added on `memories`
+--
+-- - `atomised_into INTEGER` — when set, names the count (or epoch) of
+--   atomic memories this row was split into. The natural type would be
+--   a per-atom count; NULL means the memory has not yet been atomised
+--   and is the legacy default. A positive integer means the row has
+--   been atomised; downstream consumers (WT-1-B atomisation pass,
+--   WT-1-C atom resolver) read this column to decide whether to walk
+--   the atom set instead of returning the parent memory directly. The
+--   partial index restricts to rows where the column is > 0 so the
+--   typical "find non-atomised memories" predicate stays a fast scan
+--   over the surviving NULL set.
+--
+-- - `atom_of TEXT REFERENCES memories(id)` — for atom memories, points
+--   back to the parent memory that was atomised to mint this row.
+--   NULL for non-atom rows (the substrate baseline). The FK to
+--   `memories(id)` keeps the substrate consistent across cascading
+--   deletes; ON DELETE behaviour is the SQLite default (NO ACTION) so
+--   atomisation parents cannot be deleted while atoms still reference
+--   them. WT-1-D atom GC handles the lifecycle explicitly.
+--
+-- # CHECK constraint on `memory_links.relation`
+--
+-- The v33 (sqlite) full-table-rebuild baked a CHECK clause into the
+-- `memory_links_new` column definition with the closed taxonomy:
+--   related_to / supersedes / contradicts / derived_from / reflects_on
+--
+-- WT-1-A introduces `derives_from` as a sixth typed relation marking
+-- the new atomisation provenance edge (atom -> parent). The atom row's
+-- `atom_of` column carries the structural pointer; the
+-- `relation = 'derives_from'` link in `memory_links` carries the
+-- agent-claimable, signable relationship that survives federation
+-- and replay.
+--
+-- SQLite has no `ALTER TABLE ADD CONSTRAINT` for column-level CHECK
+-- clauses on an existing column, so we full-table-rebuild a second
+-- time (mirroring the v33 dance in migration 0027). The substrate
+-- carries this overhead because the v33 CHECK was deliberately
+-- closed-taxonomy to surface taxonomy drift in `.schema memory_links`
+-- output.
+--
+-- # Idempotency
+--
+-- The Rust migrate ladder probes `PRAGMA table_info(memories)` for
+-- both new columns before emitting the ALTERs (SQLite has no
+-- `ADD COLUMN IF NOT EXISTS`). The full-table-rebuild for
+-- `memory_links` runs only when this migration step is active
+-- (gated by `if version < 35`) and is replay-safe because the new
+-- table is created as `memory_links_v35` and renamed into place.
+--
+-- This SQL file holds the supporting indexes only; the ALTERs +
+-- rebuild dance live in Rust so the column-existence + table-name
+-- probes can run idempotently.
+
+-- Partial indexes on the new columns. `WHERE atom_of IS NOT NULL`
+-- keeps the index footprint on legacy databases at zero (every row
+-- has NULL until WT-1-B starts minting atoms). The atomised_into
+-- index uses `> 0` so the typical "find parents" predicate stays
+-- a fast index scan.
+CREATE INDEX IF NOT EXISTS idx_memories_atom_of
+    ON memories(atom_of) WHERE atom_of IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_memories_atomised_into
+    ON memories(atomised_into) WHERE atomised_into > 0;

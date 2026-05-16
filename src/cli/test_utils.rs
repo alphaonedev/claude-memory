@@ -57,6 +57,7 @@
 #![cfg(test)]
 
 use crate::cli::io_writer::CliOutput;
+use crate::models::ConfidenceSource;
 use crate::{db, models};
 use chrono::Utc;
 use std::path::{Path, PathBuf};
@@ -137,6 +138,16 @@ pub fn seed_memory(db_path: &Path, namespace: &str, title: &str, content: &str) 
         last_accessed_at: None,
         expires_at: None,
         metadata,
+        reflection_depth: 0,
+        memory_kind: crate::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(&conn, &mem).expect("db::insert")
 }

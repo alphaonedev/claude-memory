@@ -66,6 +66,7 @@
 //! var so the suite runs serially even when `cargo test` parallelises
 //! across test fns.
 
+use ai_memory::models::ConfidenceSource;
 use std::sync::Mutex;
 
 use ai_memory::db;
@@ -161,6 +162,16 @@ fn seed(conn: &rusqlite::Connection, title: &str) -> String {
         last_accessed_at: None,
         expires_at: None,
         metadata: models::default_metadata(),
+        reflection_depth: 0,
+        memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &mem).expect("db::insert")
 }
@@ -270,11 +281,15 @@ fn self_signed_link_persists_signature_column() {
 // re-deriving canonical CBOR from the same `SignableLink` and hashing
 // it must match the audit row's `payload_hash`.
 //
-// Production `db::create_link_signed` does not yet auto-append — that
-// wiring is deferred to a later track per H5's module docs. Here we
-// construct the audit row the way the future call-site will, exercising
-// the same SHA-256 helper + the same canonical CBOR encoder, so the
-// invariant is regression-locked at the substrate boundary.
+// As of v0.7.0 fix-campaign S4-INFO2 (#690), `db::create_link_signed`
+// auto-appends a `memory_link.created` audit row whose `payload_hash`
+// already binds the canonical CBOR — exactly the auditor invariant
+// this test was originally protecting. We still construct an explicit
+// row below to verify the helper API surface and to keep the
+// regression assert pinned at the substrate boundary; the test now
+// expects TWO rows (auto-emit + explicit append), and asserts both
+// carry the same `expected_hash` so the binding holds for either
+// emit-path a downstream auditor encounters.
 #[test]
 fn signed_events_payload_hash_matches_canonical_cbor() {
     let _g = ENV_GUARD
@@ -331,26 +346,37 @@ fn signed_events_payload_hash_matches_canonical_cbor() {
         signature: Some(sig_on_row.clone()),
         attest_level: "self_signed".to_string(),
         timestamp: Utc::now().to_rfc3339(),
+        ..SignedEvent::default()
     };
     signed_events::append_signed_event(&f.conn, &event).expect("append audit row");
 
     // Read it back through the public listing API and assert the
     // hash + signature bind to the same bytes a verifier would re-derive.
+    //
+    // Two rows are present post-S4-INFO2: the auto-emit from
+    // create_link_signed + the explicit append above. Both must carry
+    // the same payload_hash because they describe the same logical
+    // event; the binding invariant the test protects holds for either.
     let listed = signed_events::list_signed_events(&f.conn, Some(&alice.agent_id), 10, 0)
         .expect("list audit rows");
-    assert_eq!(listed.len(), 1, "exactly one audit row appended");
-    let row = &listed[0];
     assert_eq!(
-        row.payload_hash, expected_hash,
-        "audit payload_hash must equal SHA-256(canonical_cbor(signable))"
+        listed.len(),
+        2,
+        "auto-emit + explicit append yield two audit rows"
     );
-    assert_eq!(
-        row.signature.as_deref(),
-        Some(sig_on_row.as_slice()),
-        "audit signature blob must mirror memory_links.signature"
-    );
-    assert_eq!(row.attest_level, "self_signed");
-    assert_eq!(row.agent_id, alice.agent_id);
+    for row in &listed {
+        assert_eq!(
+            row.payload_hash, expected_hash,
+            "every audit row's payload_hash must equal SHA-256(canonical_cbor(signable))"
+        );
+        assert_eq!(
+            row.signature.as_deref(),
+            Some(sig_on_row.as_slice()),
+            "every audit row's signature blob must mirror memory_links.signature"
+        );
+        assert_eq!(row.attest_level, "self_signed");
+        assert_eq!(row.agent_id, alice.agent_id);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -513,7 +539,7 @@ fn peer_attested_inbound_link_verifies() {
     let inbound = MemoryLink {
         source_id: f.src_id.clone(),
         target_id: f.dst_id.clone(),
-        relation: "related_to".to_string(),
+        relation: ai_memory::models::MemoryLinkRelation::RelatedTo,
         created_at: Utc::now().to_rfc3339(),
         signature: Some(sig),
         observed_by: Some("bob".to_string()),
@@ -581,7 +607,7 @@ fn inbound_link_with_no_enrolled_pubkey_lands_unsigned() {
     let inbound = MemoryLink {
         source_id: f.src_id.clone(),
         target_id: f.dst_id.clone(),
-        relation: "related_to".to_string(),
+        relation: ai_memory::models::MemoryLinkRelation::RelatedTo,
         created_at: Utc::now().to_rfc3339(),
         signature: Some(sig),
         observed_by: Some("carol".to_string()),

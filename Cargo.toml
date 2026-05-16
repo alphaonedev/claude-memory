@@ -1,6 +1,6 @@
 [package]
 name = "ai-memory"
-version = "0.6.4"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.88"
 authors = ["AlphaOne LLC"]
@@ -68,7 +68,7 @@ gethostname = "0.5"
 # + rustls. Accepts PEM cert + key from --tls-cert / --tls-key. No
 # OpenSSL dep; rustls matches reqwest's rustls-tls choice already in
 # use for the sync-daemon's outbound HTTPS.
-axum-server = { version = "0.7", features = ["tls-rustls"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
 # rustls 0.23 requires an explicit CryptoProvider — `ring` matches
 # reqwest's default for the sync-daemon, keeping a single provider
 # across the process. PEM parsing is handled by
@@ -79,6 +79,13 @@ rustls = { version = "0.23", features = ["ring"] }
 # client cert DER. RustCrypto sha2 — same family as the HKDF we'll use
 # for Layer 3 E2E encryption (#228).
 sha2 = "0.10"
+# v0.7.0 M1 — constant-time byte comparison for mTLS fingerprint
+# allowlist membership. `subtle` is the RustCrypto ecosystem default
+# (already pulled in transitively via ed25519-dalek / sha2 / etc); we
+# promote it to a direct dep so `src/tls.rs` can compare a 32-byte
+# fingerprint against every entry in the allowlist without leaking
+# matching timing through the HashSet's hash-and-probe shape.
+subtle = "2"
 
 # v0.7 Track H — per-agent Ed25519 attested identity (H1). `ed25519-dalek`
 # 2.x is the RustCrypto-maintained, pure-Rust, audit-friendly Ed25519
@@ -101,6 +108,11 @@ base64 = "0.22"
 # transitively via the candle stack — promoted to a direct dep here
 # so `src/identity/sign.rs` can rely on a stable version pin.
 ciborium = "0.2"
+# v0.7.0 L1-5 — SKILL.md YAML frontmatter parsing for the Agent Skills
+# substrate. `serde_yaml` is the de-facto `serde`-native YAML backend;
+# version 0.9 compiles to pure Rust (no C libyaml), making it compatible
+# with the rest of the zero-C-dep policy.
+serde_yaml = "0.9"
 
 # Semantic embedding support
 candle-core = "0.10"
@@ -109,7 +121,12 @@ candle-transformers = "0.10"
 hf-hub = { version = "0.5", features = ["tokio"] }
 tokenizers = { version = "0.22" }
 instant-distance = "0.6"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "native-tls"] }
+# M5 — `native-tls` removed from reqwest features. Federation + Ollama
+# only need rustls; keeping the OpenSSL/SecureTransport-backed
+# `native-tls` provider in the binary is pure attack surface (and ships
+# the macOS keychain integration we never use). Pin rustls as the sole
+# TLS provider so a single audited stack handles all outbound HTTPS.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 toml = "0.8"
 
 # v0.6.0.0 — Prometheus metrics endpoint at GET /metrics. Pure Rust, no
@@ -187,6 +204,12 @@ criterion = { version = "0.5", features = ["html_reports"] }
 uuid = { version = "1", features = ["v4", "v7"] }
 serde_json = "1"
 tempfile = "3"
+# v0.7.0 Cluster-F PERF regression suite (`tests/cluster_f_perf_regressions.rs`)
+# needs `Connection::trace` to count individual statements fired during
+# recall, so the `trace` feature on rusqlite is dev-only. Production
+# builds keep the bare `rusqlite = { version = "0.32" }` import — the
+# trace surface compiles into a no-op without this feature.
+rusqlite = { version = "0.32", features = ["trace"] }
 tower = { version = "0.5", features = ["util"] }
 # Wave 4 (v0.6.3) — TLS test fixture generator. Pinned to an exact version
 # so cert / key / fingerprint bytes stay stable across machines (rcgen's
@@ -285,13 +308,54 @@ harness = false
 name = "reranker_throughput"
 harness = false
 
+# v0.7.0 Task 7/8 (issue #655, recursive-learning ship-gate) —
+# `db::reflect_with_hooks` end-to-end microbenchmark. Pins the
+# v0.7.x+ regression baseline for the substrate-native recursive-
+# refinement primitive at three source-fanout points (1, 3, 7).
+# Run with `cargo bench --bench reflect`.
+[[bench]]
+name = "reflect"
+harness = false
+
+# v0.7.0 L3-1 (issue #674) — LongMemEval-Reflection benchmark. Drives
+# the curator's reflection-pass + the substrate reflect_with_hooks
+# path against a deterministic 50-scenario synthetic dataset. CI runs
+# with the deterministic Gemma-4-stub judge (token-Jaccard); a real
+# Gemma 4 wrapper swaps in at publish time without touching the
+# runner. The bench's `--test` flag drives a 6-scenario smoke (~3s).
+# Full run reports coverage / accuracy / depth-violation / sig-verify
+# / throughput against the spec gates and exits non-zero on any miss.
+[[bench]]
+name = "longmemeval_reflection"
+harness = false
+
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/ai-memory-{ target }.tar.gz"
 bin-dir = "ai-memory"
 pkg-fmt = "tgz"
 
 [patch.crates-io]
-# paste is unmaintained (RUSTSEC-2024-0436); using alphaonedev fork for maintenance
+# C1 — `paste` 1.x is unmaintained (RUSTSEC-2024-0436). The recommended
+# migration target is `pastey`, a community-maintained drop-in fork on
+# crates.io. Cargo's `[patch.crates-io]` rejects a same-source
+# registry-to-registry rename (it requires the patch source to differ
+# from the registry), so two viable swap paths exist:
+#
+#   1. Vendor a chosen pastey release into `vendor/pastey/` and patch
+#      from a `path = "vendor/pastey"` entry. This is the audit-clean
+#      path: the third-party source lands in-tree under our review and
+#      is rebuildable offline.
+#
+#   2. Patch from a vetted git mirror under our control (e.g. fork
+#      `pastey` into `alphaonedev/pastey` then pin a tag here). Avoids
+#      vendoring but adds a second fork to maintain.
+#
+# Until either path lands, we hold on the existing alphaonedev/paste
+# fork pinned to rev `6a30252`. That fork is the maintained substitute
+# under our org's control and addresses the RUSTSEC advisory by
+# pointing cargo-audit at code we attest to. No direct caller in this
+# repo invokes `paste::paste!`; the substitution only feeds transitive
+# consumers (gemm-*, candle-*, etc.).
 paste = { git = "https://github.com/alphaonedev/paste", rev = "6a30252" }
 
 [profile.release]

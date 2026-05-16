@@ -46,27 +46,92 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
+/// v0.7.0 H3 — pin the rustls protocol-version floor to TLS 1.2 with TLS 1.3
+/// preferred. Listed in descending preference order; rustls negotiates the
+/// highest protocol both peers support. TLS 1.0 / 1.1 are deliberately
+/// omitted: they have known weaknesses (BEAST, POODLE, no AEAD) and are
+/// disabled in every modern client (Chrome ≥ 84, Firefox ≥ 78, Safari ≥ 13).
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&rustls::SupportedProtocolVersion] =
+    &[&rustls::version::TLS13, &rustls::version::TLS12];
+
+/// v0.7.0 H4 — emit a `tracing::warn!` when the on-disk TLS key file is
+/// world- or group-readable. On Unix, "loose" means
+/// `mode & 0o077 != 0` — any bit in the group/world triad is set.
+///
+/// We intentionally do **not** refuse to load. Operators may have
+/// deliberately set up a shared-group keymat layout (e.g. nginx-style
+/// `ssl-cert` group), and refusing here would regress those flows.
+/// Warning is the right surface: loud in `journalctl`, scrapable by
+/// the SIEM, but never blocks startup.
+///
+/// On non-Unix targets the check is a no-op (Windows ACLs are richer
+/// than `st_mode` bits and would warrant a separate audit).
+fn warn_if_key_perms_loose(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mode = meta.mode() & 0o777;
+            if mode & 0o077 != 0 {
+                tracing::warn!(
+                    target: "ai_memory::tls",
+                    path = %path.display(),
+                    mode = format!("{mode:#o}"),
+                    "TLS private key file is group- or world-accessible \
+                     (mode {mode:#o}); recommended permissions are 0600. \
+                     Loading anyway — operator may have intentional shared-group setup."
+                );
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows uses ACLs, not POSIX modes. A separate audit would be
+        // needed to surface "Everyone has Read" — out of v0.7.0 scope.
+        let _ = path;
+    }
+}
+
 /// Load a PEM cert + PEM key (PKCS#8 or RSA) into an `axum-server`
 /// rustls config. Returns an error with a specific message for the
 /// operator rather than letting rustls' wrapped IO error bubble up —
 /// TLS misconfigurations are the #1 new-deploy footgun.
+///
+/// **v0.7.0 H3** — protocol versions are pinned to TLS 1.3 (preferred)
+/// + TLS 1.2 (floor). See [`SUPPORTED_PROTOCOL_VERSIONS`].
+///
+/// **v0.7.0 H4** — private key file permissions are checked before
+/// loading; loose permissions surface as a WARN but do not refuse.
 pub async fn load_rustls_config(
     cert_path: &Path,
     key_path: &Path,
 ) -> Result<axum_server::tls_rustls::RustlsConfig> {
-    let cert = tokio::fs::read(cert_path)
+    warn_if_key_perms_loose(key_path);
+    let cert_pem = tokio::fs::read(cert_path)
         .await
         .with_context(|| format!("failed to read TLS cert from {}", cert_path.display()))?;
-    let key = tokio::fs::read(key_path)
+    let key_pem = tokio::fs::read(key_path)
         .await
         .with_context(|| format!("failed to read TLS key from {}", key_path.display()))?;
-    let config = axum_server::tls_rustls::RustlsConfig::from_pem(cert, key)
-        .await
-        .context(
-            "failed to parse TLS cert/key — ensure PEM-encoded (cert may be fullchain; \
-                 key must be PKCS#8 or RSA)",
-        )?;
-    Ok(config)
+
+    // v0.7.0 H3 — `RustlsConfig::from_pem` doesn't expose protocol-
+    // version pinning. We build a `rustls::ServerConfig` directly with
+    // `with_protocol_versions(&[TLS13, TLS12])`, then wrap it for
+    // axum_server. Same parser surface, but with the version floor
+    // bolted on.
+    let certs = rustls_pki_pem_iter_certs(&cert_pem)?;
+    let key = rustls_pki_pem_parse_private_key(&key_pem)?;
+    let server_config =
+        rustls::ServerConfig::builder_with_protocol_versions(SUPPORTED_PROTOCOL_VERSIONS)
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .context(
+                "failed to build rustls ServerConfig — ensure PEM-encoded (cert may be fullchain; \
+         key must be PKCS#8 or RSA)",
+            )?;
+    Ok(axum_server::tls_rustls::RustlsConfig::from_config(
+        Arc::new(server_config),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -87,6 +152,7 @@ pub async fn load_mtls_rustls_config(
         );
     }
 
+    warn_if_key_perms_loose(key_path);
     let cert_pem = tokio::fs::read(cert_path)
         .await
         .with_context(|| format!("failed to read TLS cert from {}", cert_path.display()))?;
@@ -99,10 +165,13 @@ pub async fn load_mtls_rustls_config(
     let key = rustls_pki_pem_parse_private_key(&key_pem)?;
 
     let verifier = Arc::new(FingerprintAllowlistVerifier { allowlist });
-    let server_config = rustls::ServerConfig::builder()
-        .with_client_cert_verifier(verifier)
-        .with_single_cert(certs, key)
-        .context("failed to build rustls ServerConfig for mTLS")?;
+    // v0.7.0 H3 — same protocol-version pinning as the non-mTLS server
+    // config above. TLS 1.3 preferred, TLS 1.2 floor.
+    let server_config =
+        rustls::ServerConfig::builder_with_protocol_versions(SUPPORTED_PROTOCOL_VERSIONS)
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(certs, key)
+            .context("failed to build rustls ServerConfig for mTLS")?;
 
     Ok(axum_server::tls_rustls::RustlsConfig::from_config(
         Arc::new(server_config),
@@ -220,7 +289,7 @@ impl rustls::server::danger::ClientCertVerifier for FingerprintAllowlistVerifier
     ) -> std::result::Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
         use sha2::{Digest, Sha256};
         let fp: [u8; 32] = Sha256::digest(end_entity.as_ref()).into();
-        if self.allowlist.contains(&fp) {
+        if allowlist_contains_ct(&self.allowlist, &fp) {
             Ok(rustls::server::danger::ClientCertVerified::assertion())
         } else {
             Err(rustls::Error::General(format!(
@@ -275,6 +344,38 @@ pub fn hex_short(fp: &[u8; 32]) -> String {
     s
 }
 
+/// v0.7.0 M1 — constant-time allowlist membership check.
+///
+/// `HashSet::contains` is O(1) but the SipHash probe + early-exit
+/// comparison both leak timing signal: the response time of a verify
+/// handshake correlates with whether the offered fingerprint hash-
+/// collides with any allowlist entry (and, on collision, how many
+/// bytes match). A remote attacker who can observe TLS handshake
+/// timing can in principle enumerate the allowlist that way.
+///
+/// We walk every entry in the allowlist on every call and XOR-fold
+/// each byte through `subtle::ConstantTimeEq`. The result is the
+/// OR-reduction of "this entry matched" across every entry — same
+/// per-call cost regardless of whether a match exists or where in
+/// the iteration order it sits. `subtle` is the RustCrypto-default
+/// constant-time primitive (used by ring, ed25519-dalek, etc.).
+///
+/// Cost is O(N · 32) bytes per handshake. With a 1000-entry
+/// allowlist that's 32 KB of memory comparison — well below the
+/// dozens of milliseconds of cryptographic handshake work that
+/// precedes it. The timing-attack threat dominates the perf cost.
+fn allowlist_contains_ct(allowlist: &HashSet<[u8; 32]>, fp: &[u8; 32]) -> bool {
+    use subtle::ConstantTimeEq as _;
+    let mut found: subtle::Choice = subtle::Choice::from(0);
+    for entry in allowlist {
+        // `ct_eq` returns a `Choice` (0 or 1) without branching on
+        // the comparison outcome — the inner XOR-fold runs the full
+        // 32 bytes every call.
+        found |= entry.ct_eq(fp);
+    }
+    bool::from(found)
+}
+
 /// Build a rustls `ClientConfig` with client-cert auth and a
 /// "dangerously-accept-any-server-cert" verifier. Used by the
 /// sync-daemon to present its client cert on every outbound request
@@ -285,6 +386,7 @@ pub async fn build_rustls_client_config(
     cert_path: &Path,
     key_path: &Path,
 ) -> Result<rustls::ClientConfig> {
+    warn_if_key_perms_loose(key_path);
     let cert_pem = tokio::fs::read(cert_path)
         .await
         .with_context(|| format!("failed to read client cert from {}", cert_path.display()))?;
@@ -310,6 +412,45 @@ pub async fn build_rustls_client_config(
 /// `ServerCertVerifier` that accepts any peer certificate. Safe ONLY when
 /// paired with a strong reverse authentication channel — in our case the
 /// peer's `--mtls-allowlist` fingerprint-pins our client cert.
+///
+/// # v0.7.0 S6-LOW1 — threat model and compensating control
+///
+/// This verifier is intentionally permissive on the SERVER cert and is
+/// the documented compensating-with-mTLS control for issue #224. The
+/// security argument has three legs that must all hold for the
+/// resulting channel to remain trustworthy:
+///
+/// 1. **Client cert is the actual authn primitive.** The peer
+///    fingerprint-pins our client cert via `--mtls-allowlist`. A
+///    misbehaving server cannot complete the TLS handshake unless our
+///    client cert's SHA-256 is on its allowlist; an attacker who has
+///    spoofed DNS but lacks our client key is filtered at the peer's
+///    `ClientCertVerifier`.
+/// 2. **Sync traffic is single-purpose.** The federation channel only
+///    carries `/api/v1/sync/push` + `/api/v1/sync/since` payloads. The
+///    receiver still validates every memory through
+///    `validate::validate_memory`, signs/verifies every link through
+///    the H3 verify path, and gates every write through the per-agent
+///    quota (S6-M2). A man-in-the-middle would gain nothing by
+///    impersonating a server we'd already authenticate ourselves to.
+/// 3. **Pinning server certs is a v0.8.0 refinement.** Layer-2b
+///    server-cert pinning lands when the `--peer-fingerprint` flag is
+///    added (tracked in #224 follow-up). At that point this verifier
+///    is replaced with a fingerprint allowlist-checking variant. Until
+///    then, operators are explicitly informed via the operator runbook
+///    (`docs/runbook/federation-tls.md`) that:
+///       - both peers MUST set `--mtls-allowlist` to fingerprint-pin
+///         each other's CLIENT cert,
+///       - server-cert presentation is not currently authenticated
+///         beyond TLS handshake completion,
+///       - any deployment that exposes the federation port to a
+///         hostile network MUST front the daemon with a reverse proxy
+///         that performs server-side cert pinning.
+///
+/// **Do not use this verifier outside the federation sync-daemon
+/// path.** The MCP / CLI / HTTP-app paths use the default rustls
+/// verifier with platform roots. Removing the `Dangerous` prefix from
+/// the type name would obscure the trade-off and is rejected.
 #[derive(Debug)]
 pub struct DangerousAnyServerVerifier;
 
@@ -818,6 +959,195 @@ mod tests {
         drop(config);
     }
 
+    // -----------------------------------------------------------------------
+    // H3 — TLS version pinning. Both server configs MUST negotiate only
+    // TLS 1.2 or TLS 1.3; legacy versions are off the table.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_supported_protocol_versions_pinned_to_tls12_and_tls13() {
+        // The exported constant must list exactly TLS 1.3 (preferred) and
+        // TLS 1.2 (floor) in that order. If a future rustls upgrade adds
+        // a fourth `SupportedProtocolVersion` we want this test to fail
+        // so the H3 review surfaces the change.
+        assert_eq!(
+            SUPPORTED_PROTOCOL_VERSIONS.len(),
+            2,
+            "expected exactly 2 pinned versions (TLS 1.3 + TLS 1.2)"
+        );
+        // rustls's `SupportedProtocolVersion::version` exposes the
+        // wire-level `ProtocolVersion` enum. TLS 1.3 = 0x0304,
+        // TLS 1.2 = 0x0303 (per RFC 8446 §4.1.2 / RFC 5246 §A.1).
+        let v0 = SUPPORTED_PROTOCOL_VERSIONS[0].version;
+        let v1 = SUPPORTED_PROTOCOL_VERSIONS[1].version;
+        assert_eq!(v0, rustls::ProtocolVersion::TLSv1_3, "TLS 1.3 preferred");
+        assert_eq!(v1, rustls::ProtocolVersion::TLSv1_2, "TLS 1.2 floor");
+    }
+
+    #[tokio::test]
+    async fn test_load_rustls_config_pins_tls13_and_tls12() {
+        // End-to-end: build a real ServerConfig via the production
+        // helper and assert it accepts ONLY TLS 1.2 + TLS 1.3.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let cert = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls/valid_cert.pem");
+        let key = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls/valid_key_pkcs8.pem");
+
+        // `rustls::ServerConfig`'s `versions` field is private in 0.23+,
+        // so we assert version pinning at the input layer (the
+        // `SUPPORTED_PROTOCOL_VERSIONS` constant the production builder
+        // consumes) and rely on the test above
+        // (`test_supported_protocol_versions_pinned_to_tls12_and_tls13`)
+        // for the strict version-list assertion. Here we just confirm
+        // the production async path consumes that constant successfully.
+        let _config = load_rustls_config(&cert, &key)
+            .await
+            .expect("load_rustls_config must succeed with valid fixtures");
+
+        // And exercise the mTLS path's protocol pinning by building a
+        // FingerprintAllowlistVerifier + ServerConfig with the same
+        // version-list input the production builder uses. A successful
+        // build is sufficient — rustls refuses to construct a
+        // ServerConfig if the version list is empty or malformed.
+        let cert_pem = std::fs::read(&cert).unwrap();
+        let key_pem = std::fs::read(&key).unwrap();
+        let certs = rustls_pki_pem_iter_certs(&cert_pem).unwrap();
+        let signing_key = rustls_pki_pem_parse_private_key(&key_pem).unwrap();
+        let _server_config =
+            rustls::ServerConfig::builder_with_protocol_versions(SUPPORTED_PROTOCOL_VERSIONS)
+                .with_no_client_auth()
+                .with_single_cert(certs, signing_key)
+                .expect("ServerConfig with pinned versions must build");
+    }
+
+    // -----------------------------------------------------------------------
+    // H4 — loose-permission warning. The check is best-effort + WARN-only
+    // by design; we exercise the path on Unix where it has observable
+    // semantics, and confirm it's a no-op when permissions are tight.
+    // -----------------------------------------------------------------------
+
+    /// Shared `MakeWriter` shim for the H4 WARN-capture tests. Uses an
+    /// `Arc<Mutex<Vec<u8>>>` so the test can inspect every byte the
+    /// subscriber emitted after the WARN call. Defined outside the
+    /// per-test fn so the `MakeWriter` impl is namespace-stable.
+    #[cfg(unix)]
+    #[derive(Clone, Default)]
+    struct WarnBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    #[cfg(unix)]
+    impl std::io::Write for WarnBuf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for WarnBuf {
+        type Writer = WarnBuf;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_warn_if_key_perms_loose_emits_warn_on_world_readable() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use tracing::Level;
+
+        let sink = WarnBuf::default();
+        let buf = sink.0.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(Level::WARN)
+            .with_writer(sink)
+            .without_time()
+            .finish();
+
+        let key = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(key.path(), b"dummy keymat").unwrap();
+        std::fs::set_permissions(key.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        tracing::subscriber::with_default(subscriber, || {
+            warn_if_key_perms_loose(key.path());
+        });
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            captured.contains("group- or world-accessible"),
+            "expected WARN about loose perms, got: {captured:?}"
+        );
+        assert!(
+            captured.contains("0600"),
+            "expected guidance pointer to 0600 in WARN, got: {captured:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_warn_if_key_perms_loose_silent_on_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use tracing::Level;
+
+        let sink = WarnBuf::default();
+        let buf = sink.0.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(Level::WARN)
+            .with_writer(sink)
+            .without_time()
+            .finish();
+
+        let key = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(key.path(), b"dummy keymat").unwrap();
+        std::fs::set_permissions(key.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        tracing::subscriber::with_default(subscriber, || {
+            warn_if_key_perms_loose(key.path());
+        });
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            !captured.contains("group- or world-accessible"),
+            "0600 perms must NOT trigger the WARN; got: {captured:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M1 — constant-time allowlist membership. We can't assert timing
+    // directly in a unit test (jitter / scheduler noise), but we can
+    // assert the correctness of the function on a populated allowlist
+    // and on a near-miss (single-byte difference) to confirm the
+    // XOR-fold runs the full 32 bytes before reporting.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_allowlist_contains_ct_matches_real_entry() {
+        let mut allowlist = HashSet::new();
+        allowlist.insert([0xaa; 32]);
+        allowlist.insert([0xbb; 32]);
+        allowlist.insert([0xcc; 32]);
+        assert!(allowlist_contains_ct(&allowlist, &[0xbb; 32]));
+    }
+
+    #[test]
+    fn test_allowlist_contains_ct_rejects_one_byte_off() {
+        let mut allowlist = HashSet::new();
+        allowlist.insert([0xaa; 32]);
+        let mut near = [0xaa; 32];
+        near[31] = 0xab; // single-byte flip
+        assert!(!allowlist_contains_ct(&allowlist, &near));
+    }
+
+    #[test]
+    fn test_allowlist_contains_ct_empty_allowlist_rejects() {
+        let allowlist = HashSet::new();
+        assert!(!allowlist_contains_ct(&allowlist, &[0u8; 32]));
+    }
+
     #[tokio::test]
     async fn test_build_rustls_client_config_missing_cert_errors() {
         let cert = std::path::PathBuf::from("/does/not/exist/cert.pem");
@@ -828,6 +1158,116 @@ mod tests {
             .expect_err("missing client cert must error");
         assert!(
             err.to_string().contains("failed to read client cert"),
+            "got: {err}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // C-5 (#699): close the `load_mtls_rustls_config` gap.
+    //
+    // The mTLS server config path was completely uncovered at lib-tier
+    // (38 lines / 38 misses → tls.rs sat at 92.94%). These tests drive
+    // the happy path against the real PEM fixtures, the empty-allowlist
+    // refusal, and the read-error branches for the cert + key paths.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_load_mtls_rustls_config_happy_path() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let cert = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls/valid_cert.pem");
+        let key = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls/valid_key_pkcs8.pem");
+        // Build a single-entry allowlist on disk; the parser converts hex
+        // into a [u8; 32] which goes into the verifier. Hex content is
+        // irrelevant to the builder — it just needs to be non-empty so
+        // the empty-allowlist refusal does not trip.
+        let allowlist = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(allowlist.path(), format!("{}\n", "a".repeat(64))).unwrap();
+
+        let config = load_mtls_rustls_config(&cert, &key, allowlist.path())
+            .await
+            .expect("mTLS server config build with valid cert+key+allowlist");
+        // Returned RustlsConfig is opaque; success of the ?-cascade is
+        // the contract.
+        drop(config);
+    }
+
+    #[tokio::test]
+    async fn test_load_mtls_rustls_config_empty_allowlist_refuses() {
+        // Line 148-152: the operator-friendly refusal when an allowlist
+        // file parses but contains zero fingerprints. We deliberately
+        // never reach the cert/key reads.
+        let cert = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls/valid_cert.pem");
+        let key = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls/valid_key_pkcs8.pem");
+        let allowlist = tempfile::NamedTempFile::new().unwrap();
+        // Comment-only allowlist — parses successfully, but the set is empty.
+        std::fs::write(allowlist.path(), "# nothing here\n").unwrap();
+
+        let err = load_mtls_rustls_config(&cert, &key, allowlist.path())
+            .await
+            .expect_err("empty allowlist must refuse to start");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("empty") && msg.contains("refuse"),
+            "expected refuse-to-start error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_mtls_rustls_config_missing_cert_errors() {
+        // Line 156-158: cert-read failure path inside the mTLS builder.
+        let cert = std::path::PathBuf::from("/does/not/exist/mtls-cert.pem");
+        let key = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls/valid_key_pkcs8.pem");
+        let allowlist = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(allowlist.path(), format!("{}\n", "b".repeat(64))).unwrap();
+
+        let err = load_mtls_rustls_config(&cert, &key, allowlist.path())
+            .await
+            .expect_err("missing cert must error");
+        assert!(
+            err.to_string().contains("failed to read TLS cert"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_mtls_rustls_config_missing_key_errors() {
+        // Line 159-161: key-read failure path inside the mTLS builder.
+        let cert = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls/valid_cert.pem");
+        let key = std::path::PathBuf::from("/does/not/exist/mtls-key.pem");
+        let allowlist = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(allowlist.path(), format!("{}\n", "c".repeat(64))).unwrap();
+
+        let err = load_mtls_rustls_config(&cert, &key, allowlist.path())
+            .await
+            .expect_err("missing key must error");
+        assert!(
+            err.to_string().contains("failed to read TLS key"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_mtls_rustls_config_missing_allowlist_errors() {
+        // The first read inside load_mtls_rustls_config — the allowlist
+        // file itself — must surface a clean error envelope when the
+        // file does not exist.
+        let cert = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls/valid_cert.pem");
+        let key = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls/valid_key_pkcs8.pem");
+        let allowlist = std::path::PathBuf::from("/does/not/exist/allowlist.txt");
+
+        let err = load_mtls_rustls_config(&cert, &key, &allowlist)
+            .await
+            .expect_err("missing allowlist must error");
+        assert!(
+            err.to_string().contains("failed to read mTLS allowlist"),
             "got: {err}"
         );
     }

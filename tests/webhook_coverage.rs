@@ -82,7 +82,10 @@ fn subscribe_event_types(
         &NewSubscription {
             url: mock_url,
             events: "*",
-            secret: None,
+            // R3-S1.HMAC (2026-05-13): dispatch refuses unsigned
+            // bodies. Supply a per-sub secret so the wiremock POST
+            // arrives signed.
+            secret: Some("p5-test-secret"),
             namespace_filter: None,
             agent_filter: None,
             created_by: Some("p5-test"),

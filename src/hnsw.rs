@@ -12,11 +12,21 @@
 use instant_distance::{Builder, HnswMap, Point, Search};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::Sender;
+
+use crate::hooks::EvictionEvent;
 
 /// Maximum overflow entries before triggering a rebuild.
 const REBUILD_THRESHOLD: usize = 200;
 
 /// Maximum entries before evicting oldest to prevent unbounded memory growth.
+///
+/// Production code uses the constant 100_000. Tests may construct a
+/// `VectorIndex` with a custom cap via [`VectorIndex::with_max_entries_for_test`]
+/// — that knob is stored on the index instance itself, so it does
+/// NOT affect concurrent tests running with the default cap. The
+/// constant lives here so call sites (and the per-event tracing
+/// payload) reference one canonical value.
 const MAX_ENTRIES: usize = 100_000;
 
 // ---------------------------------------------------------------------------
@@ -52,6 +62,37 @@ pub fn index_evictions_total() -> u64 {
     INDEX_EVICTIONS_TOTAL.load(Ordering::Relaxed)
 }
 
+// ---------------------------------------------------------------------------
+// M8 (v0.7.0 round-2) — eviction-rate observability.
+//
+// Operators who hit the 100k cap need two signals:
+//
+//   1. Per-eviction WARN — surface every eviction event so operators
+//      see drift before recall quality has noticeably degraded.
+//   2. Rolling-rate ERROR — when the trailing-hour eviction rate
+//      exceeds the M8 ceiling, escalate to ERROR so the ops dashboard
+//      raises a page. The escalation message names the operator
+//      knobs (`vector_index_capacity` / "move to dedicated vector DB")
+//      so the on-call has the remediation in the log line.
+//
+// Implementation: a small fixed-size ring buffer of UNIX-nanosecond
+// timestamps. Each eviction `push`es a stamp; the rolling-rate check
+// counts how many stamps sit inside the trailing-hour window. The
+// ring is locked behind a `Mutex` for write-coherent visibility; the
+// path runs only on the eviction edge so the lock cost is negligible.
+// ---------------------------------------------------------------------------
+
+/// M8 eviction-rate ceiling: events / hour past which the rolling
+/// observer escalates from WARN to ERROR.
+const EVICTION_RATE_CEILING_PER_HOUR: usize = 10;
+
+/// Rolling-hour ring buffer capacity. Chosen so the ring can hold the
+/// ceiling plus headroom for burstiness; older entries are
+/// transparently evicted on push.
+const EVICTION_RATE_RING_CAP: usize = 64;
+
+static EVICTION_RATE_RING: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
 /// Whether an eviction occurred within the trailing `window_secs`.
 ///
 /// Used by capabilities (P1) to set `hnsw.evicted_recently` so operators
@@ -81,6 +122,33 @@ pub fn evicted_recently(window_secs: u64) -> bool {
 pub fn reset_eviction_counters_for_test() {
     INDEX_EVICTIONS_TOTAL.store(0, Ordering::Relaxed);
     LAST_EVICTION_AT_NANOS.store(0, Ordering::Relaxed);
+    if let Ok(mut g) = EVICTION_RATE_RING.lock() {
+        g.clear();
+    }
+}
+
+/// M8 (v0.7.0 round-2) — push the latest eviction timestamp into the
+/// rolling-hour ring and return how many stamps now sit inside the
+/// trailing hour. Producers call this once per eviction event;
+/// the caller branches on the returned count to escalate from WARN
+/// (already emitted) to ERROR.
+fn record_eviction_and_count_recent(now_nanos: u64) -> usize {
+    const ONE_HOUR_NANOS: u64 = 3_600 * 1_000_000_000;
+    let cutoff = now_nanos.saturating_sub(ONE_HOUR_NANOS);
+    let Ok(mut ring) = EVICTION_RATE_RING.lock() else {
+        // Poisoned lock — observability is best-effort, return 0 so
+        // the caller does not over-escalate.
+        return 0;
+    };
+    // Drop stale entries first so the ring stays bounded and the
+    // count reflects the trailing hour.
+    ring.retain(|t| *t >= cutoff);
+    if ring.len() >= EVICTION_RATE_RING_CAP {
+        // Cap reached — drop the oldest before appending.
+        ring.remove(0);
+    }
+    ring.push(now_nanos);
+    ring.len()
 }
 
 /// A point in the HNSW index — wraps a dense embedding vector.
@@ -100,6 +168,25 @@ impl instant_distance::Point for EmbeddingPoint {
 pub struct VectorIndex {
     /// The built HNSW index — maps embedding points to memory IDs.
     inner: Mutex<IndexState>,
+    /// v0.7.0 (R3-S1) — eviction sink. The `MAX_ENTRIES`-triggered
+    /// drain in `insert()` pushes an [`EvictionEvent`] onto this
+    /// channel for each evicted id; a hook-aware observer above this
+    /// layer drains the channel and fires the `on_index_eviction`
+    /// chain off the hot path. Wired by the daemon at startup
+    /// (`daemon_runtime`) via [`Self::set_eviction_sink`]. Optional —
+    /// CLI / test builds that never bring up the hooks pipeline leave
+    /// it `None` and the sink-push is a no-op so eviction throughput
+    /// is unaffected. Closes the G2 / G8 "fire site exists but not
+    /// wired" gap that the prior `tracing::warn!`-only implementation
+    /// left open.
+    ///
+    /// `Mutex` (not `RwLock`) because writes happen exactly twice in
+    /// the process lifetime (`set_eviction_sink` at startup and
+    /// `Drop`) and reads happen only on the eviction edge which is
+    /// itself already serialized through `inner`. The non-blocking
+    /// `try_send` semantics on the channel make sink-push safe to
+    /// hold across the inner-state lock without risk of deadlock.
+    eviction_sink: Mutex<Option<Sender<EvictionEvent>>>,
 }
 
 struct IndexState {
@@ -108,6 +195,14 @@ struct IndexState {
     overflow: Vec<(String, Vec<f32>)>,
     /// All entries (for rebuild). Kept in sync with the index + overflow.
     all_entries: Vec<(String, Vec<f32>)>,
+    /// v0.7.0 R3-S1 — per-instance eviction cap. Defaults to
+    /// [`MAX_ENTRIES`] (the production 100k). Tests construct an
+    /// index with a smaller cap via
+    /// [`VectorIndex::with_max_entries_for_test`] so the eviction
+    /// edge can be exercised without inserting 100k vectors. Storing
+    /// the cap per-instance (rather than as a process-wide atomic)
+    /// keeps concurrent tests independent.
+    max_entries: usize,
 }
 
 /// A search result from the vector index.
@@ -126,7 +221,9 @@ impl VectorIndex {
                 hnsw,
                 overflow: Vec::new(),
                 all_entries: entries,
+                max_entries: MAX_ENTRIES,
             }),
+            eviction_sink: Mutex::new(None),
         }
     }
 
@@ -137,7 +234,49 @@ impl VectorIndex {
                 hnsw: None,
                 overflow: Vec::new(),
                 all_entries: Vec::new(),
+                max_entries: MAX_ENTRIES,
             }),
+            eviction_sink: Mutex::new(None),
+        }
+    }
+
+    /// v0.7.0 R3-S1 — Build an empty index with a custom eviction
+    /// cap. Test-only: lets a 5-entry insert sequence exercise the
+    /// eviction edge in milliseconds (vs. the ~minute-scale cost of
+    /// inserting 100k vectors at the production cap). The knob is
+    /// stored per-instance so concurrent tests using the default
+    /// cap are unaffected.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_max_entries_for_test(max_entries: usize) -> Self {
+        VectorIndex {
+            inner: Mutex::new(IndexState {
+                hnsw: None,
+                overflow: Vec::new(),
+                all_entries: Vec::new(),
+                max_entries,
+            }),
+            eviction_sink: Mutex::new(None),
+        }
+    }
+
+    /// v0.7.0 (R3-S1) — wire the eviction sink.
+    ///
+    /// The daemon calls this once at startup with the send-half of an
+    /// mpsc channel; a hook-aware observer task drains the recv-half
+    /// off the hot path and fires the `on_index_eviction` chain
+    /// (`fire_on_index_eviction` in `src/hooks/chain.rs`). Replacing
+    /// an existing sink is allowed — useful when the daemon
+    /// reconfigures the hook chain at runtime — and drops the prior
+    /// sender, which terminates the prior observer cleanly.
+    ///
+    /// Build-time / CLI / test builds that never wire a sink retain
+    /// the `None` default; the eviction path's `try_send` then
+    /// becomes a no-op short-circuit so there is no measurable cost
+    /// to leaving the sink unset.
+    pub fn set_eviction_sink(&self, sink: Sender<EvictionEvent>) {
+        if let Ok(mut guard) = self.eviction_sink.lock() {
+            *guard = Some(sink);
         }
     }
 
@@ -169,46 +308,65 @@ impl VectorIndex {
         }
 
         // Evict oldest entries if over capacity
-        if state.all_entries.len() > MAX_ENTRIES {
-            let excess = state.all_entries.len() - MAX_ENTRIES;
-            // v0.6.3.1 (P3, G2): emit one structured tracing event per evicted
-            // id BEFORE we drop the rows so operators can post-mortem which
-            // memories lost their semantic-search affordance. Bumping the
-            // counter and last-eviction timestamp surfaces aggregate pressure
-            // through `memory_stats` and capabilities. The drain itself is
-            // unchanged — observability only.
+        let max_entries = state.max_entries;
+        if state.all_entries.len() > max_entries {
+            let excess = state.all_entries.len() - max_entries;
+            // M8 (v0.7.0 round-2) — emit ONE summary WARN per eviction
+            // event so the operator sees the batch drop in the daemon
+            // log without scrolling past N per-id lines first. The
+            // per-id WARNs (below) still fire for post-mortem
+            // attribution; this one is the high-level "the index
+            // dropped N oldest embeddings" signal operators alert on.
+            tracing::warn!(
+                target: "hnsw.eviction",
+                dropped = excess,
+                max_entries = max_entries,
+                "HNSW eviction: dropped {} oldest embeddings to make room",
+                excess,
+            );
+            // v0.7.0 (R3-S1) — fire the `on_index_eviction` hook event
+            // for each evicted id BEFORE we drop the rows. The sink
+            // is a non-blocking `try_send` (see below); a downstream
+            // hook-aware observer drains the channel off the hot path
+            // and invokes `crate::hooks::fire_on_index_eviction` per
+            // event. This closes the G2/G8 "fire site exists but not
+            // wired" gap that the prior `tracing::warn!`-only
+            // implementation left open.
+            //
+            // The sink push happens INSIDE the inner-state lock — the
+            // channel is unbounded so `try_send`-equivalent `send`
+            // never blocks (unbounded mpsc has no backpressure). The
+            // sink lock is independent of the inner lock so there is
+            // no ordering hazard.
+            //
+            // The hook subscriber (if any) is responsible for its own
+            // logging; the warn-level tracing event is preserved here
+            // as a no-op-when-no-subscriber fallback so operators
+            // without hooks configured still see eviction pressure in
+            // daemon logs, matching the v0.6.3.1 observability contract.
+            let sink_guard = self.eviction_sink.lock().ok();
             for (evicted_id, _) in state.all_entries.iter().take(excess) {
                 tracing::warn!(
                     target: "hnsw.eviction",
                     evicted_id = %evicted_id,
                     reason = "max_entries_reached",
-                    max_entries = MAX_ENTRIES,
+                    max_entries = max_entries,
                     "hnsw index evicting oldest entry: cap reached"
                 );
-                // v0.7 G8: this is the canonical fire site for the
-                // `on_index_eviction` hook event. The chain wire-in
-                // is gated on the next iteration because `VectorIndex`
-                // does not currently carry a handle to the
-                // `ExecutorRegistry` / `HookChain` (it sits below the
-                // hooks layer in the dep graph). Two unblocking
-                // approaches the next iteration may take:
-                //
-                //   (a) plumb an `Arc<RwLock<ExecutorRegistry>>` +
-                //       `Arc<HookChain>` into `VectorIndex::insert`
-                //       (touches every caller in `db.rs`); or
-                //
-                //   (b) replace the in-line `tracing::warn!` with a
-                //       crossbeam channel sink and let a hook-aware
-                //       observer in `src/hooks/` drain it.
-                //
-                // Until then the fire path is exercised through
-                // `crate::hooks::chain::fire_on_index_eviction`
-                // (see `src/hooks/chain.rs`) and its unit test in
-                // `tests/hooks_executor_test.rs`.
-                //
-                // TODO(v0.7-g8 next-iter): wire the chain fire here
-                // once (a) or (b) above lands.
+                if let Some(sink) = sink_guard.as_ref().and_then(|g| g.as_ref()) {
+                    // mpsc::Sender::send is non-blocking on an unbounded
+                    // channel (it only blocks on bounded). Errors mean the
+                    // receiver dropped — observability is best-effort, no
+                    // recovery action needed.
+                    let payload = EvictionEvent::new(
+                        evicted_id.clone(),
+                        String::new(), // namespace not in scope at hnsw layer
+                        "max_entries_reached",
+                    );
+                    let _ = sink.send(payload);
+                }
             }
+            drop(sink_guard);
             #[allow(clippy::cast_possible_truncation)]
             let evicted = excess as u64;
             INDEX_EVICTIONS_TOTAL.fetch_add(evicted, Ordering::Relaxed);
@@ -229,6 +387,22 @@ impl VectorIndex {
                 .unwrap_or(0);
             let now_nanos_u64 = u64::try_from(now_nanos).unwrap_or(u64::MAX);
             LAST_EVICTION_AT_NANOS.store(now_nanos_u64, Ordering::Relaxed);
+
+            // M8 (v0.7.0 round-2) — rolling-hour rate observer. Push
+            // a stamp on this eviction, then count stamps in the
+            // trailing hour. If the rate clears the M8 ceiling,
+            // escalate to ERROR so the dashboard pages the on-call.
+            let recent = record_eviction_and_count_recent(now_nanos_u64);
+            if recent > EVICTION_RATE_CEILING_PER_HOUR {
+                tracing::error!(
+                    target: "hnsw.eviction",
+                    rate_per_hour = recent,
+                    ceiling = EVICTION_RATE_CEILING_PER_HOUR,
+                    "HNSW eviction rate exceeded {}/hour — recall quality is degrading; \
+                     increase vector_index_capacity or move to dedicated vector DB",
+                    EVICTION_RATE_CEILING_PER_HOUR,
+                );
+            }
         }
     }
 
@@ -576,5 +750,115 @@ mod tests {
                 h.id
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // v0.7.0 R3-S1 — eviction sink wires the on_index_eviction hook
+    // -----------------------------------------------------------------
+
+    /// `test_hnsw_eviction_fires_hook` — when a sink is wired via
+    /// [`VectorIndex::set_eviction_sink`] and the index inserts past
+    /// its eviction cap, the eviction-edge code path pushes one
+    /// [`EvictionEvent`] per evicted id onto the channel. This closes
+    /// the G2/G8 "fire site exists but not wired" gap. We construct
+    /// the index via [`VectorIndex::with_max_entries_for_test`] so a
+    /// 6-entry insert sequence trips the eviction path in
+    /// milliseconds without touching the production 100k cap.
+    #[test]
+    fn test_hnsw_eviction_fires_hook() {
+        let (tx, rx) = std::sync::mpsc::channel::<EvictionEvent>();
+        let idx = VectorIndex::with_max_entries_for_test(4);
+        idx.set_eviction_sink(tx);
+
+        // Reset the process-local counters so concurrent tests
+        // sharing the static don't bleed assertions into ours.
+        reset_eviction_counters_for_test();
+
+        // Insert cap+2 entries — eviction drops the 2 oldest.
+        let n = 6_usize;
+        for i in 0..n {
+            let mut v = vec![0.0_f32; 4];
+            #[allow(clippy::cast_precision_loss)]
+            let f = i as f32;
+            v[i % 4] = 1.0 + f * 0.01;
+            idx.insert(format!("evict-{i}"), make_embedding(&v));
+        }
+
+        // Drain the channel. Expect TWO events (n=6, cap=4) — one
+        // per evicted id. The unbounded sender does not block; the
+        // events should already be enqueued by the time `insert`
+        // returns, but we give the channel a small grace window for
+        // thread-scheduling jitter on slow CI runners.
+        let mut received: Vec<EvictionEvent> = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while std::time::Instant::now() < deadline && received.len() < 2 {
+            while let Ok(ev) = rx.try_recv() {
+                received.push(ev);
+            }
+            if received.len() < 2 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+
+        assert_eq!(
+            received.len(),
+            2,
+            "expected one EvictionEvent per evicted id (2 evictions for n=6, cap=4), got {}: {:?}",
+            received.len(),
+            received.iter().map(|e| &e.memory_id).collect::<Vec<_>>(),
+        );
+
+        let ids: Vec<&str> = received.iter().map(|e| e.memory_id.as_str()).collect();
+        assert!(
+            ids.contains(&"evict-0"),
+            "expected evict-0 in evicted ids; got {ids:?}"
+        );
+        assert!(
+            ids.contains(&"evict-1"),
+            "expected evict-1 in evicted ids; got {ids:?}"
+        );
+
+        for ev in &received {
+            assert_eq!(
+                ev.reason, "max_entries_reached",
+                "evicted reason should match the canonical tag, got {:?}",
+                ev.reason
+            );
+            // namespace is intentionally empty at the hnsw layer
+            // (the index does not carry namespace context); G9+ may
+            // plumb it through. The wire field MUST be present even
+            // when empty.
+            assert_eq!(ev.namespace, "");
+            assert!(
+                !ev.evicted_at.is_empty(),
+                "evicted_at must be set (rfc3339), got empty"
+            );
+        }
+    }
+
+    /// Sanity: insertion without a sink wired is a no-op for the
+    /// hook path. The eviction-edge code path must remain functional
+    /// (counters bump, oldest drained) even when no sink is set, so
+    /// the CLI / test build's zero-cost posture is preserved.
+    #[test]
+    fn test_hnsw_eviction_without_sink_is_noop_for_hook() {
+        let idx = VectorIndex::with_max_entries_for_test(4);
+        // No `set_eviction_sink` call here — the index runs as in
+        // CLI / pre-R3-S1 builds without a hooks pipeline.
+
+        let before = index_evictions_total();
+        for i in 0..6_usize {
+            let mut v = vec![0.0_f32; 4];
+            #[allow(clippy::cast_precision_loss)]
+            let f = i as f32;
+            v[i % 4] = 1.0 + f * 0.01;
+            idx.insert(format!("noopsink-{i}"), make_embedding(&v));
+        }
+        let delta = index_evictions_total().saturating_sub(before);
+
+        assert!(
+            delta >= 2,
+            "eviction counters must still bump even without a sink wired (got delta={delta})"
+        );
     }
 }

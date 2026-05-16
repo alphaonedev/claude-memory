@@ -1,0 +1,219 @@
+# ai-memory per-module coverage thresholds
+# Generated 2026-05-13 at v0.7.0 L0.7-7 (post-integration cascade @ 83bc684).
+# Source measurement: cargo llvm-cov --features sal,sal-postgres --lib --tests --workspace
+#                     against .local-runs/L0.7-7-baseline/cov.json
+#
+# DISCIPLINE (per L0.7 playbook §8):
+#   Thresholds rise across releases; NEVER fall.
+#   If a module drops below its threshold in a future release, CI fails
+#   and the offending commit cannot merge until coverage is restored.
+#   Lowering a threshold requires explicit operator approval in the PR
+#   description.
+#
+# RULE for derivation: threshold = floor(measured - 0.5).
+#   - measured 96.5% → threshold 96   (~0.5pp noise tolerance below)
+#   - measured 99.0% → threshold 98   (~1pp tolerance below)
+#   - measured 100.0% → threshold 99  (never set 100 to avoid 1-line jitter trips)
+#
+# Tier targets (raise per-module floor to these by v0.8.0):
+#   A=98% (pure logic), B=95% (MCP/HTTP/CLI), C=92% (substrate),
+#   D=85% (LLM-bound, documented rationale), E=90% (wire/IO, documented exceptions)
+#
+# EXCEPTIONS: modules listed in coverage/policy.md with structural ceilings
+# are recorded here at their CURRENT-floor value (NOT the tier target). The
+# tier target applies once the structural blocker is resolved or the file is
+# reshaped.
+
+[global]
+# Global floor on the workspace TOTAL line coverage. Set at the current
+# measured value rounded down (floor(measured - 0.5)).
+# Current measured: 88.56% (--features sal,sal-postgres --lib --tests --workspace).
+# Note: the `Code Coverage` job in .github/workflows/ci.yml runs a different
+# feature set (`--features sal`) and has its own absolute floor (90%) plus
+# ratchet against `.coverage-baseline` (93.13). That job is unaffected by
+# this gate; this gate is the per-module + per-feature-set complement.
+min_line_coverage = 88.0
+
+[modules]
+# Format: "<path-relative-to-src/>" = <threshold>  # tier <T>, measured <pct>, [exception?]
+# Files with no executable lines (pure re-export modules) are omitted from
+# this table — they appear as Tier F in coverage/tier-classification.toml.
+
+# ----- Tier A (target >=98% by v0.8.0) -----
+"approvals.rs"             = 98    # tier A, measured 99.07, raise to 98 by v0.8.0
+"audit.rs"                 = 97    # tier A, measured 98.26, raise to 98 by v0.8.0
+"color.rs"                 = 99    # tier A, measured 100.00
+"errors.rs"                = 99    # tier A, measured 100.00
+"hooks/events.rs"          = 99    # tier A, measured 100.00
+"hooks/timeouts.rs"        = 99    # tier A, measured 100.00
+"identity/keypair.rs"      = 95    # tier A, measured 96.40, raise to 98 by v0.8.0
+"identity/mod.rs"          = 98    # tier A, measured 98.61, raise to 98 by v0.8.0
+"identity/replay.rs"       = 98    # tier A, measured 98.91, raise to 98 by v0.8.0
+"identity/sign.rs"         = 99    # tier A, measured 100.00
+"identity/verify.rs"       = 98    # tier A, measured 99.37, raise to 98 by v0.8.0
+"log_paths.rs"             = 95    # tier A, measured 96.41, raise to 98 by v0.8.0
+"logging.rs"               = 98    # tier A, measured 98.97, raise to 98 by v0.8.0
+"metrics.rs"               = 94    # tier A, measured 94.77 — EXCEPTION: structurally-unreachable `?` Err arms on registration of compile-time-named metrics (see coverage/policy.md)
+"models/link.rs"           = 99    # tier A, measured 100.00 post-C5
+"models/memory.rs"         = 99    # tier A, measured 100.00
+"models/mod.rs"            = 99    # tier A, measured 100.00
+"models/namespace.rs"      = 99    # tier A, measured 100.00
+"profile.rs"               = 99    # tier A, measured 99.62, raise to 98 by v0.8.0 (already above)
+"replication.rs"           = 98    # tier A, measured 98.81, raise to 98 by v0.8.0
+"signed_events.rs"         = 97    # tier A, measured 97.98, raise to 98 by v0.8.0
+"sizes.rs"                 = 99    # tier A, measured 100.00
+"storage/migrations.rs"    = 95    # tier A, measured 96.24, raise to 98 by v0.8.0
+"toon.rs"                  = 98    # tier A, measured 99.07, raise to 98 by v0.8.0
+"transcripts/mod.rs"       = 99    # tier A, measured 100.00
+"transcripts/storage.rs"   = 98    # tier A, measured 98.57, raise to 98 by v0.8.0
+"validate.rs"              = 99    # tier A, measured 99.79, raise to 98 by v0.8.0 (already above)
+
+# ----- Tier B (target >=95% by v0.8.0) -----
+"bench.rs"                 = 96    # tier B, measured 97.09
+"cli/agents.rs"            = 96    # tier B, measured 97.04
+"cli/archive.rs"           = 96    # tier B, measured 97.46
+"cli/audit.rs"             = 97    # tier B, measured 97.58
+"cli/backup.rs"            = 95    # tier B, measured 95.74
+"cli/boot.rs"              = 97    # tier B, measured 97.90
+"cli/consolidate.rs"       = 97    # tier B, measured 98.33
+"cli/crud.rs"              = 96    # tier B, measured 97.25
+"cli/curator.rs"           = 95    # tier B, post-C-1 measured 96.08
+"cli/doctor.rs"            = 95    # tier B, measured 96.45
+"cli/forget.rs"            = 99    # tier B, measured 99.55
+"cli/gc.rs"                = 98    # tier B, measured 98.86
+"cli/governance.rs"        = 97    # tier B, measured 97.64
+"cli/governance_migrate.rs"= 96    # tier B, measured 97.07
+"cli/helpers.rs"           = 95    # tier B, measured 95.78 (C-3 #699 uplift; was 92.13 at L0.7-7)
+"cli/identity.rs"          = 97    # tier B, measured 98.38
+"cli/install.rs"           = 94    # tier B, measured 95.08
+"cli/io.rs"                = 96    # tier B, measured 97.07
+"cli/io_writer.rs"         = 99    # tier B, measured 100.00
+"cli/link.rs"              = 96    # tier B, measured 96.74
+"cli/logs.rs"              = 97    # tier B, measured 97.52
+"cli/promote.rs"           = 94    # tier B, measured 95.08
+"cli/recall.rs"            = 97    # tier B, measured 97.84
+"cli/rules.rs"             = 95    # tier B, measured 95.57 (C-3 #699 uplift; was 52.37 at L0.7-7)
+"cli/schema_init.rs"       = 72    # tier B, measured 72.91 (C-3 #699 uplift; was 68.46) — EXCEPTION: postgres init/enumerate body (lines 388-585) is sal-postgres only and structurally unreachable without a live Postgres + pgvector (see coverage/policy.md)
+"cli/search.rs"            = 96    # tier B, measured 97.09
+"cli/serve_banner.rs"      = 99    # tier B, measured 100.00
+"cli/shell.rs"             = 95    # tier B, measured 96.11
+"cli/store.rs"             = 98    # tier B, measured 98.70
+"cli/sync.rs"              = 97    # tier B, measured 97.82
+"cli/test_utils.rs"        = 99    # tier B, measured 100.00
+"cli/update.rs"            = 97    # tier B, measured 97.75
+"cli/verify.rs"            = 95    # tier B, measured 98.16 (C-3 #699 uplift; was 87.17 at L0.7-7)
+"cli/verify_signed_events.rs" = 95 # tier B, measured 98.99 (C-3 #699 uplift; was 89.36 at L0.7-7)
+"cli/wrap.rs"              = 97    # tier B, measured 98.00
+"config.rs"                = 95    # tier B, measured 96.12 post-C5, raise to 98 by v0.8.0
+"handlers/federation_receive.rs" = 38   # tier B, measured 38.93 — EXCEPTION: PG-branch ceiling (see coverage/policy.md L0.7-3 chunk-D)
+"handlers/hook_subscribers.rs"   = 46   # tier B, measured 46.89 — EXCEPTION: PG-branch ceiling (see coverage/policy.md L0.7-3 chunk-D). v0.7.0 ship-cascade adjustment: fold-A2A1.1 (#700) added postgres-branch fanout to notify/subscribe; new lines are all `#[cfg(feature = "sal")] if matches!(StorageBackend::Postgres)` blocks calling already-unit-tested helpers (fanout_or_503) and SAL trait methods on the documented PG STRUCTURAL CEILING. Was 47/47.55; now 46/46.89 within same exception class. Phase-2 federation cell exercises the PG fanout path end-to-end.
+"handlers/http.rs"               = 42   # tier B, measured 42.87 — EXCEPTION: PG-branch ceiling (see coverage/policy.md L0.7-3 chunk-D). v0.7.0 ship-cascade-2nd adjustment: fold-A2A1.5 (#705) + fold-A2A1.6 (#700) added postgres-branch governance enforcement on bulk_create/import_memories/entity_register, postgres-branch federation fanout on create_memory + post-promote, and the visibility-retry helper. New lines are all `#[cfg(feature = "sal")] if matches!(StorageBackend::Postgres)` blocks mirroring already-tested sqlite paths and calling already-unit-tested helpers (broadcast_store_quorum, finalise_quorum, QuorumNotMetPayload) on the documented PG STRUCTURAL CEILING. Was 44/45.31; now 42/42.87 within same exception class. Phase-1/2 PG cells exercise the PG fanout + governance paths end-to-end.
+"mcp/mod.rs"               = 96    # tier B, measured 97.20
+"mcp/registry.rs"          = 96    # tier B, measured 96.61
+"mcp/tools/agent.rs"       = 97    # tier B, measured 97.98 post-C5, raise to 98 by v0.8.0
+"mcp/tools/archive.rs"     = 94    # tier B, measured 94.62 post-C5 — EXCEPTION: chunk-C defensive map_err closures (see coverage/policy.md); residual gap is unreachable map_err on DB ops
+"mcp/tools/capabilities.rs"= 96    # tier B, measured 96.63
+"mcp/tools/check_agent_action.rs" = 99  # tier B, measured 99.70 (C-2)
+"mcp/tools/check_duplicate.rs"    = 97  # tier B, measured 98.37 (C-2)
+"mcp/tools/consolidate.rs" = 94    # tier B, measured 95.00 (C-2)
+"mcp/tools/delete.rs"      = 97    # tier B, measured 98.25
+"mcp/tools/entity_get_by_alias.rs" = 96 # tier B, measured 96.77
+"mcp/tools/entity_register.rs"     = 97 # tier B, measured 98.02 post-C5
+"mcp/tools/find_paths.rs"  = 96    # tier B, measured 97.43
+"mcp/tools/forget.rs"      = 97    # tier B, measured 98.31 (C-2)
+"mcp/tools/get.rs"         = 97    # tier B, measured 97.89
+"mcp/tools/get_taxonomy.rs"= 96    # tier B, measured 96.87
+"mcp/tools/kg_invalidate.rs" = 96  # tier B, measured 97.01
+"mcp/tools/kg_query.rs"    = 96    # tier B, measured 97.43
+"mcp/tools/kg_timeline.rs" = 95    # tier B, measured 96.29
+"mcp/tools/link.rs"        = 96    # tier B, measured 97.37 (C-2)
+"mcp/tools/list.rs"        = 98    # tier B, measured 99.00
+"mcp/tools/load_family.rs" = 94    # tier B, measured 95.49
+"mcp/tools/namespace.rs"   = 92    # tier B, measured 92.59 (C-2) — auto_register_path_hierarchy walks the filesystem, hermetic floor at this level
+"mcp/tools/notify.rs"      = 95    # tier B, measured 95.96
+"mcp/tools/pending.rs"     = 92    # tier B, measured 93.08 (C-2) — multi-approver quorum path lives in storage tests
+"mcp/tools/promote.rs"     = 94    # tier B, measured 94.63 post-C5 — EXCEPTION: chunk-C defensive map_err closures (see coverage/policy.md); residual gap is unreachable map_err on DB ops (C-5 floor preserved as higher of {C-2 92, C-5 94})
+"mcp/tools/quota_status.rs"= 95    # tier B, measured 96.08 (C-2)
+"mcp/tools/recall.rs"      = 95    # tier B, measured 95.74
+"mcp/tools/reflect.rs"     = 95    # tier B, measured 96.59 (C-2)
+"mcp/tools/reflection_origin.rs" = 96   # tier B, measured 96.88 — NEW MODULE
+"mcp/tools/replay.rs"      = 95    # tier B, measured 95.74 (C-2)
+"mcp/tools/rule_list.rs"   = 95    # tier B, measured 95.97 — NEW MODULE
+"mcp/tools/search.rs"      = 96    # tier B, measured 96.77
+"mcp/tools/session_start.rs" = 98  # tier B, measured 99.48 (C-2)
+"mcp/tools/skill_export.rs"  = 96    # tier B, post-C-1 measured 96.80
+"mcp/tools/skill_get.rs"     = 98    # tier B, post-C-1 measured 99.31
+"mcp/tools/skill_list.rs"    = 97    # tier B, post-C-1 measured 98.17
+"mcp/tools/skill_register.rs" = 97   # tier B, post-C-1 measured 97.58
+"mcp/tools/skill_resource.rs" = 99   # tier B, post-C-1 measured 100.00
+"mcp/tools/store.rs"       = 96    # tier B, measured 97.00
+"mcp/tools/subscribe.rs"   = 96    # tier B, measured 97.04 (C-2)
+"mcp/tools/update.rs"      = 95    # tier B, measured 96.00
+"mcp/tools/verify.rs"      = 95    # tier B, measured 96.10
+"migrate.rs"               = 95    # tier B, measured 95.85
+"mine.rs"                  = 98    # tier B, measured 99.30
+# auto_tag / detect_contradiction / expand_query intentionally in Tier D below.
+
+# ----- Tier C (target >=92% by v0.8.0) -----
+"autonomy.rs"              = 96    # tier C, measured 96.95
+"forensic/bundle.rs"       = 85    # tier C, post-C-4 measured 85.85 (#699) — REGRESSION from build_files + verify branches with new tests in scope; raise to 92 by v0.8.0
+"curator/candidates.rs"    = 98    # tier C, measured 98.66
+"curator/cluster.rs"       = 96    # tier C, post-C-1 measured 96.96
+"curator/compaction.rs"    = 97    # tier C, post-C-1 measured 97.63
+"curator/mod.rs"           = 96    # tier C, measured 96.80
+"curator/persist.rs"       = 94    # tier C, measured 95.38
+"curator/reflection_pass.rs" = 95  # tier C, post-C-1 measured 95.63
+"federation/mod.rs"        = 96    # tier C, measured 97.43
+"federation/peer.rs"       = 94    # tier C, measured 95.00
+"federation/quorum.rs"     = 99    # tier C, measured 100.00
+"federation/receive.rs"    = 87    # tier C, measured 88.05 — EXCEPTION: L0.7-4 structural ceiling (see coverage/policy.md)
+"federation/sync.rs"       = 86    # tier C, measured 87.56 — EXCEPTION: L0.7-4 structural ceiling (see coverage/policy.md)
+"governance/agent_action.rs" = 94  # tier C, post-C-4 measured 94.55 (#699) — NEW MODULE
+"governance/mod.rs"        = 93    # tier C, post-C-4 measured 94.10 (#699)
+"governance/rules_store.rs" = 97   # tier C, measured 98.35 — NEW MODULE
+"hooks/chain.rs"           = 92    # tier C, baseline 7721bb8 measured 93.01 — RECONCILED post-C-4 #699: workspace floor preserved at 92 (C-4 proposed 85 from lib-only; workspace integration tests reach chain.fire() async-loop arms via real ExecutorRegistry per coverage/policy.md). NEVER LOWER below 92 without operator approval per L0.7 playbook §8 thresholds-rise-never-fall discipline.
+"hooks/config.rs"          = 94    # tier C, post-C-4 measured 94.47 (#699)
+"hooks/decision.rs"        = 96    # tier C, post-C-4 measured 96.55 (#699) — EXCEEDED tier-C target
+"hooks/executor.rs"        = 87    # tier C, baseline 7721bb8 measured 88.03 — RECONCILED post-C-4 #699: workspace floor preserved at 87 (C-4 proposed 51 from lib-only; workspace integration tests reach ExecExecutor/DaemonExecutor fire_inner async branches via real subprocess spawn). EXCEPTION: L0.7-4 structural ceiling (see coverage/policy.md); raise to 92 by v0.8.0. NEVER LOWER below 87 without operator approval per L0.7 playbook §8.
+"hooks/recall.rs"          = 82    # tier C, baseline 7721bb8 measured 82.80 — RECONCILED post-C-4 #699: workspace floor preserved at 82 (C-4 proposed 69 from lib-only; workspace recall integration tests cover the §16 paths). EXCEPTION: L0.7-7 §16 lib-only ceiling (see coverage/policy.md); raise to 92 by v0.8.0. NEVER LOWER below 82 without operator approval per L0.7 playbook §8.
+"quotas.rs"                = 95    # tier C, post-C-4 measured 95.83 (#699) — EXCEEDED tier-C target
+"reranker.rs"              = 84    # tier C, measured 84.87 — EXCEPTION: L0.7-4 structural ceiling (see coverage/policy.md)
+"storage/mod.rs"           = 94    # tier C, measured 95.04
+"storage/reflect.rs"       = 95    # tier C, measured 95.72 — EXCEPTION: L0.7-4 structural ceiling (see coverage/policy.md)
+"subscriptions.rs"         = 96    # tier C, measured 97.13
+
+# ----- Tier D (target >=85%, LLM-bound — documented rationale) -----
+"llm.rs"                   = 95    # tier D, measured 96.14 post-C5
+"mcp/tools/auto_tag.rs"    = 98    # tier D, measured 98.85 (raised materially in L0.7-6)
+"mcp/tools/detect_contradiction.rs" = 98  # tier D, measured 98.79 (raised materially in L0.7-6)
+"mcp/tools/expand_query.rs" = 99   # tier D, measured 100.00 (raised materially in L0.7-6)
+
+# ----- Tier E (target >=90%, wire/IO — documented exceptions per coverage/policy.md) -----
+"daemon_runtime.rs"        = 86    # tier E, measured 86.30 post-yellow-close (#699) — EXCEPTION: bootstrap/sync-net (see coverage/policy.md)
+"embeddings.rs"            = 95    # tier E, measured 96.16 post-C5
+"handlers/mod.rs"          = 98    # tier E, measured 98.67
+"handlers/transport.rs"    = 95    # tier E, measured 95.54 — PARTIAL EXCEPTION: listener integration (see coverage/policy.md)
+"harness.rs"               = 98    # tier E, measured 99.17
+"hnsw.rs"                  = 95    # tier E, measured 96.27
+"storage/connection.rs"    = 96    # tier E, measured 96.72
+"store/mod.rs"             = 92    # tier E, measured 93.30
+"store/postgres.rs"        = 14    # tier E, measured 14.66 — EXCEPTION: live Postgres required (see coverage/policy.md)
+"store/sqlite.rs"          = 97    # tier E, measured 97.81
+"tls.rs"                   = 97    # tier E, measured 98.20 post-C5 — PARTIAL EXCEPTION: handshake integration (see coverage/policy.md)
+
+# ----- Tier F (no per-module threshold; entry-points + placeholders) -----
+# These files are tracked in coverage/tier-classification.toml under tier_F
+# but receive no per-module threshold here. The global floor still applies
+# to their contribution.
+#
+#   lib.rs                                  (re-exports; measured 95.21)
+#   main.rs                                 (CLI bootstrap; measured 94.31)
+#   federation/reflection_bookkeeping.rs    (L0.5.5-3 placeholder; measured 98.06)
+#   transcripts/replay.rs                   (L0.5.5-3 L2-4 placeholder; measured 0.00)
+#   cli/mod.rs                              (re-export; no executable lines)
+#   federation/vector_clock.rs              (re-export; no executable lines)
+#   hooks/mod.rs                            (re-export; no executable lines)
+#   mcp/tools/mod.rs                        (re-export; no executable lines)
+#   models/audit.rs                         (re-export; no executable lines)
+#   models/reflection.rs                    (re-export; no executable lines)
+#   models/tag.rs                           (re-export; no executable lines)

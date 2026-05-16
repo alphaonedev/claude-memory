@@ -20,13 +20,23 @@ pub mod archive;
 pub mod audit;
 pub mod backup;
 pub mod boot;
+/// v0.7.0 QW-1 — new-format CLI command modules (return exit codes
+/// rather than calling `process::exit`).
+pub mod commands;
 pub mod consolidate;
 pub mod crud;
 pub mod curator;
 pub mod doctor;
+/// v0.7.0 L2-5 (issue #670) — `ai-memory export-forensic-bundle` and
+/// `ai-memory verify-forensic-bundle` subcommands.
+pub mod export;
 pub mod forget;
 pub mod gc;
 pub mod governance;
+/// v0.7.0 7th-form (issue #760) — `ai-memory governance install-defaults`
+/// subcommand. Bulk-flip seed rules R001-R004 to `enabled = 1` after
+/// operator confirmation (interactive prompt; `--yes` overrides).
+pub mod governance_install_defaults;
 pub mod governance_migrate;
 pub mod helpers;
 pub mod identity;
@@ -35,13 +45,25 @@ pub mod io;
 pub mod io_writer;
 pub mod link;
 pub mod logs;
+/// v0.7.0 QW-3 — `ai-memory offload` / `ai-memory deref` subcommands.
+/// Substrate-only wrappers over `crate::offload::ContextOffloader`.
+pub mod offload;
 pub mod promote;
 pub mod recall;
+/// v0.7.0 (issue #691) — `ai-memory rules` subcommand. CRUD for the
+/// substrate-level agent-action rules engine. Mutation verbs (add /
+/// enable / disable / remove) require the operator keypair on disk.
+pub mod rules;
+#[cfg(feature = "sal")]
+pub mod schema_init;
 pub mod search;
+pub mod serve_banner;
 pub mod shell;
 pub mod store;
 pub mod sync;
 pub mod update;
+pub mod verify;
+pub mod verify_signed_events;
 pub mod wrap;
 
 #[cfg(test)]

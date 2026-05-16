@@ -1,6 +1,8 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+// clippy allows (test scaffolding): pedantic lints with no behavioral impact.
+#![allow(clippy::redundant_closure_for_method_calls)]
 //! v0.7.0 K10 — `POST /api/v1/approvals/{pending_id}` HMAC gate.
 //!
 //! Pins:
@@ -20,6 +22,7 @@
 #![allow(clippy::await_holding_lock)]
 
 use ai_memory::config::set_active_hooks_hmac_secret;
+use ai_memory::models::ConfidenceSource;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::json;
@@ -39,6 +42,20 @@ fn build_router_with_db() -> (axum::Router, ai_memory::handlers::Db) {
         ai_memory::config::ResolvedTtl::default(),
         true,
     )));
+    // v0.7.0 Wave-3 — populate a tempfile-backed SqliteStore for the
+    // SAL trait handle. The legacy `db` connection lives in `:memory:`
+    // and the trait handle's tempfile is disjoint; this k10 test
+    // exercises only the legacy direct-rusqlite path so the disjoint
+    // backing file is harmless.
+    #[cfg(feature = "sal")]
+    let store: std::sync::Arc<dyn ai_memory::store::MemoryStore> = {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile for SqliteStore");
+        let p = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        std::sync::Arc::new(
+            ai_memory::store::sqlite::SqliteStore::open(&p).expect("open SqliteStore"),
+        )
+    };
     let app_state = ai_memory::handlers::AppState {
         db: db.clone(),
         embedder: std::sync::Arc::new(None),
@@ -50,8 +67,23 @@ fn build_router_with_db() -> (axum::Router, ai_memory::handlers::Db) {
         mcp_config: std::sync::Arc::new(None),
         active_keypair: std::sync::Arc::new(None),
         family_embeddings: std::sync::Arc::new(tokio::sync::RwLock::new(Some(Vec::new()))),
+        storage_backend: ai_memory::handlers::StorageBackend::Sqlite,
+        #[cfg(feature = "sal")]
+        store,
+        llm: std::sync::Arc::new(None),
+        auto_tag_model: std::sync::Arc::new(None),
+        llm_call_timeout: std::time::Duration::from_secs(30),
+        replay_cache: std::sync::Arc::new(ai_memory::identity::replay::ReplayCache::default()),
+
+        verify_require_nonce: false,
+        autonomous_hooks: false,
+        recall_scope: std::sync::Arc::new(None),
+        deferred_audit_queue: std::sync::Arc::new(None),
     };
-    let api_key_state = ai_memory::handlers::ApiKeyState { key: None };
+    let api_key_state = ai_memory::handlers::ApiKeyState {
+        key: None,
+        mtls_enforced: false,
+    };
     let router = ai_memory::build_router(api_key_state, app_state);
     (router, db)
 }
@@ -82,6 +114,16 @@ async fn seed_pending_row_via_db(
         last_accessed_at: None,
         expires_at: None,
         metadata: serde_json::json!({}),
+        reflection_depth: 0,
+        memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let mem_id = ai_memory::db::insert(&lock.0, &mem).expect("insert memory");
     let payload = json!({"reason": "k10-test"});
@@ -97,7 +139,7 @@ async fn seed_pending_row_via_db(
 }
 
 /// Compute the K7-style HMAC signature header value for a request body.
-fn sign(secret: &str, timestamp: &str, body: &str) -> String {
+fn sign(secret: &str, timestamp: &str, pending_id: &str, body: &str) -> String {
     use sha2::Digest;
     use sha2::Sha256;
     fn sha256_hex(s: &str) -> String {
@@ -140,7 +182,9 @@ fn sign(secret: &str, timestamp: &str, body: &str) -> String {
             .collect()
     }
     let key_hash = sha256_hex(secret);
-    let canonical = format!("{timestamp}.{body}");
+    // P1 (#628 agent-4): canonical request now binds method + pending_id
+    // so a captured signature can't be redirected to a different row.
+    let canonical = format!("{timestamp}.POST.{pending_id}.{body}");
     let sig = hmac_sha256_hex(&key_hash, &canonical);
     format!("sha256={sig}")
 }
@@ -154,7 +198,7 @@ async fn http_approve_with_valid_hmac_returns_200() {
 
     let body = json!({"decision": "approve", "remember": "once"}).to_string();
     let timestamp = chrono::Utc::now().timestamp().to_string();
-    let sig = sign("k10-test-secret", &timestamp, &body);
+    let sig = sign("k10-test-secret", &timestamp, &pending_id, &body);
 
     let req = Request::builder()
         .method("POST")
@@ -216,7 +260,12 @@ async fn http_approve_without_server_secret_returns_401() {
     // Even with a "looks-valid" signature, no server secret → 401.
     let body = json!({"decision": "approve", "remember": "once"}).to_string();
     let timestamp = chrono::Utc::now().timestamp().to_string();
-    let sig = sign("anything-since-no-server-secret", &timestamp, &body);
+    let sig = sign(
+        "anything-since-no-server-secret",
+        &timestamp,
+        &pending_id,
+        &body,
+    );
     let req = Request::builder()
         .method("POST")
         .uri(format!("/api/v1/approvals/{pending_id}"))
@@ -244,7 +293,7 @@ async fn http_approve_with_wrong_signature_returns_401() {
     let timestamp = chrono::Utc::now().timestamp().to_string();
     // Sign with the wrong key — must be rejected even though header
     // is well-formed.
-    let sig = sign("wrong-secret", &timestamp, &body);
+    let sig = sign("wrong-secret", &timestamp, &pending_id, &body);
     let req = Request::builder()
         .method("POST")
         .uri(format!("/api/v1/approvals/{pending_id}"))

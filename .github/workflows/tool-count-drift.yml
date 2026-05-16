@@ -1,0 +1,76 @@
+# Tool-count drift gate (Cluster H, issue #767).
+#
+# Prevents the v0.6.4 → v0.7.0 tool-count drift bug from recurring.
+# The single source of truth is `Profile::full().expected_tool_count()`
+# in `src/profile.rs` (and the per-family `Family::expected_tool_count`
+# match arm at `src/profile.rs:279-318`). At v0.7.0 the canonical
+# answer is 71 tools at `--profile full` and 7 at `--profile core`.
+#
+# This workflow is a CI grep gate — fast, cheap, deterministic. It
+# catches the most common drift modes:
+#
+#   1. A new MCP tool lands in `src/mcp/registry.rs` but the
+#      `Family::expected_tool_count` arm isn't incremented to match.
+#   2. README / release-notes / MIGRATION text claims a stale count
+#      (60 / 63 / 43) without the v0.7.0 footnote.
+#   3. `src/daemon_runtime.rs` `--profile full` help text drifts away
+#      from `Profile::full().expected_tool_count()`.
+#
+# The authoritative test that pins the family-count sum lives in
+# `src/profile.rs::family_expected_tool_counts_sum_to_51`
+# (test name predates v0.7 expansion). This grep gate runs alongside,
+# not in place of, that unit test.
+
+name: tool-count-drift
+
+on:
+  push:
+    branches: [main, develop, "feat/**", "fix/**", "release/**"]
+  pull_request:
+    branches: [main, develop, "feat/**", "release/**"]
+
+jobs:
+  grep-gate:
+    name: tool-count grep gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 'registry-vs-profile parity (71 unique memory_* literals)'
+        shell: bash
+        run: |
+          count=$(grep -oE '"memory_[a-z_]+"' src/mcp/registry.rs | sort -u | wc -l | tr -d ' ')
+          echo "registry has $count unique memory_* tool literals"
+          # 71 at v0.7.0 — bump in lockstep with Family::expected_tool_count.
+          if [ "$count" -lt 70 ] || [ "$count" -gt 72 ]; then
+            echo "::error::registry memory_* literal count ($count) drifted from 71±1"
+            echo "::error::either update Family::expected_tool_count in src/profile.rs"
+            echo "::error::and this CI gate, or remove the stray tool literal"
+            exit 1
+          fi
+
+      - name: 'daemon_runtime help text honesty (no stale 43-tool claim)'
+        shell: bash
+        run: |
+          if grep -nE 'profile full.*43 tools|43 tools.*profile full|surface 1:1 \(43 tools\)' src/daemon_runtime.rs; then
+            echo "::error::src/daemon_runtime.rs --profile full help text claims 43 tools"
+            echo "::error::v0.7.0 ceiling is Profile::full().expected_tool_count() == 71"
+            exit 1
+          fi
+
+      - name: 'README badge / narrative tool counts'
+        shell: bash
+        run: |
+          # The README badge MUST advertise the v0.7.0 default + full counts.
+          if ! grep -qE 'MCP-7_default.*71_full|MCP-7.*71' README.md; then
+            echo "::error::README MCP badge missing '7_default • 71_full' (v0.7.0)"
+            exit 1
+          fi
+
+      - name: 'release-notes 60 -> N includes 71 at v0.7.0'
+        shell: bash
+        run: |
+          if ! grep -qE '60.*(→|->).*71' docs/v0.7.0/release-notes.md; then
+            echo "::error::docs/v0.7.0/release-notes.md missing '60 → 71' tool count delta"
+            exit 1
+          fi

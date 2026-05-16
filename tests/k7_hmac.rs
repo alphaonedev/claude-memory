@@ -234,13 +234,18 @@ async fn k7_hmac_signature_header_present_when_global_secret_configured() {
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
-async fn k7_hmac_unset_means_unsigned_payload_when_no_per_sub_secret() {
+async fn k7_hmac_unset_refuses_dispatch_when_no_per_sub_secret() {
+    // R3-S1.HMAC (v0.7.0 fix campaign 2026-05-13): the dispatcher
+    // refuses to deliver an unsigned payload. With no per-sub secret
+    // AND no server-wide override the dispatch must NOT reach the
+    // wiremock — instead it lands a DLQ row with an explicit
+    // "dispatch refused" error message.
+    //
+    // Replaces the legacy "unsigned dispatch is allowed" sanity
+    // counter-test that pinned the v0.6 posture pre-fix.
     let _guard = K7_HMAC_GLOBAL_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    // Sanity counter-test: when neither the per-subscription secret
-    // nor the K7 global override is set, the payload is unsigned
-    // (preserves pre-K7 behaviour).
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/k7-unsigned"))
@@ -250,7 +255,7 @@ async fn k7_hmac_unset_means_unsigned_payload_when_no_per_sub_secret() {
 
     let (_keep, db_path) = fresh_db();
     let url = format!("{}/k7-unsigned", server.uri());
-    let _sub_id = {
+    let sub_id = {
         let conn = Connection::open(&db_path).unwrap();
         subscriptions::insert(
             &conn,
@@ -281,10 +286,38 @@ async fn k7_hmac_unset_means_unsigned_payload_when_no_per_sub_secret() {
         );
     }
 
-    let req: Request = poll_for_first_request(&server).await;
+    // Poll: the wiremock must NOT see any request, AND a DLQ row
+    // must materialise with the "dispatch refused" error.
+    let path_for_poll = db_path.clone();
+    let sub_for_poll = sub_id.clone();
+    let dlq_outcome = tokio::task::spawn_blocking(move || {
+        for _ in 0..40 {
+            let conn = Connection::open(&path_for_poll).unwrap();
+            let entries = subscriptions::list_dlq(&conn, Some(&sub_for_poll)).unwrap();
+            if !entries.is_empty() {
+                return Some(entries);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        None
+    })
+    .await
+    .unwrap();
+
+    let received = server.received_requests().await.unwrap_or_default();
     assert!(
-        req.headers.get("x-ai-memory-signature").is_none(),
-        "signature header must be absent when no per-sub secret AND no global override"
+        received.is_empty(),
+        "dispatcher must NOT post an unsigned body — got {} request(s)",
+        received.len()
+    );
+    let dlq = dlq_outcome.expect("DLQ row must materialise for refused dispatch");
+    assert_eq!(dlq.len(), 1, "exactly one DLQ row");
+    assert!(
+        dlq[0].last_error.contains("dispatch refused")
+            || dlq[0].last_error.contains("R3-S1.HMAC")
+            || dlq[0].last_error.contains("hmac_secret"),
+        "DLQ row must carry an explicit refusal message: {}",
+        dlq[0].last_error
     );
 }
 

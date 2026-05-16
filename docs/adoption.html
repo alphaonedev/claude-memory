@@ -1,0 +1,348 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+
+  ai-memory Adoption Metrics — single-page dashboard of every public
+  signal of ai-memory uptake. Auto-updated by
+  scripts/update-adoption-metrics.sh which writes docs/adoption-metrics.json;
+  this page reads that JSON via fetch() at load time. When the JSON
+  file is absent (e.g. local file:// preview before the cron job has
+  run), the page renders the template placeholders unchanged so an
+  evaluator can still see the layout.
+
+  Closes roadmap gap F2 (issue #692) — procurement-grade adoption
+  evidence published on the test hub at
+  alphaonedev.github.io/ai-memory-mcp/adoption.html.
+
+  Update cadence: operator-controlled daily cron job; see
+  scripts/update-adoption-metrics.sh for the runner. No external
+  service polls these endpoints automatically.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-memory Adoption Metrics</title>
+<meta name="description" content="Public adoption signals for ai-memory: GitHub stars, forks, contributors; npm + crates.io downloads; distribution-channel ranks across Homebrew, Fedora COPR, Docker GHCR, APT PPA. Auto-updated daily.">
+<meta name="theme-color" content="#0d1117">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/adoption.html">
+<style>
+:root {
+  --bg:           #000000;
+  --bg-card:      #111111;
+  --bg-elev:      #161616;
+  --border:       #262626;
+  --text:         #ffffff;
+  --text-muted:   #999999;
+  --text-dim:     #666666;
+  --accent-cyan:  #6ee7ff;
+  --accent-good:  #7fff8a;
+  --accent-warn:  #ffb86b;
+  --font-mono:    'SF Mono','Cascadia Code','Fira Code','JetBrains Mono',Consolas,monospace;
+  --font-sans:    -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+  --max-w:        1080px;
+}
+
+*, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+html { scroll-behavior:smooth; }
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.65;
+  padding: 2rem 1.25rem 4rem;
+  -webkit-font-smoothing: antialiased;
+}
+main {
+  max-width: var(--max-w);
+  margin: 0 auto;
+}
+header {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 1.25rem;
+  margin-bottom: 2rem;
+}
+h1 {
+  font-size: 1.85rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin-bottom: 0.4rem;
+}
+.subtitle {
+  color: var(--text-muted);
+  font-size: 0.95rem;
+}
+.updated {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  margin-top: 0.6rem;
+}
+h2 {
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin: 2.25rem 0 0.85rem;
+  color: var(--accent-cyan);
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+}
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem 1.1rem;
+}
+.card .label {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.card .value {
+  font-family: var(--font-mono);
+  font-size: 1.55rem;
+  margin-top: 0.4rem;
+  color: var(--text);
+}
+.card .delta {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  margin-top: 0.25rem;
+  color: var(--text-dim);
+}
+.card .delta.up   { color: var(--accent-good); }
+.card .delta.down { color: var(--accent-warn); }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.5rem;
+  font-size: 0.92rem;
+}
+th, td {
+  text-align: left;
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+th {
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+td.num {
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+.placeholder {
+  color: var(--text-dim);
+  font-style: italic;
+}
+.footer {
+  margin-top: 3rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+.footer code {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: var(--accent-cyan);
+}
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <h1>ai-memory Adoption Metrics</h1>
+  <div class="subtitle">
+    Public signals of ai-memory uptake across source-of-truth registries.
+    Auto-updated daily by <code style="font-family:var(--font-mono);color:var(--accent-cyan)">scripts/update-adoption-metrics.sh</code>.
+    No outbound polling is performed by the binary itself; this dashboard reflects
+    operator-curated metrics only.
+  </div>
+  <div class="updated" id="updated-at">last update: <span class="placeholder">awaiting first run of scripts/update-adoption-metrics.sh</span></div>
+</header>
+
+<h2>GitHub (source-of-truth: github.com/alphaonedev/ai-memory-mcp)</h2>
+<div class="grid">
+  <div class="card">
+    <div class="label">Stars</div>
+    <div class="value" data-metric="github.stars"><span class="placeholder">—</span></div>
+    <div class="delta" data-metric="github.stars_delta_7d"></div>
+  </div>
+  <div class="card">
+    <div class="label">Forks</div>
+    <div class="value" data-metric="github.forks"><span class="placeholder">—</span></div>
+    <div class="delta" data-metric="github.forks_delta_7d"></div>
+  </div>
+  <div class="card">
+    <div class="label">Contributors</div>
+    <div class="value" data-metric="github.contributors"><span class="placeholder">—</span></div>
+    <div class="delta" data-metric="github.contributors_delta_30d"></div>
+  </div>
+  <div class="card">
+    <div class="label">Open issues</div>
+    <div class="value" data-metric="github.issues_open"><span class="placeholder">—</span></div>
+    <div class="delta" data-metric="github.issues_closed_30d"></div>
+  </div>
+</div>
+
+<h2>Package registries</h2>
+<div class="grid">
+  <div class="card">
+    <div class="label">crates.io downloads (all-time)</div>
+    <div class="value" data-metric="crates.downloads_total"><span class="placeholder">—</span></div>
+    <div class="delta" data-metric="crates.downloads_30d"></div>
+  </div>
+  <div class="card">
+    <div class="label">crates.io recent version</div>
+    <div class="value" data-metric="crates.latest_version"><span class="placeholder">—</span></div>
+  </div>
+  <div class="card">
+    <div class="label">npm downloads (30d)</div>
+    <div class="value" data-metric="npm.downloads_30d"><span class="placeholder">—</span></div>
+    <div class="delta" data-metric="npm.downloads_total"></div>
+  </div>
+</div>
+
+<h2>Distribution channels</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Channel</th>
+      <th>Status</th>
+      <th>Latest version</th>
+      <th>Installs (30d)</th>
+      <th>Rank / popularity</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Homebrew (<code>brew install ai-memory</code>)</td>
+      <td data-metric="homebrew.status" class="num"><span class="placeholder">—</span></td>
+      <td data-metric="homebrew.version" class="num"><span class="placeholder">—</span></td>
+      <td data-metric="homebrew.installs_30d" class="num"><span class="placeholder">—</span></td>
+      <td data-metric="homebrew.rank" class="num"><span class="placeholder">—</span></td>
+    </tr>
+    <tr>
+      <td>Fedora COPR (<code>dnf copr enable alphaonedev/ai-memory</code>)</td>
+      <td data-metric="copr.status" class="num"><span class="placeholder">—</span></td>
+      <td data-metric="copr.version" class="num"><span class="placeholder">—</span></td>
+      <td data-metric="copr.installs_30d" class="num"><span class="placeholder">—</span></td>
+      <td data-metric="copr.rank" class="num"><span class="placeholder">—</span></td>
+    </tr>
+    <tr>
+      <td>Docker GHCR (<code>ghcr.io/alphaonedev/ai-memory</code>)</td>
+      <td data-metric="docker.status" class="num"><span class="placeholder">—</span></td>
+      <td data-metric="docker.version" class="num"><span class="placeholder">—</span></td>
+      <td data-metric="docker.pulls_30d" class="num"><span class="placeholder">—</span></td>
+      <td data-metric="docker.pulls_total" class="num"><span class="placeholder">—</span></td>
+    </tr>
+    <tr>
+      <td>APT PPA (Jim Bridger)</td>
+      <td data-metric="apt.status" class="num"><span class="placeholder">—</span></td>
+      <td data-metric="apt.version" class="num"><span class="placeholder">—</span></td>
+      <td data-metric="apt.installs_30d" class="num"><span class="placeholder">—</span></td>
+      <td data-metric="apt.rank" class="num"><span class="placeholder">—</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Activity signals (rolling 30 days)</h2>
+<div class="grid">
+  <div class="card">
+    <div class="label">Commits</div>
+    <div class="value" data-metric="activity.commits_30d"><span class="placeholder">—</span></div>
+  </div>
+  <div class="card">
+    <div class="label">PRs merged</div>
+    <div class="value" data-metric="activity.prs_merged_30d"><span class="placeholder">—</span></div>
+  </div>
+  <div class="card">
+    <div class="label">Releases tagged</div>
+    <div class="value" data-metric="activity.releases_30d"><span class="placeholder">—</span></div>
+  </div>
+  <div class="card">
+    <div class="label">Distinct contributors</div>
+    <div class="value" data-metric="activity.contributors_30d"><span class="placeholder">—</span></div>
+  </div>
+</div>
+
+<div class="footer">
+  <strong>How this dashboard updates.</strong>
+  An operator-configured cron job invokes
+  <code>scripts/update-adoption-metrics.sh</code> on a daily cadence.
+  The script polls the public APIs of GitHub, crates.io, npm registry,
+  and (where available) Homebrew Analytics, then writes
+  <code>docs/adoption-metrics.json</code>. This page reads that JSON
+  via <code>fetch()</code> at load. The page never initiates any
+  outbound request from the user's browser to a third party — the
+  JSON is served from the same origin as the HTML, and the script
+  itself is invoked only by the operator's cron. See
+  <code>docs/telemetry.md</code> for the substrate-level
+  no-phone-home commitment.
+  <br><br>
+  <strong>Schema.</strong>
+  The JSON keys match the <code>data-metric</code> attributes on
+  every cell above (dot-separated path, e.g. <code>github.stars</code>).
+  Adding a new metric is a script change plus a single
+  <code>data-metric</code> attribute on the new cell.
+  <br><br>
+  Source: <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/scripts/update-adoption-metrics.sh" style="color:var(--accent-cyan)">scripts/update-adoption-metrics.sh</a>
+  &nbsp;·&nbsp;
+  Roadmap entry: ROADMAP2 §12 (gap F2, issue #692)
+</div>
+
+</main>
+
+<script>
+// Read adoption-metrics.json from the same origin and populate every
+// element with a `data-metric` attribute. Path resolution is
+// dot-separated (e.g. data-metric="github.stars" -> json.github.stars).
+// If the JSON is unreachable (404, file:// preview, etc.) leave the
+// placeholders intact — the dashboard layout is the deliverable; the
+// numbers populate when the operator's cron has run at least once.
+(async function loadMetrics() {
+    try {
+        const resp = await fetch('adoption-metrics.json', { cache: 'no-store' });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        document.querySelectorAll('[data-metric]').forEach(el => {
+            const path = el.getAttribute('data-metric').split('.');
+            let cursor = data;
+            for (const key of path) {
+                if (cursor == null || !(key in cursor)) { cursor = null; break; }
+                cursor = cursor[key];
+            }
+            if (cursor === null || cursor === undefined) return;
+            el.textContent = typeof cursor === 'number'
+                ? cursor.toLocaleString('en-US')
+                : String(cursor);
+            if (el.classList.contains('delta') && typeof cursor === 'number') {
+                el.classList.add(cursor >= 0 ? 'up' : 'down');
+                el.textContent = (cursor >= 0 ? '+' : '') + el.textContent + ' / window';
+            }
+        });
+        if (data.updated_at) {
+            const span = document.querySelector('#updated-at span');
+            if (span) {
+                span.textContent = data.updated_at;
+                span.classList.remove('placeholder');
+            }
+        }
+    } catch (_) {
+        // Silent: placeholders persist. This is the expected behavior
+        // when the dashboard is opened before the cron has run.
+    }
+})();
+</script>
+</body>
+</html>

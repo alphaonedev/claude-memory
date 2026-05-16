@@ -1,16 +1,16 @@
--- v0.7.0 — Append-only `signed_events` audit table (Track H, Task H5
+-- v0.7.0 — Append-only `signed_events` event ledger (Track H, Task H5
 -- — schema v25).
 --
--- Substrate for the immutable audit chain over identity-bearing
--- writes. Every `memory_link` write (signed or unsigned) appends one
--- row here so a downstream auditor can replay the exact sequence of
--- attestation events the daemon emitted, without having to scan the
--- mutable `memory_links` table for "what did this row look like at
--- write time" — by construction, the canonical-CBOR `payload_hash`
--- captured here is the byte-for-byte input the H2 signer committed
--- to.
+-- Substrate for the row-level append-only event ledger over
+-- identity-bearing writes. Every `memory_link` write (signed or
+-- unsigned) appends one row here so a downstream auditor can replay
+-- the exact sequence of attestation events the daemon emitted,
+-- without having to scan the mutable `memory_links` table for "what
+-- did this row look like at write time" — by construction, the
+-- canonical-CBOR `payload_hash` captured here is the byte-for-byte
+-- input the H2 signer committed to.
 --
--- # Append-only invariant
+-- # Append-only invariant (row-level)
 --
 -- The application layer exposes ONE writer (`append_signed_event`)
 -- and ZERO mutators — there are no `UPDATE signed_events` or `DELETE
@@ -24,6 +24,31 @@
 -- the Rust API surface; the H5 test suite asserts no `UPDATE
 -- signed_events` / `DELETE FROM signed_events` strings appear in
 -- src/ outside doc comments.
+--
+-- # Cross-row hash chain (schema v34, #698 V-4 closeout)
+--
+-- Rows carry two chain columns on top of the per-row signature:
+--
+-- * `prev_hash BLOB` — SHA-256 (32 bytes) over the canonical-bytes
+--   encoding of the PRECEDING row, or 32 zero bytes for the first
+--   row. The encoding (`canonical_chain_bytes` in
+--   `src/signed_events.rs`) commits to every column that uniquely
+--   identifies the row's content. An UPDATE or DELETE of any prior
+--   row therefore propagates as a `prev_hash` mismatch at row N+1.
+-- * `sequence INTEGER` — monotonically-increasing rank starting at 1,
+--   pinned by a UNIQUE index. A tampered or duplicated `sequence`
+--   breaks the contiguity check.
+--
+-- The chain is the LOAD-BEARING tamper-evidence property in the SQL
+-- substrate. Per-row Ed25519 signatures (the existing `signature`
+-- column) remain as defense-in-depth.
+--
+-- The JSONL audit log emitted by `src/audit.rs` (`<audit_dir>/
+-- audit.log`) remains as the cross-host portable evidence format with
+-- its own (1) `prev_hash` chain, (2) restart-stable monotonic
+-- sequence (F2, v0.7.0 round-2), and (3) best-effort append-only OS
+-- hint. The SQL chain is the daemon-local property; the two are
+-- complementary.
 --
 -- # Columns
 --
@@ -68,7 +93,15 @@ CREATE TABLE IF NOT EXISTS signed_events (
     payload_hash BLOB NOT NULL,
     signature BLOB,
     attest_level TEXT NOT NULL DEFAULT 'unsigned',
-    timestamp TEXT NOT NULL
+    timestamp TEXT NOT NULL,
+    -- v34 (v0.7.0 V-4 closeout, #698) — cross-row hash chain columns.
+    -- Nullable here because the migration ALTER cannot retroactively
+    -- enforce NOT NULL on pre-existing rows; backfill stamps them in
+    -- `migrate_v34_backfill_chain`, and `append_signed_event`
+    -- populates both on every new write. See doc block above + the
+    -- `signed_events::canonical_chain_bytes` helper for the encoding.
+    prev_hash BLOB,
+    sequence  INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_signed_events_agent
@@ -77,3 +110,5 @@ CREATE INDEX IF NOT EXISTS idx_signed_events_type
     ON signed_events(event_type);
 CREATE INDEX IF NOT EXISTS idx_signed_events_timestamp
     ON signed_events(timestamp);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signed_events_sequence
+    ON signed_events(sequence);

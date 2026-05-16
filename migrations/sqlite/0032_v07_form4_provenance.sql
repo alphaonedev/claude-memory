@@ -1,0 +1,49 @@
+-- Copyright 2026 AlphaOne LLC
+-- SPDX-License-Identifier: Apache-2.0
+--
+-- v0.7.0 Form 4 — fact-provenance closeout (schema v38, sqlite).
+--
+-- The Batman 6-form audit (PR #753) found Form 4 PARTIAL: ai-memory
+-- captured three of four fact-grain provenance fields (`source` role
+-- label, `created_at` capture timestamp, `confidence`) but lacked a
+-- first-class `citations` array, the `source-as-URI` form, and per-
+-- atom span offsets into the parent source body. Issue #757 tracks
+-- the closeout; this migration is the schema half.
+--
+-- # Columns added on `memories`
+--
+-- - `citations TEXT NOT NULL DEFAULT '[]'` — JSON-encoded array of
+--   Citation objects: `{ uri, accessed_at, hash?, span? }`. Mirrors
+--   the wire shape of `crate::models::Citation`. The
+--   `NOT NULL DEFAULT '[]'` keeps legacy rows readable as an empty
+--   set with no Rust-side migration code required.
+--
+-- - `source_uri TEXT` — first-class URI-form pointer to the cited
+--   source body. Distinct from the existing `source` column (which
+--   is a role label: "user", "claude", "api", …). Accepts three
+--   schemes: `uri:` (HTTP URL), `doc:` (substrate doc id), `file:`
+--   (filesystem path). Validated at the write boundary by
+--   `validate::validate_source_uri`. NULL on legacy rows and on
+--   rows where the caller did not provide a URI form.
+--
+-- - `source_span TEXT` — JSON-encoded `{start, end}` byte-range into
+--   the parent source body. Populated by the WT-1-B atomisation
+--   writer for each atom (atom-grain span fact-provenance). NULL on
+--   legacy rows and on rows that are not atoms. Mirrors the wire
+--   shape of `crate::models::SourceSpan`.
+--
+-- # Idempotency
+--
+-- The Rust migrate ladder probes `PRAGMA table_info(memories)` for
+-- each new column before emitting the ALTERs (SQLite has no
+-- `ADD COLUMN IF NOT EXISTS`). This SQL file holds the supporting
+-- partial index only; the ALTERs live in Rust so the column-existence
+-- probes can run idempotently on replay.
+
+-- Partial index on `source_uri` so the `--source-uri-prefix` recall
+-- filter (and per-doc lookups) stay a fast index scan. Legacy rows
+-- have NULL `source_uri` so the partial predicate keeps the index
+-- footprint at zero on every pre-v38 database until callers start
+-- writing URIs.
+CREATE INDEX IF NOT EXISTS idx_memories_source_uri
+    ON memories(source_uri) WHERE source_uri IS NOT NULL;

@@ -19,6 +19,7 @@
 // iterating on the budget logic itself.
 
 use ai_memory::db::{BudgetOutcome, apply_token_budget, count_tokens_cl100k};
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, Tier};
 use ai_memory::sizes::trimmed_full_profile_total_tokens;
 use serde_json::json;
@@ -80,6 +81,16 @@ fn mem_with_content(id: &str, content: &str) -> Memory {
         last_accessed_at: None,
         expires_at: None,
         metadata: json!({}),
+        reflection_depth: 0,
+        memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 

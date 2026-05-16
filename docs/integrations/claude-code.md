@@ -207,6 +207,137 @@ ai-memory install claude-code --uninstall   # see PR-2 (issue #487 item E)
 
 Or remove the entry by hand from `~/.claude/settings.json`.
 
+## Substrate rules enforcement on every tool call (v0.7.0)
+
+**OPT-IN. RESTRICTED ACTION.** Issue [#691](https://github.com/alphaonedev/ai-memory-mcp/issues/691)
+lands the substrate-level **agent-action rules engine**: every Bash / Edit /
+Write tool call Claude Code wants to dispatch can be routed through
+`memory_check_agent_action` before it fires. The engine returns one of
+`allow` / `refuse` / `warn`; the harness honours the verdict.
+
+The MCP tool itself is registered unconditionally — but the
+**PreToolUse hook that turns the engine into harness-enforced reality is
+opt-in**. Sessions without the hook installed behave exactly as
+v0.7.0-pre-hook: the engine never gets consulted, no rules fire, all
+proposed actions dispatch as Claude Code normally would.
+
+### What the hook does
+
+Claude Code's [`PreToolUse`](https://docs.claude.com/en/docs/claude-code/hooks)
+hook surface (`type=mcp_tool`) lets the harness invoke an MCP tool
+before every tool dispatch and gate on the response. The ai-memory hook
+calls `memory_check_agent_action` with a JSON-RPC payload of the
+proposed action (kind=`bash` for the Bash tool, kind=`filesystem_write`
+for Edit / Write, etc.) and honours the returned `decision`:
+
+| `decision` | Harness behaviour |
+|---|---|
+| `allow` | Tool dispatches normally. No operator-visible signal. |
+| `warn` | Tool dispatches normally + the warning row lands in `signed_events` (audit chain). The agent sees the `reason` in the tool's response context. |
+| `refuse` | Tool dispatch is BLOCKED. The agent sees `reason` + `rule_id` in the response context and must reroute (operator-approval workflow lives in K10, separate surface). |
+
+The `Read` tool is intentionally NOT gated — reads are non-mutating and
+don't produce external state changes. Other tools (WebFetch,
+mcp__-prefixed tools) translate as documented in
+[`docs/governance/agent-action-rules.md`](../governance/agent-action-rules.md).
+
+### How to install
+
+```text
+# Preview (dry-run is the default — writes nothing):
+ai-memory install claude-code --hook pretool
+
+# Commit:
+ai-memory install claude-code --hook pretool --apply
+```
+
+On success the installer prints `installed PreToolUse hook -> <path>`
+and (if the file already existed) writes a backup at
+`settings.json.bak.<timestamp>`. The hook is added under the same
+managed-block sentinel as the SessionStart hook, so the two install
+verbs are orthogonal — you can install / uninstall PreToolUse
+independently of SessionStart.
+
+If your `settings.json` already has a `PreToolUse` array, the installer
+APPENDS our entry rather than replacing the operator's entries. Order
+is preserved (operator entries first, our managed entry last). If an
+existing entry already names `memory_check_agent_action` with a
+DIFFERENT `matcher` (e.g. you previously scoped the hook to `Bash`
+only), the installer refuses without `--force`:
+
+```text
+# Conflict warning on stderr → installer exits non-zero
+ai-memory install claude-code --hook pretool --apply
+# error: refusing to overwrite a differing-but-similar PreToolUse hook
+#        without --force; existing matcher(s): ["Bash"]
+
+# Either keep the scoped entry by hand or:
+ai-memory install claude-code --hook pretool --apply --force
+```
+
+### What rules govern
+
+The substrate ships four seed rules (`R001`-`R004`) that land **inert
+(`enabled = 0`)** at migration time, by design. The operator activates
+them after auditing the test fleet (`/tmp` usage, `cargo` invocations
+on low-disk hosts, etc.) and signing each one with the operator key:
+
+| Rule | Kind | Refuses |
+|---|---|---|
+| `R001` | `filesystem_write` | Writes to `/tmp/**` |
+| `R002` | `filesystem_write` | Writes to `/var/tmp/**` |
+| `R003` | `filesystem_write` | Writes to `/private/tmp/**` (macOS realpath of `/tmp`) |
+| `R004` | `process_spawn` | `cargo` spawn when free disk on `/` is below 20 GiB |
+
+Full schema + matcher vocabulary lives in
+[`migrations/sqlite/0024_v07_governance_rules.sql`](../../migrations/sqlite/0024_v07_governance_rules.sql).
+Operators inspect / mutate rules via:
+
+```text
+ai-memory rules list                          # read-only, no signature
+ai-memory rules enable R001 --sign            # activate; requires operator.priv
+ai-memory rules add ...   --sign              # author a new rule
+```
+
+Mutation over MCP is **explicitly disabled** — a compromised agent
+must not be able to weaken its own constraints. See
+[`docs/governance/agent-action-rules.md`](../governance/agent-action-rules.md)
+§"Operator-mutation gating".
+
+### Operator workflow (end-to-end)
+
+1. **Keygen** — `ai-memory keygen --out operator` writes `operator.priv` +
+   `operator.pub` (the operator's signing keypair).
+2. **Sign-seed** — `ai-memory rules sign-seed --key operator.priv` signs
+   the four seed rules (they ship unsigned + disabled by design).
+3. **Enable** — `ai-memory rules enable R001 --sign` (and R002/R003/R004
+   as the audit clears each one).
+4. **Install hook** — `ai-memory install claude-code --hook pretool
+   --apply`. Restart Claude Code.
+5. **Smoke test** — open a session, ask the model to write to `/tmp/foo`.
+   Expected: the Edit tool dispatch is refused with `rule_id: R001` and
+   `reason: "no /tmp"`. The audit row lands in `signed_events` with
+   `event_type = 'governance.check'`.
+
+### Backwards compatibility
+
+The hook is **strictly opt-in**. Sessions without
+`~/.claude/settings.json` PreToolUse entries pointing at
+`memory_check_agent_action` behave exactly as v0.6.x: no engine, no
+rules, no refusals. The substrate-side rules table can be populated
+and signed independently of any hook install — the engine remains
+inert until the harness wires in.
+
+To uninstall the hook (e.g. before downgrading to a pre-v0.7.0
+binary):
+
+```text
+ai-memory install claude-code --hook pretool --uninstall --apply
+```
+
+This removes only our managed entry; operator-authored PreToolUse
+entries (under different markers) are left untouched.
+
 ## What this does NOT solve
 
 - **Long-running sessions**: the hook only fires at session start. If you

@@ -28,6 +28,7 @@
 //! and are tracked as follow-up Stream E work — they don't belong on
 //! the hot path of a `cargo test` invocation.
 
+use crate::models::ConfidenceSource;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -225,6 +226,7 @@ fn run_search_fts(conn: &Connection, config: &BenchConfig) -> Result<OperationRe
             None,
             None,
             None,
+            false,
         )?;
         let elapsed = start.elapsed();
         if i >= config.warmup {
@@ -250,6 +252,8 @@ fn run_recall_hot(conn: &Connection, config: &BenchConfig) -> Result<OperationRe
             0,
             None,
             None,
+            false,
+            None,
         )?;
     }
     let mut samples = Vec::with_capacity(config.iterations);
@@ -267,6 +271,8 @@ fn run_recall_hot(conn: &Connection, config: &BenchConfig) -> Result<OperationRe
             0,
             0,
             None,
+            None,
+            false,
             None,
         )?;
         samples.push(start.elapsed());
@@ -303,7 +309,7 @@ fn run_kg_query_depth1(
     for i in 0..total {
         let src = &sources[i % sources.len()];
         let start = Instant::now();
-        let _ = db::kg_query(conn, src, 1, None, None, None)?;
+        let _ = db::kg_query(conn, src, 1, None, None, None, false)?;
         let elapsed = start.elapsed();
         if i >= config.warmup {
             samples.push(elapsed);
@@ -328,7 +334,7 @@ fn run_kg_query_chain(
     for i in 0..total {
         let src = &sources[i % sources.len()];
         let start = Instant::now();
-        let _ = db::kg_query(conn, src, max_depth, None, None, None)?;
+        let _ = db::kg_query(conn, src, max_depth, None, None, None, false)?;
         let elapsed = start.elapsed();
         if i >= config.warmup {
             samples.push(elapsed);
@@ -445,6 +451,16 @@ fn synth_memory(namespace: &str, i: usize, prefix: &str) -> Memory {
         last_accessed_at: None,
         expires_at: None,
         metadata: serde_json::json!({"agent_id": "bench"}),
+        reflection_depth: 0,
+        memory_kind: crate::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 
@@ -799,13 +815,14 @@ mod tests {
         // nodes at depth=KG_CHAIN_FIXTURE_HOPS — that's what justifies the
         // depth=5 budget bucket. depth=3 must reach exactly 3 nodes.
         for src in &sources {
-            let depth5 = db::kg_query(&conn, src, KG_CHAIN_FIXTURE_HOPS, None, None, None).unwrap();
+            let depth5 =
+                db::kg_query(&conn, src, KG_CHAIN_FIXTURE_HOPS, None, None, None, false).unwrap();
             assert_eq!(
                 depth5.len(),
                 KG_CHAIN_FIXTURE_HOPS,
                 "depth={KG_CHAIN_FIXTURE_HOPS} on a {KG_CHAIN_FIXTURE_HOPS}-hop chain must reach every node"
             );
-            let depth3 = db::kg_query(&conn, src, 3, None, None, None).unwrap();
+            let depth3 = db::kg_query(&conn, src, 3, None, None, None, false).unwrap();
             assert_eq!(
                 depth3.len(),
                 3,
@@ -822,7 +839,7 @@ mod tests {
         // Every source carries the expected fan-out, every link has a
         // non-null `valid_from` (otherwise `kg_timeline` would skip it).
         for src in &sources {
-            let nodes = db::kg_query(&conn, src, 1, None, None, None).unwrap();
+            let nodes = db::kg_query(&conn, src, 1, None, None, None, false).unwrap();
             assert_eq!(nodes.len(), KG_FIXTURE_LINKS_PER_SOURCE);
             let timeline = db::kg_timeline(&conn, src, None, None, None).unwrap();
             assert_eq!(timeline.len(), KG_FIXTURE_LINKS_PER_SOURCE);

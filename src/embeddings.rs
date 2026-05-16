@@ -24,6 +24,128 @@ const NOMIC_OLLAMA_MODEL: &str = "nomic-embed-text";
 #[allow(dead_code)]
 const NOMIC_DIM: usize = 768;
 
+// ---------------------------------------------------------------------------
+// v0.7.0 F6 — EmbedStatus surface
+// ---------------------------------------------------------------------------
+//
+// The store path commits the row at HTTP 201 even when the embedder
+// silently skips/fails (e.g. >64KB content per F10, or ollama dead per
+// F6). Prior to F6 this only emitted a WARN log — the caller had no
+// way to learn that the row was indexed-without-embedding. F6 introduces
+// `EmbedStatus` and `Embedder::embed_with_status` so the caller can
+// surface the outcome on the response. The HTTP wiring lives in F10
+// (Fix-Agent β); this module exposes the producer side only.
+//
+// `Skipped` and `Failed` carry a reason string so operators see the
+// actual condition (e.g. "content >65536 bytes", "ollama timeout").
+
+/// v0.7.0 F6 — outcome of a single embedding call. Returned by
+/// [`Embedder::embed_with_status`] alongside the (possibly absent)
+/// embedding vector.
+///
+/// * `Indexed` — vector produced and ready to persist.
+/// * `Skipped(reason)` — caller-policy skip (e.g. content too long for
+///   the configured embedder). The row should still be stored without
+///   an embedding; recall will fall back to keyword for that row.
+/// * `Failed(reason)` — embedder errored at runtime (ollama down, model
+///   load failure, …). Same downstream behaviour as `Skipped` —
+///   keyword-only recall — but operationally distinguishable. Callers
+///   that care about freshness can re-issue the embed later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmbedStatus {
+    Indexed,
+    Skipped(String),
+    Failed(String),
+}
+
+impl EmbedStatus {
+    /// Static label used in API surfaces and logs.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Indexed => "indexed",
+            Self::Skipped(_) => "skipped",
+            Self::Failed(_) => "failed",
+        }
+    }
+
+    /// True when the row has no usable embedding — caller should fall
+    /// back to keyword recall for that row.
+    #[must_use]
+    pub fn is_degraded(&self) -> bool {
+        !matches!(self, Self::Indexed)
+    }
+
+    /// Human-readable reason. Empty string for `Indexed`.
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::Indexed => "",
+            Self::Skipped(r) | Self::Failed(r) => r.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for EmbedStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Indexed => write!(f, "indexed"),
+            Self::Skipped(r) => write!(f, "skipped: {r}"),
+            Self::Failed(r) => write!(f, "failed: {r}"),
+        }
+    }
+}
+
+/// v0.7.0 F6 — soft cap on the input size handed to the embedder.
+/// 64 KiB matches the F10 store-path threshold so a single content
+/// blob that the embedder can't realistically process is reported as
+/// `Skipped("content > 65536 bytes")` rather than blowing up the
+/// chat/embed RPC. Operators who want larger embeddings can grow this
+/// constant alongside the F10 HTTP threshold.
+pub const EMBED_MAX_BYTES: usize = 64 * 1024;
+
+/// v0.7.0 L0.7 — minimal dyn-compatible trait that abstracts "produces
+/// embedding vectors" away from the concrete [`Embedder`] enum.
+///
+/// Introduced to unblock Tier B coverage closure on the MCP tool
+/// handlers (`reflect`, `check_duplicate`, `store`, `recall`, etc.):
+/// before this trait existed, those handlers took `Option<&Embedder>`,
+/// which forced every test exercising the `Some(...)` arm to construct
+/// a real candle/Ollama embedder — banned by the test playbook §4
+/// "real LLM never in cargo test". With `dyn Embed` the production
+/// [`Embedder`] AND the test-only `MockEmbedder` (in
+/// [`test_support`]) both satisfy the same handler signature, so unit
+/// tests can substitute the mock and cover the embedder-bearing
+/// branches without a network or model load.
+///
+/// Implementations are required to be `Send + Sync` so the trait
+/// object is safe to hand across `tokio::task::spawn_blocking`
+/// boundaries (as the daemon's B3 family-embedding precompute does).
+///
+/// Bug memory: `_v070_grand_slam/layer_0_7/bugs_surfaced/8f3443c5`.
+pub trait Embed: Send + Sync {
+    /// Produce a single embedding vector for `text`.
+    ///
+    /// # Errors
+    ///
+    /// Implementor-specific. The production [`Embedder`] returns
+    /// [`anyhow::Error`] from `candle` / `tokenizers` / `OllamaClient`
+    /// for I/O, tokenisation, or model-forward failures. The
+    /// `MockEmbedder` never errors.
+    fn embed(&self, text: &str) -> Result<Vec<f32>>;
+
+    /// Produce embedding vectors for a batch of texts. Default
+    /// implementation calls [`Embed::embed`] in a loop; implementors
+    /// may override to do native batching.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the first per-text error from [`Embed::embed`].
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        texts.iter().map(|t| self.embed(t)).collect()
+    }
+}
+
 /// Semantic embedding engine supporting multiple backends.
 ///
 /// - **Local** (candle): all-MiniLM-L6-v2, 384-dim. Used at the semantic tier.
@@ -160,6 +282,46 @@ impl Embedder {
         }
     }
 
+    /// v0.7.0 F6 — generate an embedding and report the outcome.
+    ///
+    /// Combines the existing [`Embedder::embed`] call with an
+    /// [`EmbedStatus`] tag so the caller (HTTP store path, MCP store
+    /// path, sync ingestion, …) can surface a structured signal on the
+    /// response when the embedder skipped or errored. Behaviour:
+    ///
+    /// * Empty input → `(None, Skipped("empty content"))`
+    /// * Input larger than [`EMBED_MAX_BYTES`] → `(None, Skipped(reason))`
+    /// * Embedder errors → `(None, Failed(reason))`
+    /// * Otherwise → `(Some(vec), Indexed)`
+    ///
+    /// Callers that don't care about the status keep using
+    /// [`Embedder::embed`]; this is the new opt-in API.
+    pub fn embed_with_status(&self, text: &str) -> (Option<Vec<f32>>, EmbedStatus) {
+        if text.is_empty() {
+            return (None, EmbedStatus::Skipped("empty content".to_string()));
+        }
+        if text.len() > EMBED_MAX_BYTES {
+            let reason = format!(
+                "content {} bytes exceeds embed cap {} bytes",
+                text.len(),
+                EMBED_MAX_BYTES
+            );
+            return (None, EmbedStatus::Skipped(reason));
+        }
+        match self.embed(text) {
+            Ok(v) if v.is_empty() => (
+                None,
+                EmbedStatus::Failed("embedder returned empty vector".to_string()),
+            ),
+            Ok(v) => (Some(v), EmbedStatus::Indexed),
+            Err(e) => {
+                let reason = format!("{e:#}");
+                tracing::warn!(target: "embeddings.degrade", reason = %reason, "embed_with_status: embedder failed");
+                (None, EmbedStatus::Failed(reason))
+            }
+        }
+    }
+
     fn embed_local(
         model: &BertModel,
         tokenizer: &Tokenizer,
@@ -277,6 +439,22 @@ impl Embedder {
                 dir.display()
             )
         }
+    }
+}
+
+/// v0.7.0 L0.7 — [`Embed`] trait impl that delegates to the inherent
+/// [`Embedder::embed`] / [`Embedder::embed_batch`] methods. The
+/// inherent methods stay on [`Embedder`] verbatim so existing callers
+/// that hold a concrete `&Embedder` keep their fast path; the trait
+/// impl is purely additive and enables `dyn Embed` substitution for
+/// handler signatures (see [`Embed`] docs).
+impl Embed for Embedder {
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        Self::embed(self, text)
+    }
+
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        Self::embed_batch(self, texts)
     }
 }
 
@@ -608,6 +786,76 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------
+    // L0.7-6 Tier E — EmbedStatus + EmbeddingFormatError surfaces.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn embed_status_as_str_each_variant() {
+        assert_eq!(EmbedStatus::Indexed.as_str(), "indexed");
+        assert_eq!(
+            EmbedStatus::Skipped("too big".to_string()).as_str(),
+            "skipped"
+        );
+        assert_eq!(
+            EmbedStatus::Failed("ollama down".to_string()).as_str(),
+            "failed"
+        );
+    }
+
+    #[test]
+    fn embed_status_is_degraded_only_for_non_indexed() {
+        assert!(!EmbedStatus::Indexed.is_degraded());
+        assert!(EmbedStatus::Skipped("x".to_string()).is_degraded());
+        assert!(EmbedStatus::Failed("x".to_string()).is_degraded());
+    }
+
+    #[test]
+    fn embed_status_reason_helper() {
+        assert_eq!(EmbedStatus::Indexed.reason(), "");
+        assert_eq!(EmbedStatus::Skipped("r1".to_string()).reason(), "r1");
+        assert_eq!(EmbedStatus::Failed("r2".to_string()).reason(), "r2");
+    }
+
+    #[test]
+    fn embed_status_display_includes_reason() {
+        assert_eq!(format!("{}", EmbedStatus::Indexed), "indexed");
+        assert_eq!(
+            format!("{}", EmbedStatus::Skipped("oversize".to_string())),
+            "skipped: oversize"
+        );
+        assert_eq!(
+            format!("{}", EmbedStatus::Failed("timeout".to_string())),
+            "failed: timeout"
+        );
+    }
+
+    #[test]
+    fn embedding_format_error_display_each_variant() {
+        let unk = EmbeddingFormatError::UnknownHeader(0xab);
+        assert!(unk.to_string().contains("0xab"));
+        let be = EmbeddingFormatError::BigEndianUnsupported;
+        assert!(be.to_string().contains("big-endian"));
+        let ml = EmbeddingFormatError::MalformedLength(7);
+        assert!(ml.to_string().contains("7"));
+    }
+
+    #[test]
+    fn embedding_format_error_is_std_error() {
+        // Pin the std::error::Error implementation so anyhow `?` chains
+        // continue to work with this typed error at every call site.
+        let e: Box<dyn std::error::Error> = Box::new(EmbeddingFormatError::BigEndianUnsupported);
+        // Sources is None by default; the trait is implemented purely
+        // for the marker.
+        assert!(e.source().is_none());
+    }
+
+    #[test]
+    fn decode_embedding_blob_empty_returns_empty_vec() {
+        let v = decode_embedding_blob(&[]).expect("empty decodes to empty");
+        assert!(v.is_empty());
+    }
+
     #[test]
     fn test_fuse_is_l2_normalized() {
         // The current fuse() contract returns an UN-normalized vector
@@ -709,6 +957,40 @@ pub mod test_support {
                 Self::Local => "mock-all-MiniLM-L6-v2 (384-dim, local)",
                 Self::Ollama => "mock-nomic-embed-text-v1.5 (768-dim, Ollama)",
             }
+        }
+    }
+
+    /// v0.7.0 L0.7 — [`Embed`] trait impl so unit tests can substitute
+    /// the mock for the real [`Embedder`] at handler call sites that
+    /// accept `Option<&dyn Embed>`. Delegates to the inherent
+    /// implementation. Bug `8f3443c5`.
+    impl Embed for MockEmbedder {
+        fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            Self::embed(self, text)
+        }
+
+        fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            Self::embed_batch(self, texts)
+        }
+    }
+
+    /// v0.7.0 polish (issue #767) — embedder that always returns
+    /// `Err`. Unblocks tests for the `emb.embed(...)` failure-warn arms
+    /// in `mcp::tools::store` (and similar callers) that would otherwise
+    /// be structurally unreachable: the production [`Embedder`] only
+    /// errors on tokeniser / model-forward faults that don't happen
+    /// against an in-memory fixture, and [`MockEmbedder`] is documented
+    /// to never error. This trait-only fake makes the warn branch
+    /// reachable without contorting the production code path.
+    pub struct FailingEmbedder;
+
+    impl Embed for FailingEmbedder {
+        fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+            Err(anyhow::anyhow!("test: synthetic embed failure"))
+        }
+
+        fn embed_batch(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            Err(anyhow::anyhow!("test: synthetic embed_batch failure"))
         }
     }
 }
@@ -1032,4 +1314,240 @@ fn load_from_fallback_succeeds_when_files_present() {
     assert!(cfg.ends_with("config.json"));
     assert!(tok.ends_with("tokenizer.json"));
     assert!(w.ends_with("model.safetensors"));
+}
+
+// ---------------------------------------------------------------------------
+// C-5 (#699): Cover the Ollama-variant `Embedder` constructor + `embed*` +
+// `dim` / `model_description` paths using a wiremock-backed real
+// `OllamaClient`. This closes the lib-tier `Ollama { .. }` arms across
+// `embed()`, `dim()`, `model_description()`, and `embed_with_status()` that
+// were the bulk of the 91.39% baseline gap on `embeddings.rs`. Hermetic —
+// no live Ollama daemon required.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+#[allow(clippy::too_many_lines)]
+mod c5_ollama_variant_tests {
+    use super::*;
+    use crate::llm::OllamaClient;
+    use serde_json::json;
+    use std::sync::Arc;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Stand up an in-process `OllamaClient` against a wiremock instance
+    /// pre-configured with the minimum routes required to construct +
+    /// embed. Returns the `Arc<OllamaClient>` plus the server (keep the
+    /// server alive in the caller's scope).
+    async fn ollama_with_embed_response(embedding_dim: usize) -> (Arc<OllamaClient>, MockServer) {
+        let server = MockServer::start().await;
+        // /api/tags — required so `OllamaClient::new_with_url` doesn't
+        // fail the construct-time health check.
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": []})))
+            .mount(&server)
+            .await;
+        // /api/pull — for ensure_embed_model; we let it succeed.
+        Mock::given(method("POST"))
+            .and(path("/api/pull"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&server)
+            .await;
+        // /api/embed — the dispatch target for `client.embed_text(...)`.
+        let vec_of_floats: Vec<f32> = (0..embedding_dim).map(|i| (i as f32) * 0.001).collect();
+        Mock::given(method("POST"))
+            .and(path("/api/embed"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "embeddings": [vec_of_floats],
+            })))
+            .mount(&server)
+            .await;
+
+        let uri = server.uri();
+        let client = tokio::task::spawn_blocking(move || {
+            OllamaClient::new_with_url(&uri, "test-model").expect("ollama client builds")
+        })
+        .await
+        .expect("spawn blocking completes");
+        (Arc::new(client), server)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embedder_new_ollama_constructs_with_expected_model_name() {
+        // Lines 221-226: `new_ollama` constructor path.
+        let (client, _server) = ollama_with_embed_response(NOMIC_DIM).await;
+        let embedder = Embedder::new_ollama(client);
+        assert!(matches!(embedder, Embedder::Ollama { .. }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embedder_for_model_nomic_with_client_succeeds() {
+        // Lines 238-247 (Ok arm) + lines 243-246 of `for_model`:
+        // `ensure_embed_model` is invoked and the Ollama variant
+        // returned.
+        let (client, _server) = ollama_with_embed_response(NOMIC_DIM).await;
+        let embedder = tokio::task::spawn_blocking(move || {
+            Embedder::for_model(EmbeddingModel::NomicEmbedV15, Some(client))
+                .expect("for_model NomicEmbedV15 with ollama client")
+        })
+        .await
+        .unwrap();
+        assert!(matches!(embedder, Embedder::Ollama { .. }));
+        assert_eq!(embedder.dim(), NOMIC_DIM); // covers line 256
+        let desc = embedder.model_description();
+        assert!(desc.contains("nomic")); // covers line 264
+        assert!(desc.contains("768"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embedder_ollama_embed_returns_vector_from_wiremock() {
+        // Line 281: dispatch arm of `Embedder::embed` for the Ollama
+        // variant. We hop into `spawn_blocking` because OllamaClient's
+        // HTTP calls are reqwest::blocking under the hood.
+        let (client, _server) = ollama_with_embed_response(NOMIC_DIM).await;
+        let embedder = Embedder::new_ollama(client);
+        let v = tokio::task::spawn_blocking(move || embedder.embed("hello"))
+            .await
+            .unwrap()
+            .expect("embed_text via wiremock");
+        assert_eq!(v.len(), NOMIC_DIM);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embed_with_status_skipped_on_empty_content() {
+        // Lines 299-302: empty content → Skipped("empty content").
+        let (client, _server) = ollama_with_embed_response(NOMIC_DIM).await;
+        let embedder = Embedder::new_ollama(client);
+        let (vec_opt, status) = embedder.embed_with_status("");
+        assert!(vec_opt.is_none());
+        assert!(matches!(status, EmbedStatus::Skipped(_)));
+        assert_eq!(status.as_str(), "skipped");
+        assert!(status.reason().contains("empty"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embed_with_status_skipped_on_oversized_content() {
+        // Lines 303-310: content > EMBED_MAX_BYTES → Skipped(reason).
+        let (client, _server) = ollama_with_embed_response(NOMIC_DIM).await;
+        let embedder = Embedder::new_ollama(client);
+        let big = "a".repeat(EMBED_MAX_BYTES + 1);
+        let (vec_opt, status) = embedder.embed_with_status(&big);
+        assert!(vec_opt.is_none());
+        match status {
+            EmbedStatus::Skipped(r) => {
+                assert!(r.contains("exceeds embed cap"), "got: {r}");
+            }
+            other => panic!("expected Skipped, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embed_with_status_indexed_on_happy_path() {
+        // Lines 311-316: Ok(v) where v is non-empty → Indexed.
+        let (client, _server) = ollama_with_embed_response(NOMIC_DIM).await;
+        let embedder = Embedder::new_ollama(client);
+        let (vec_opt, status) =
+            tokio::task::spawn_blocking(move || embedder.embed_with_status("hello world"))
+                .await
+                .unwrap();
+        assert!(vec_opt.is_some());
+        assert_eq!(status, EmbedStatus::Indexed);
+        assert!(!status.is_degraded());
+        assert_eq!(vec_opt.unwrap().len(), NOMIC_DIM);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embed_with_status_failed_when_embedder_errors() {
+        // Lines 317-321: Err arm — wiremock returns a 500 so the
+        // OllamaClient's embed_text returns Err.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": []})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/embed"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("server error"))
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+        let embedder = tokio::task::spawn_blocking(move || {
+            let client = OllamaClient::new_with_url(&uri, "test-model").unwrap();
+            Embedder::new_ollama(Arc::new(client))
+        })
+        .await
+        .unwrap();
+
+        let (vec_opt, status) =
+            tokio::task::spawn_blocking(move || embedder.embed_with_status("hello"))
+                .await
+                .unwrap();
+        assert!(vec_opt.is_none());
+        match status {
+            EmbedStatus::Failed(reason) => {
+                assert!(!reason.is_empty());
+            }
+            other => panic!("expected Failed(_), got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embed_batch_via_inherent_impl_returns_one_vec_per_input() {
+        // Lines 370-372: `Embedder::embed_batch` inherent method.
+        let (client, _server) = ollama_with_embed_response(NOMIC_DIM).await;
+        let embedder = Embedder::new_ollama(client);
+        let vecs =
+            tokio::task::spawn_blocking(move || embedder.embed_batch(&["one", "two", "three"]))
+                .await
+                .unwrap()
+                .expect("batch embed succeeds");
+        assert_eq!(vecs.len(), 3);
+        for v in &vecs {
+            assert_eq!(v.len(), NOMIC_DIM);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embed_trait_for_embedder_delegates_to_inherent_impl() {
+        // Lines 452-458: `impl Embed for Embedder { embed / embed_batch }`.
+        let (client, _server) = ollama_with_embed_response(NOMIC_DIM).await;
+        let embedder = Embedder::new_ollama(client);
+        let embedder_box: Box<dyn Embed> = Box::new(embedder);
+        let single = tokio::task::spawn_blocking({
+            let e = embedder_box;
+            move || {
+                let single = e.embed("alpha").expect("single embed");
+                let batch = e.embed_batch(&["beta", "gamma"]).expect("batch embed");
+                (single, batch)
+            }
+        })
+        .await
+        .unwrap();
+        let (single, batch) = single;
+        assert_eq!(single.len(), NOMIC_DIM);
+        assert_eq!(batch.len(), 2);
+        for v in &batch {
+            assert_eq!(v.len(), NOMIC_DIM);
+        }
+    }
+
+    #[test]
+    fn embed_trait_default_batch_default_impl_runs_for_external_impls() {
+        // Lines 144-146: trait default `Embed::embed_batch`. To trigger
+        // the default body we need an `Embed` implementor that does NOT
+        // override `embed_batch`. We define one inline.
+        struct ConstEmbedder;
+        impl Embed for ConstEmbedder {
+            fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+                Ok(vec![1.0_f32, 2.0_f32, 3.0_f32])
+            }
+            // intentionally NOT overriding embed_batch → default impl runs
+        }
+        let e = ConstEmbedder;
+        let batch = e.embed_batch(&["a", "b"]).expect("default batch path");
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0], vec![1.0_f32, 2.0_f32, 3.0_f32]);
+        assert_eq!(batch[1], vec![1.0_f32, 2.0_f32, 3.0_f32]);
+    }
 }

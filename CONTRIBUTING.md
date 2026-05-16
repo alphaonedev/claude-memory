@@ -66,6 +66,47 @@ cargo audit
 - If you add a new MCP tool, HTTP endpoint, or CLI command, include integration tests covering the primary usage path.
 - If clippy pedantic requires `#[allow(clippy::...)]`, justify it in your PR description.
 
+## Per-module coverage discipline (v0.7.0 forward)
+
+ai-memory enforces **per-module line coverage thresholds** in CI, on top
+of the workspace-wide absolute floor and ratchet that the `Code Coverage`
+job in `ci.yml` already enforces. The per-module gate is the
+`Per-Module Coverage Thresholds` workflow (`.github/workflows/coverage.yml`).
+
+- Thresholds are defined in [`coverage/thresholds.toml`](coverage/thresholds.toml).
+- Thresholds **rise across releases; never fall.** If a module's threshold
+  is 87%, your PR cannot lower it; you can raise it. CI rejects any PR
+  that drops a module below its current floor.
+- Adding new code requires one of:
+  1. Hitting the relevant tier threshold for the module's tier, OR
+  2. Adding the file to `coverage/thresholds.toml` with a documented
+     rationale comment, OR
+  3. Adding a structural-ceiling entry in [`coverage/policy.md`](coverage/policy.md)
+     with the ship-gate compensation that exercises the unreachable
+     surface end-to-end.
+- Tier targets (final, raised to these by v0.8.0):
+  - **A = 98%** (pure logic — audit, errors, identity, models, validate, etc.)
+  - **B = 95%** (API surface — MCP / HTTP / CLI)
+  - **C = 92%** (substrate — curator, federation, governance, storage core)
+  - **D = 85%** (LLM-bound — auto_tag, detect_contradiction, expand_query, llm)
+  - **E = 90%** (wire / IO / infrastructure — daemon_runtime, store, tls, etc.)
+- CI runs [`coverage/check-thresholds.sh`](coverage/check-thresholds.sh) on
+  every PR. The script parses `coverage/thresholds.toml`, reads the
+  `cargo llvm-cov --json` output, and exits non-zero if any module is
+  below its threshold.
+- **Lowering a threshold requires explicit operator approval in the PR
+  description.** Routine PRs that legitimately re-shape a module (e.g.
+  a refactor that splits a file) should raise thresholds on the resulting
+  modules, not lower the predecessor's.
+
+To run the gate locally before pushing:
+
+```bash
+cargo llvm-cov --features sal,sal-postgres --lib --tests --json \
+  --output-path coverage/current.json --workspace
+bash coverage/check-thresholds.sh
+```
+
 ## Pull Request Process
 
 1. Fork the repository (external contributors) or branch directly (collaborators).

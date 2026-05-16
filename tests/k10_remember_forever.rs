@@ -1,6 +1,8 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+// clippy allows (test scaffolding): pedantic lints with no behavioral impact.
+#![allow(clippy::redundant_closure_for_method_calls)]
 //! v0.7.0 K10 — `remember=forever` writes a synthetic permission rule.
 //!
 //! The K10 contract: any of the three transports (HTTP, SSE-driven,
@@ -24,6 +26,7 @@ use ai_memory::approvals::{
     Decision, Remember, SyntheticPermissionRule, clear_synthetic_rules_for_test,
     list_synthetic_rules, record_synthetic_rule,
 };
+use ai_memory::models::ConfidenceSource;
 use serde_json::json;
 use std::sync::Mutex;
 
@@ -70,6 +73,16 @@ async fn mcp_pending_approve_with_forever_records_rule() {
         last_accessed_at: None,
         expires_at: None,
         metadata: serde_json::json!({}),
+        reflection_depth: 0,
+        memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let mem_id = ai_memory::db::insert(&conn, &mem).expect("insert memory");
     let payload = json!({"reason": "k10-forever"});

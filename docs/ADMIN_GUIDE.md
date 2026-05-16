@@ -141,12 +141,30 @@ The `--tier` flag controls which features are enabled. Each tier builds on the p
 | `smart` | smart subset (LLM tools enabled) | Yes | Yes (Ollama) | ~1 GB |
 | `autonomous` | full 43-tool surface | Yes | Yes (Ollama) | ~4 GB |
 
-Set the tier when starting the MCP server or HTTP daemon:
+Set the tier when starting the MCP server or running per-invocation
+subcommands (`mcp`, `store`, `recall`, etc.):
 
 ```bash
 ai-memory mcp --tier semantic        # default
 ai-memory mcp --tier smart           # enables LLM-powered tools
-ai-memory serve --tier autonomous    # full feature set
+ai-memory mcp --tier autonomous      # full feature set
+```
+
+The HTTP daemon (`ai-memory serve`) does **not** accept a `--tier`
+flag — see issue #703. The daemon's effective tier is resolved from
+the `tier = "<keyword|semantic|smart|autonomous>"` field at the top
+level of `config.toml`, falling back to the compiled-in default
+(`semantic`) when the field is absent.
+
+Rationale: a long-running daemon owns embedder / reranker / LLM
+resources that are expensive to swap mid-run, so tier is fixed at
+startup via configuration rather than per-invocation flag.
+
+```bash
+# Run the daemon in autonomous mode by setting the tier in
+# config.toml, then starting the daemon:
+echo 'tier = "autonomous"' >> ~/.config/ai-memory/config.toml
+ai-memory serve --host 127.0.0.1 --port 9077
 ```
 
 ### Ollama Setup (Smart & Autonomous Tiers)
@@ -347,7 +365,7 @@ Below is a complete example showing every supported field with explanatory comme
 # mid_extend_secs = 86400       # +1 day on access (default)
 ```
 
-**Precedence:** CLI flags and MCP args take precedence over `config.toml` values. When the MCP server is launched by an AI client, the `--tier` flag in the MCP args is used, not the `config.toml` `tier` setting.
+**Precedence:** For per-invocation subcommands (`mcp`, `store`, `recall`, etc.), CLI flags and MCP args take precedence over `config.toml` values. When the MCP server is launched by an AI client, the `--tier` flag in the MCP args is used, not the `config.toml` `tier` setting. The `serve` daemon is a special case: it has no `--tier` flag, so tier is resolved from `config.toml` (`tier = "..."`) with the compiled-in default (`semantic`) as the only fallback. See issue #703.
 
 ### Compile-Time Constants
 

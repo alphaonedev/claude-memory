@@ -25,6 +25,15 @@ fn cmd(binary: &str) -> std::process::Command {
     // exercises the production happy path without permanently
     // relaxing the production default.
     c.env("AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS", "1");
+    // v0.7.0 #238/#239 — the integration suite drives /sync/push
+    // and /sync/since directly via curl_post / curl_get without the
+    // new wire-level `x-peer-id` header. Opt these subprocess
+    // daemons into the legacy posture so the existing assertions
+    // hold; per-issue regression tests at `tests/g_issue_238_*` and
+    // `tests/g_issue_239_*` exercise the default-enforce posture in
+    // their own test binaries.
+    c.env("AI_MEMORY_FED_TRUST_BODY_AGENT_ID", "1");
+    c.env("AI_MEMORY_FED_SYNC_TRUST_PEER", "1");
     c
 }
 /// Spawn a command and collect its output, panicking with a descriptive
@@ -1864,8 +1873,8 @@ fn test_mcp_tools_list() {
         .expect("tools should be array");
     assert_eq!(
         tools.len(),
-        51,
-        "expected 51 MCP tools (v0.6.3 baseline 43 + v0.7.0 I4 memory_replay + v0.7 H4 memory_verify + v0.7 B1 memory_load_family + v0.7 B2 memory_smart_load + v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list + v0.7 J7 memory_find_paths + v0.7 K8 memory_quota_status)"
+        71,
+        "expected 71 MCP tools (v0.6.3 baseline 43 + v0.7.0 I4 memory_replay + v0.7 H4 memory_verify + v0.7 B1 memory_load_family + v0.7 B2 memory_smart_load + v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list + v0.7 J7 memory_find_paths + v0.7 K8 memory_quota_status + v0.7.0 Task 4/8 memory_reflect + v0.7.0 L2-2 memory_reflection_origin + v0.7.0 L2-3 memory_dependents_of_invalidated + v0.7.0 issue #691 memory_check_agent_action + memory_rule_list + v0.7.0 L1-5 5 memory_skill_* tools + v0.7.0 L2-6 memory_skill_promote_from_reflection + v0.7.0 L2-7 memory_skill_compositional_context + v0.7.0 QW-1 memory_export_reflection + v0.7.0 QW-3 follow-up memory_offload + memory_deref + v0.7.0 WT-1-C memory_atomise + v0.7.0 QW-2 memory_persona + memory_persona_generate + v0.7.0 Form 3 memory_ingest_multistep + v0.7.0 Form 5 memory_calibrate_confidence)"
     );
 
     let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
@@ -1897,6 +1906,19 @@ fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"memory_unsubscribe"));
     assert!(tool_names.contains(&"memory_list_subscriptions"));
     assert!(tool_names.contains(&"memory_find_paths"));
+    // v0.7.0 Task 4/8 (recursive learning, issue #655) — `memory_reflect`
+    // joins the full surface as the substrate-native reflection primitive.
+    assert!(tool_names.contains(&"memory_reflect"));
+    // v0.7.0 QW-2 — Persona-as-artifact substrate. Both tools must be
+    // registered under the full profile.
+    assert!(
+        tool_names.contains(&"memory_persona"),
+        "memory_persona must be registered under full profile; got {tool_names:?}"
+    );
+    assert!(
+        tool_names.contains(&"memory_persona_generate"),
+        "memory_persona_generate must be registered under full profile; got {tool_names:?}"
+    );
 
     let _ = std::fs::remove_file(&db_path);
 }
@@ -8040,9 +8062,16 @@ fn free_port() -> u16 {
     port
 }
 
-/// Wait for the `/api/v1/health` endpoint to respond 200 — up to ~5s.
+/// Wait for the `/api/v1/health` endpoint to respond 200 — up to ~10s.
+///
+/// Extended from 5s to 10s in the v0.7.0 v0.7.1-fold (2026-05-13) after
+/// the §16 12-gate sweep and L1 wave coordinator both observed
+/// `http_notify_fans_out_to_peers_so_target_inbox_sees_it` flaking on
+/// "leader serve never came up" under high parallel test load. Combined
+/// with `spawn_leader`'s bind-retry the cross-binary readiness race
+/// becomes recoverable rather than fatal.
 fn wait_for_health(port: u16) -> bool {
-    for _ in 0..50 {
+    for _ in 0..100 {
         std::thread::sleep(std::time::Duration::from_millis(100));
         if let Ok(out) = std::process::Command::new("curl")
             .args([
@@ -8301,16 +8330,25 @@ fn build_mtls_probe_client(
     cert_path: &std::path::Path,
     key_path: &std::path::Path,
 ) -> reqwest::blocking::Client {
-    // Transitive deps pull reqwest's native-tls backend via hf-hub's
-    // default-tls feature, so the test uses `from_pkcs8_pem` (native-tls
-    // variant) for maximum cross-platform consistency. The daemon in
-    // production goes through `use_preconfigured_tls` with a rustls
-    // ClientConfig (see src/main.rs).
+    // M5 (2026-05-11): reqwest's native-tls feature was removed from
+    // [dependencies] in favor of rustls-tls only (dropped dual-TLS-stack
+    // attack surface). `from_pkcs8_pem` is native-tls-only — switched to
+    // `from_pem` which is rustls-compatible and takes cert + key concatenated.
     let cert = std::fs::read(cert_path).expect("read client cert");
     let key = std::fs::read(key_path).expect("read client key");
+    let mut pem = Vec::with_capacity(cert.len() + key.len() + 1);
+    pem.extend_from_slice(&cert);
+    if !cert.ends_with(b"\n") {
+        pem.push(b'\n');
+    }
+    pem.extend_from_slice(&key);
     let identity =
-        reqwest::Identity::from_pkcs8_pem(&cert, &key).expect("parse mTLS identity (PKCS#8 PEM)");
+        reqwest::Identity::from_pem(&pem).expect("parse mTLS identity (concatenated PEM)");
+    // M5: explicit rustls backend (the only one we link now that native-tls
+    // was dropped). Without this the Identity-vs-backend type check fails
+    // with "incompatible TLS identity type" on some platforms.
     reqwest::blocking::Client::builder()
+        .use_rustls_tls()
         .identity(identity)
         .danger_accept_invalid_certs(true)
         .timeout(std::time::Duration::from_secs(5))
@@ -8750,6 +8788,24 @@ struct OneshotDaemon {
     router: axum::Router,
 }
 
+/// v0.7.0 #238/#239 — set the federation legacy-bypass env vars
+/// once per test process so the integration suite's in-process and
+/// subprocess daemon spawns see the pre-v0.7.0 posture. The
+/// per-issue regression tests at `tests/g_issue_238_*` and
+/// `tests/g_issue_239_*` run in their own test binaries (no env
+/// contamination there) and exercise the default-enforce posture.
+static FED_LEGACY_BYPASS_INIT: std::sync::Once = std::sync::Once::new();
+fn install_federation_legacy_bypass() {
+    FED_LEGACY_BYPASS_INIT.call_once(|| {
+        // SAFETY: serial-by-Once init; the env vars are read by
+        // handler code only (no concurrent writer).
+        unsafe {
+            std::env::set_var("AI_MEMORY_FED_TRUST_BODY_AGENT_ID", "1");
+            std::env::set_var("AI_MEMORY_FED_SYNC_TRUST_PEER", "1");
+        }
+    });
+}
+
 impl OneshotDaemon {
     fn new() -> Self {
         Self::with_federation(None)
@@ -8769,6 +8825,7 @@ impl OneshotDaemon {
         // tests in `cmd()`) so the production happy path is exercised
         // without permanently relaxing the production default.
         ai_memory::config::set_allow_loopback_webhooks(true);
+        install_federation_legacy_bypass();
         let conn = ai_memory::db::open(std::path::Path::new(":memory:")).unwrap();
         let path = std::path::PathBuf::from(":memory:");
         let db: ai_memory::handlers::Db = std::sync::Arc::new(tokio::sync::Mutex::new((
@@ -8777,6 +8834,15 @@ impl OneshotDaemon {
             ai_memory::config::ResolvedTtl::default(),
             true,
         )));
+        #[cfg(feature = "sal")]
+        let store: std::sync::Arc<dyn ai_memory::store::MemoryStore> = {
+            let tmp = tempfile::NamedTempFile::new().expect("tempfile for SqliteStore");
+            let p = tmp.path().to_path_buf();
+            std::mem::forget(tmp);
+            std::sync::Arc::new(
+                ai_memory::store::sqlite::SqliteStore::open(&p).expect("open SqliteStore"),
+            )
+        };
         let app_state = ai_memory::handlers::AppState {
             db,
             embedder: std::sync::Arc::new(None),
@@ -8788,8 +8854,23 @@ impl OneshotDaemon {
             mcp_config: std::sync::Arc::new(None),
             active_keypair: std::sync::Arc::new(None),
             family_embeddings: std::sync::Arc::new(tokio::sync::RwLock::new(Some(Vec::new()))),
+            storage_backend: ai_memory::handlers::StorageBackend::Sqlite,
+            #[cfg(feature = "sal")]
+            store,
+            llm: std::sync::Arc::new(None),
+            auto_tag_model: std::sync::Arc::new(None),
+            llm_call_timeout: std::time::Duration::from_secs(30),
+            replay_cache: std::sync::Arc::new(ai_memory::identity::replay::ReplayCache::default()),
+
+            verify_require_nonce: false,
+            autonomous_hooks: false,
+            recall_scope: std::sync::Arc::new(None),
+            deferred_audit_queue: std::sync::Arc::new(None),
         };
-        let api_key_state = ai_memory::handlers::ApiKeyState { key: None };
+        let api_key_state = ai_memory::handlers::ApiKeyState {
+            key: None,
+            mtls_enforced: false,
+        };
         let router = ai_memory::build_router(api_key_state, app_state);
         Self { router }
     }
@@ -8935,6 +9016,10 @@ impl DaemonGuard {
         let dir = std::env::temp_dir();
         let db = dir.join(format!("ai-memory-http-parity-{}.db", uuid::Uuid::new_v4()));
         let port = free_port();
+        // `cmd()` already injects `AI_MEMORY_FED_TRUST_BODY_AGENT_ID=1`
+        // and `AI_MEMORY_FED_SYNC_TRUST_PEER=1` so the legacy posture
+        // applies to /sync/push and /sync/since here too. See `cmd()`
+        // for the per-test rationale.
         let child = cmd(bin)
             .args([
                 "--db",
@@ -9102,10 +9187,12 @@ async fn http_subscriptions_s33_shape_round_trip() {
         "scenario33-pubsub-{}",
         &uuid::Uuid::new_v4().to_string()[..6]
     );
+    // R3-S1.HMAC (2026-05-13): subscribe requires per-sub or
+    // server-wide HMAC secret. Supply a per-sub `secret` field.
     let (code, _body) = route_post(
         &d,
         "/api/v1/subscriptions",
-        &serde_json::json!({"agent_id": "ai:bob", "namespace": ns}),
+        &serde_json::json!({"agent_id": "ai:bob", "namespace": ns, "secret": "integration-test-secret"}),
         Some("ai:bob"),
     )
     .await;
@@ -9367,40 +9454,59 @@ fn http_archive_by_ids_end_to_end_moves_row_from_active_to_archive() {
 
 /// Spawn a leader serve daemon with `--quorum-writes W --quorum-peers url…`.
 /// Extends `DaemonGuard` without modifying the existing helper.
+///
+/// Retries up to 3 times on "leader never came up" — the only known
+/// failure mode is a cross-binary port grab between `free_port`'s
+/// listener-drop and the child's bind (§16 12-gate sweep + L1 wave
+/// observation, 2026-05-13, v0.7.1-fold). Each retry gets a fresh
+/// port + DB path so a leaked listener from a stuck child can't
+/// chain-fail subsequent attempts.
 fn spawn_leader(quorum_writes: usize, peer_urls: &[String]) -> DaemonGuard {
     let bin = env!("CARGO_BIN_EXE_ai-memory");
-    let dir = std::env::temp_dir();
-    let db = dir.join(format!(
-        "ai-memory-http-parity-leader-{}.db",
-        uuid::Uuid::new_v4()
-    ));
-    let port = free_port();
-    let mut args: Vec<String> = vec![
-        "--db".into(),
-        db.to_str().unwrap().into(),
-        "serve".into(),
-        "--port".into(),
-        port.to_string(),
-    ];
-    if quorum_writes > 0 && !peer_urls.is_empty() {
-        args.push("--quorum-writes".into());
-        args.push(quorum_writes.to_string());
-        args.push("--quorum-peers".into());
-        args.push(peer_urls.join(","));
-        // 15s ack window keeps tests green under parallel `cargo test`
-        // load (SQLite Mutex contention on peer serialises incoming
-        // sync_push POSTs under a burst).
-        args.push("--quorum-timeout-ms".into());
-        args.push("15000".into());
+    for attempt in 1..=3u8 {
+        let dir = std::env::temp_dir();
+        let db = dir.join(format!(
+            "ai-memory-http-parity-leader-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let port = free_port();
+        let mut args: Vec<String> = vec![
+            "--db".into(),
+            db.to_str().unwrap().into(),
+            "serve".into(),
+            "--port".into(),
+            port.to_string(),
+        ];
+        if quorum_writes > 0 && !peer_urls.is_empty() {
+            args.push("--quorum-writes".into());
+            args.push(quorum_writes.to_string());
+            args.push("--quorum-peers".into());
+            args.push(peer_urls.join(","));
+            // 15s ack window keeps tests green under parallel `cargo test`
+            // load (SQLite Mutex contention on peer serialises incoming
+            // sync_push POSTs under a burst).
+            args.push("--quorum-timeout-ms".into());
+            args.push("15000".into());
+        }
+        let mut child = cmd(bin)
+            .args(&args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        if wait_for_health(port) {
+            return DaemonGuard { child, port, db };
+        }
+        // Kill the stuck child and try again. The most common cause is a
+        // cross-binary port grab between free_port and the child's bind.
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&db);
+        eprintln!(
+            "spawn_leader attempt {attempt}/3 failed on port {port}; retrying with fresh port"
+        );
     }
-    let child = cmd(bin)
-        .args(&args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    assert!(wait_for_health(port), "leader serve never came up");
-    DaemonGuard { child, port, db }
+    panic!("leader serve never came up after 3 attempts");
 }
 
 /// Poll GET `/api/v1/memories` on `peer_port` filtered by `namespace`
@@ -10534,6 +10640,7 @@ fn federation_cfg_for_test(
         peers,
         client,
         sender_agent_id: "ai:fed-test".to_string(),
+        api_key: None,
     }
 }
 
@@ -10692,12 +10799,14 @@ async fn test_subscription_webhook_namespace_filter() {
     // Create a namespace filter subscription.
     let filter_ns = "webhook-test-foo";
 
+    // R3-S1.HMAC (2026-05-13): subscribe requires HMAC secret.
     let (code, resp) = route_post(
         &d,
         "/api/v1/subscriptions",
         &serde_json::json!({
             "agent_id": "webhook-receiver",
-            "namespace": filter_ns
+            "namespace": filter_ns,
+            "secret": "integration-test-secret",
         }),
         Some("webhook-receiver"),
     )
@@ -11157,13 +11266,15 @@ async fn http_smoke_matrix_phases_1_3() {
     }
 
     // POST /api/v1/subscriptions — subscribe
+    // R3-S1.HMAC (2026-05-13): supply per-sub secret.
     {
         let (code, body) = route_post(
             &d,
             "/api/v1/subscriptions",
             &serde_json::json!({
                 "url": "https://example.com/webhook",
-                "events": "*"
+                "events": "*",
+                "secret": "smoke-secret",
             }),
             None,
         )
@@ -11178,7 +11289,10 @@ async fn http_smoke_matrix_phases_1_3() {
         }
     }
 
-    // POST /api/v1/pending/{id}/approve — test with nonexistent id (expect 404)
+    // POST /api/v1/pending/{id}/approve — test with nonexistent id.
+    // S5-C1 (2026-05-13): /approve is HMAC-gated; an unsigned request
+    // refuses with 401 (the new correct response). Without HMAC the
+    // endpoint never reaches the row-lookup arm.
     {
         let (code, _body) = route_post(
             &d,
@@ -11187,13 +11301,13 @@ async fn http_smoke_matrix_phases_1_3() {
             None,
         )
         .await;
-        assert!(
-            code == "403" || code == "404",
-            "approve_pending on nonexistent"
+        assert_eq!(
+            code, "401",
+            "approve_pending without HMAC must refuse (S5-C1)"
         );
     }
 
-    // POST /api/v1/pending/{id}/reject — test with nonexistent id (expect 404)
+    // POST /api/v1/pending/{id}/reject — same as above.
     {
         let (code, _body) = route_post(
             &d,
@@ -11202,9 +11316,9 @@ async fn http_smoke_matrix_phases_1_3() {
             None,
         )
         .await;
-        assert!(
-            code == "403" || code == "404",
-            "reject_pending on nonexistent"
+        assert_eq!(
+            code, "401",
+            "reject_pending without HMAC must refuse (S5-C1)"
         );
     }
 }
@@ -11894,9 +12008,23 @@ fn test_cli_smoke_canonical_paths() {
     assert!(link_output.status.success(), "link failed");
 
     // 13. forget: dry-run delete by pattern
+    //
+    // Round-2 F11: `forget --pattern X` without `--namespace` is a
+    // GLOBAL scope delete and now requires `--confirm-global` to
+    // proceed. The smoke test exercises the CLI shape (not actual
+    // deletion — `nomatch` deliberately matches nothing), so we opt
+    // into the global confirmation.
     let forget_output = cmd_output_or_panic(
         binary,
-        &["--db", db_str, "--json", "forget", "--pattern", "nomatch"],
+        &[
+            "--db",
+            db_str,
+            "--json",
+            "forget",
+            "--pattern",
+            "nomatch",
+            "--confirm-global",
+        ],
     );
     assert!(forget_output.status.success(), "forget failed");
 
@@ -12419,6 +12547,15 @@ fn build_serve_state(
         ai_memory::config::ResolvedTtl::default(),
         true,
     )));
+    // v0.7.0 Wave-3 — populate the SAL trait handle alongside `db`.
+    // Tests in this module exercise the SQLite path; the trait handle
+    // wraps a SqliteStore opened against the same on-disk file so any
+    // future trait-routed assertion sees identical rows.
+    #[cfg(feature = "sal")]
+    let store: std::sync::Arc<dyn ai_memory::store::MemoryStore> = std::sync::Arc::new(
+        ai_memory::store::sqlite::SqliteStore::open(db_path)
+            .expect("open SqliteStore for build_serve_state"),
+    );
     let app_state = ai_memory::handlers::AppState {
         db,
         embedder: std::sync::Arc::new(None),
@@ -12430,8 +12567,23 @@ fn build_serve_state(
         mcp_config: std::sync::Arc::new(None),
         active_keypair: std::sync::Arc::new(None),
         family_embeddings: std::sync::Arc::new(tokio::sync::RwLock::new(Some(Vec::new()))),
+        storage_backend: ai_memory::handlers::StorageBackend::Sqlite,
+        #[cfg(feature = "sal")]
+        store,
+        llm: std::sync::Arc::new(None),
+        auto_tag_model: std::sync::Arc::new(None),
+        llm_call_timeout: std::time::Duration::from_secs(30),
+        replay_cache: std::sync::Arc::new(ai_memory::identity::replay::ReplayCache::default()),
+
+        verify_require_nonce: false,
+        autonomous_hooks: false,
+        recall_scope: std::sync::Arc::new(None),
+        deferred_audit_queue: std::sync::Arc::new(None),
     };
-    let api_key_state = ai_memory::handlers::ApiKeyState { key: None };
+    let api_key_state = ai_memory::handlers::ApiKeyState {
+        key: None,
+        mtls_enforced: false,
+    };
     (api_key_state, app_state)
 }
 
@@ -12628,6 +12780,7 @@ async fn test_daemon_cmd_curator_daemon_cycles_then_terminates() {
         dry_run: true,
         include_namespaces: Vec::new(),
         exclude_namespaces: Vec::new(),
+        ..ai_memory::curator::CuratorConfig::default()
     };
     let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
     let shutdown_for_daemon = shutdown.clone();

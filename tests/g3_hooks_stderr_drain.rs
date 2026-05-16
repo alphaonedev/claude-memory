@@ -1,5 +1,7 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
+// clippy allows (test scaffolding): pedantic lints with no behavioral impact.
+#![allow(clippy::doc_markdown)]
 //
 // v0.7.0 review #628 blocker H9 — daemon-mode stderr never drained.
 //
@@ -29,7 +31,6 @@
 //      executor surfaces `Timeout` cleanly without hanging — the
 //      drain task must let the executor's `tokio::time::timeout`
 //      trip on schedule rather than getting stuck on a full pipe.
-
 #![cfg(unix)]
 
 use std::path::PathBuf;
@@ -227,7 +228,11 @@ printf '%s\n' '{"action":"allow"}'
 "#,
     );
 
-    let executor = ExecExecutor::new(cfg_for(script, HookMode::Exec, 5_000));
+    // 30s budget (was 5s) — macOS CI runners measured at 5-8s subprocess
+    // startup for a fresh `/bin/sh` exec under load. Local runs finish
+    // in ~130ms; the budget here is for CI-flake resilience, not real
+    // workload. Real-deployment hook timeouts are operator-configured.
+    let executor = ExecExecutor::new(cfg_for(script, HookMode::Exec, 30_000));
     let r = executor
         .fire(HookEvent::PostStore, json!({}))
         .await

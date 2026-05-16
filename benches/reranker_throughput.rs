@@ -62,6 +62,11 @@ fn make_memory(i: usize) -> Memory {
         last_accessed_at: None,
         expires_at: None,
         metadata: serde_json::json!({}),
+        // v0.7.0 Task 1/8 — substrate-native reflection depth. Benches
+        // mint depth-0 (caller-equivalent) memories so the reranker
+        // sees the same shape it would in production.
+        reflection_depth: 0,
+        memory_kind: ai_memory::models::MemoryKind::Observation,
     }
 }
 

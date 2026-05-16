@@ -62,6 +62,8 @@ pub fn handle_command(parts: &[&str], conn: &Connection, out: &mut CliOutput<'_>
                 models::MID_TTL_EXTEND_SECS,
                 None,
                 None,
+                false,
+                None,
             ) {
                 Ok((results, _outcome)) => {
                     for (mem, score) in &results {
@@ -89,7 +91,9 @@ pub fn handle_command(parts: &[&str], conn: &Connection, out: &mut CliOutput<'_>
                 let _ = writeln!(out.stderr, "usage: search <query>");
                 return ShellAction::Continue;
             }
-            match db::search(conn, &q, None, None, 20, None, None, None, None, None, None) {
+            match db::search(
+                conn, &q, None, None, 20, None, None, None, None, None, None, false,
+            ) {
                 Ok(results) => {
                     for mem in &results {
                         let _ = writeln!(
@@ -408,5 +412,364 @@ mod tests {
         handle_command(&["delete"], &conn, &mut out);
         let stderr_str = String::from_utf8(stderr).unwrap();
         assert!(stderr_str.contains("usage: delete"));
+    }
+
+    // ----------------------------------------------------------------
+    // L0.7-3 chunk-e2 — coverage uplift to ≥95%.
+    // ----------------------------------------------------------------
+
+    /// Look up a seeded memory id directly so we can drive the
+    /// `get`/`delete` happy paths without guessing UUIDs.
+    fn lookup_seeded_id(env: &TestEnv) -> String {
+        let conn = db::open(&env.db_path).unwrap();
+        let all = db::export_all(&conn).unwrap();
+        all.first()
+            .expect("seed should have inserted one row")
+            .id
+            .clone()
+    }
+
+    #[test]
+    fn shell_recall_emits_result_row_with_score() {
+        // Drives the recall result-printing branch (lines 67-79). The
+        // seed memory's title matches "seed" so we get a hit.
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let action = handle_command(&["recall", "seed"], &conn, &mut out);
+        assert_eq!(action, ShellAction::Continue);
+        let stdout_str = String::from_utf8(stdout).unwrap();
+        assert!(stdout_str.contains("score="), "got: {stdout_str}");
+        // Result count line at the end.
+        assert!(stdout_str.contains("result(s)"));
+    }
+
+    #[test]
+    fn shell_recall_r_alias_works() {
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let action = handle_command(&["r", "seed"], &conn, &mut out);
+        assert_eq!(action, ShellAction::Continue);
+        let stdout_str = String::from_utf8(stdout).unwrap();
+        assert!(stdout_str.contains("result(s)"));
+    }
+
+    #[test]
+    fn shell_search_emits_result_row() {
+        // Drives the search result-printing branch (lines 94-103).
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let action = handle_command(&["search", "seed"], &conn, &mut out);
+        assert_eq!(action, ShellAction::Continue);
+        let stdout_str = String::from_utf8(stdout).unwrap();
+        assert!(stdout_str.contains("p="), "got: {stdout_str}");
+        assert!(stdout_str.contains("result(s)"));
+    }
+
+    #[test]
+    fn shell_search_empty_args_writes_usage() {
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let action = handle_command(&["search"], &conn, &mut out);
+        assert_eq!(action, ShellAction::Continue);
+        let stderr_str = String::from_utf8(stderr).unwrap();
+        assert!(stderr_str.contains("usage: search"));
+    }
+
+    #[test]
+    fn shell_list_emits_result_row() {
+        // Drives the list result-printing branch (lines 114-125).
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let action = handle_command(&["list"], &conn, &mut out);
+        assert_eq!(action, ShellAction::Continue);
+        let stdout_str = String::from_utf8(stdout).unwrap();
+        // Each row carries "ns=" and the trailing count line.
+        assert!(stdout_str.contains("ns="), "got: {stdout_str}");
+        assert!(stdout_str.contains("memory(ies)"));
+    }
+
+    #[test]
+    fn shell_list_namespace_filter() {
+        // Drives the `parts.get(1)` namespace argument path.
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        handle_command(&["list", "shell-ns"], &conn, &mut out);
+        let stdout_str = String::from_utf8(stdout).unwrap();
+        assert!(stdout_str.contains("shell-ns"));
+    }
+
+    #[test]
+    fn shell_list_ls_alias_works() {
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        handle_command(&["ls"], &conn, &mut out);
+        let stdout_str = String::from_utf8(stdout).unwrap();
+        assert!(stdout_str.contains("memory(ies)"));
+    }
+
+    #[test]
+    fn shell_get_returns_memory_details() {
+        // Drives the get(success) JSON-pretty-print branch (lines 143-148).
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let id = lookup_seeded_id(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        handle_command(&["get", &id], &conn, &mut out);
+        let stdout_str = String::from_utf8(stdout).unwrap();
+        // JSON pretty includes the title field literal.
+        assert!(stdout_str.contains("\"title\""), "got: {stdout_str}");
+        assert!(stdout_str.contains("seed"), "got: {stdout_str}");
+    }
+
+    #[test]
+    fn shell_get_not_found_writes_stderr() {
+        // Drives the get(Ok(None)) branch (line 151).
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        // A syntactically-valid id that does not exist.
+        handle_command(
+            &["get", "00000000-0000-0000-0000-000000000000"],
+            &conn,
+            &mut out,
+        );
+        let stderr_str = String::from_utf8(stderr).unwrap();
+        assert!(stderr_str.contains("not found"));
+    }
+
+    #[test]
+    fn shell_stats_runs() {
+        // Drives the stats success branch (lines 159-168).
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let action = handle_command(&["stats"], &conn, &mut out);
+        assert_eq!(action, ShellAction::Continue);
+        let stdout_str = String::from_utf8(stdout).unwrap();
+        assert!(stdout_str.contains("total:"));
+    }
+
+    #[test]
+    fn shell_delete_success() {
+        // Drives the delete(Ok(true)) branch (line 195-197).
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let id = lookup_seeded_id(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        handle_command(&["delete", &id], &conn, &mut out);
+        let stdout_str = String::from_utf8(stdout).unwrap();
+        assert!(stdout_str.contains("deleted"));
+    }
+
+    #[test]
+    fn shell_delete_not_found_writes_stderr() {
+        // Drives the delete(Ok(false)) branch (line 198-200).
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        handle_command(
+            &["delete", "00000000-0000-0000-0000-000000000000"],
+            &conn,
+            &mut out,
+        );
+        let stderr_str = String::from_utf8(stderr).unwrap();
+        assert!(stderr_str.contains("not found"));
+    }
+
+    #[test]
+    fn shell_delete_invalid_id() {
+        // Drives the validate_id-error branch on delete (line 191-192).
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        handle_command(&["delete", "bad\x07id"], &conn, &mut out);
+        let stderr_str = String::from_utf8(stderr).unwrap();
+        assert!(stderr_str.contains("invalid id"));
+    }
+
+    #[test]
+    fn shell_help_h_alias() {
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        handle_command(&["h"], &conn, &mut out);
+        let stdout_str = String::from_utf8(stdout).unwrap();
+        assert!(stdout_str.contains("recall"));
+    }
+
+    #[test]
+    fn shell_namespaces_ns_alias() {
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        handle_command(&["ns"], &conn, &mut out);
+        let stdout_str = String::from_utf8(stdout).unwrap();
+        assert!(stdout_str.contains("shell-ns"));
+    }
+
+    /// Pipe-driven stdin redirect for unit-testing `run()`. Writes
+    /// `lines` to a pipe, dup2s the pipe over fd 0 for the duration
+    /// of `f`, then restores the original stdin. Unix-only (the
+    /// playbook explicitly forbids modifying the CLI surface, so we
+    /// stretch the test harness instead).
+    #[cfg(unix)]
+    fn with_stdin_lines<R>(lines: &str, f: impl FnOnce() -> R) -> R {
+        use std::os::unix::io::AsRawFd;
+        use std::sync::Mutex;
+        static STDIN_LOCK: Mutex<()> = Mutex::new(());
+        let _g = STDIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Build a pipe; write the lines into the write end then close it
+        // so the read end yields EOF after the buffered content is drained.
+        let mut fds: [libc::c_int; 2] = [0; 2];
+        unsafe {
+            assert_eq!(libc::pipe(fds.as_mut_ptr()), 0, "pipe()");
+        }
+        let read_fd = fds[0];
+        let write_fd = fds[1];
+        unsafe {
+            let bytes = lines.as_bytes();
+            let written = libc::write(write_fd, bytes.as_ptr().cast(), bytes.len());
+            assert_eq!(written, bytes.len() as isize, "write to pipe");
+            libc::close(write_fd);
+        }
+
+        // Snapshot stdin's current fd and dup2 the read end over fd 0.
+        let stdin = std::io::stdin();
+        let stdin_fd = stdin.as_raw_fd();
+        let saved = unsafe { libc::dup(stdin_fd) };
+        assert!(saved >= 0, "save stdin fd");
+        unsafe {
+            assert_eq!(libc::dup2(read_fd, stdin_fd), stdin_fd, "dup2");
+            libc::close(read_fd);
+        }
+
+        let r = f();
+
+        // Restore stdin.
+        unsafe {
+            libc::dup2(saved, stdin_fd);
+            libc::close(saved);
+        }
+        r
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_run_with_quit_line_returns_cleanly() {
+        // Feeds a single "quit\n" line through stdin, then EOF. The
+        // REPL must call handle_command which returns ShellAction::Quit
+        // and break.
+        let env = TestEnv::fresh();
+        seed_memory(&env.db_path, "shell-run-ns", "seed", "content");
+        let db = env.db_path.clone();
+        let r = with_stdin_lines("quit\n", || run(&db));
+        assert!(r.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_run_with_help_then_quit() {
+        // Two-line input drives both `read_line` (twice) and
+        // handle_command (twice).
+        let env = TestEnv::fresh();
+        seed_memory(&env.db_path, "shell-run-ns", "seed", "content");
+        let db = env.db_path.clone();
+        let r = with_stdin_lines("help\nquit\n", || run(&db));
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn shell_run_with_eof_stdin_returns_cleanly() {
+        // The outer REPL `run()` reads from process stdin. Under
+        // `cargo test`, stdin is connected to `/dev/null` (which yields
+        // EOF on first read) on every host this codebase is tested on
+        // (macOS, Linux CI), so the read_line loop short-circuits to
+        // `Ok(())` without ever blocking.
+        //
+        // This is the only viable unit-test path for `run()`: the
+        // function's I/O contract is hard-wired to `std::io::stdin()`
+        // / `std::io::stdout()` / `std::io::stderr()` and we are not
+        // allowed to refactor it for testability (see playbook §1
+        // "do not modify CLI clap definitions").
+        //
+        // If a future CI introduces a stdin that does not yield EOF
+        // (e.g. an interactive harness) this test will hang. The fix
+        // is to gate it behind `#[cfg(target_family = "unix")]` and
+        // pipe `/dev/null` to stdin explicitly via `nix::dup2`.
+        let env = TestEnv::fresh();
+        // Seed first so db::open finds an existing schema.
+        seed_memory(&env.db_path, "shell-run-ns", "seed", "content");
+        // We can't capture stdout/stderr from `println!`/`eprint!` here,
+        // and `run()` blocks if stdin doesn't EOF. Under cargo test,
+        // stdin is /dev/null which yields EOF immediately. If this
+        // test hangs in CI, mark it with `#[ignore]` and exercise the
+        // REPL via an integration test that spawns the binary.
+        let r = run(&env.db_path);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn shell_delete_aliases() {
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let id = lookup_seeded_id(&env);
+        // `del` alias.
+        {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+            handle_command(&["del", &id], &conn, &mut out);
+            assert!(String::from_utf8(stdout).unwrap().contains("deleted"));
+        }
+        // Re-seed for the second alias.
+        seed_memory(&env.db_path, "shell-ns", "seed2", "seed-content-2");
+        let conn2 = db::open(&env.db_path).unwrap();
+        let id2 = {
+            let all = db::export_all(&conn2).unwrap();
+            all.iter().find(|m| m.title == "seed2").unwrap().id.clone()
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        handle_command(&["rm", &id2], &conn2, &mut out);
+        assert!(String::from_utf8(stdout).unwrap().contains("deleted"));
     }
 }

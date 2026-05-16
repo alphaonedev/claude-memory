@@ -37,7 +37,8 @@
 
 #![cfg(feature = "sal")]
 
-use ai_memory::models::{Memory, Tier};
+use ai_memory::models::ConfidenceSource;
+use ai_memory::models::{AgentRegistration, Memory, MemoryLink, Tier};
 use ai_memory::store::{CallerContext, Capabilities, Filter, MemoryStore, StoreError, UpdatePatch};
 
 // ---------------------------------------------------------------------------
@@ -65,6 +66,16 @@ fn make_memory(namespace: &str, title: &str, content: &str) -> Memory {
         last_accessed_at: None,
         expires_at: None,
         metadata: serde_json::json!({"agent_id": "ai:contract-test"}),
+        reflection_depth: 0,
+        memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 
@@ -370,6 +381,273 @@ where
     );
 }
 
+// ---------------------------------------------------------------------------
+// 11. links CRUD round-trip — F6 Gap 2/3 (v0.7.0).
+//
+// Both adapters MUST: insert a link, surface it via `list_links`, treat
+// duplicate inserts as idempotent (no error, no extra row), and accept
+// the signed-link path through `link_signed`. Coverage spans the full
+// SAL link surface so a future divergence between SqliteStore and
+// PostgresStore catches here.
+// ---------------------------------------------------------------------------
+
+fn make_link(source_id: &str, target_id: &str, relation: &str) -> MemoryLink {
+    MemoryLink {
+        source_id: source_id.to_string(),
+        target_id: target_id.to_string(),
+        // v0.7.0 fix campaign R1-M4 — typed relation closed-set.
+        relation: ai_memory::models::MemoryLinkRelation::from_str(relation)
+            .expect("test fixture relation must be one of the closed-set variants"),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        signature: None,
+        observed_by: None,
+        valid_from: None,
+        valid_until: None,
+    }
+}
+
+async fn contract_links_crud_roundtrip(store: &dyn MemoryStore) {
+    let ns = unique_namespace("c11-links");
+    // Seed two memories that the link will point at.
+    let mem_a = make_memory(&ns, "link-source", "the source of the link");
+    let mem_b = make_memory(&ns, "link-target", "the target of the link");
+    let id_a = store.store(&ctx(), &mem_a).await.expect("store a");
+    let id_b = store.store(&ctx(), &mem_b).await.expect("store b");
+
+    // 1. Insert: unsigned write through the trait's `link()`.
+    let link = make_link(&id_a, &id_b, "related_to");
+    store.link(&ctx(), &link).await.expect("link write");
+
+    // 2. Surface via `list_links` — namespace filter narrows to source's
+    //    namespace.
+    let listed = store
+        .list_links(Some(&ns))
+        .await
+        .expect("list_links scoped");
+    let matches: Vec<&MemoryLink> = listed
+        .iter()
+        .filter(|l| {
+            l.source_id == id_a
+                && l.target_id == id_b
+                && l.relation == ai_memory::models::MemoryLinkRelation::RelatedTo
+        })
+        .collect();
+    assert_eq!(matches.len(), 1, "exactly one matching link expected");
+
+    // 3. Duplicate insert is idempotent — no error, no extra row.
+    store.link(&ctx(), &link).await.expect("link write 2");
+    let listed_again = store
+        .list_links(Some(&ns))
+        .await
+        .expect("list_links scoped 2");
+    let matches_again: Vec<&MemoryLink> = listed_again
+        .iter()
+        .filter(|l| {
+            l.source_id == id_a
+                && l.target_id == id_b
+                && l.relation == ai_memory::models::MemoryLinkRelation::RelatedTo
+        })
+        .collect();
+    assert_eq!(
+        matches_again.len(),
+        1,
+        "duplicate link writes must collapse on the unique key"
+    );
+
+    // 4. Different relation between the same pair is a distinct row.
+    let link_alt = make_link(&id_a, &id_b, "supersedes");
+    store.link(&ctx(), &link_alt).await.expect("link alt write");
+    let listed_three = store
+        .list_links(Some(&ns))
+        .await
+        .expect("list_links scoped 3");
+    let edge_count = listed_three
+        .iter()
+        .filter(|l| l.source_id == id_a && l.target_id == id_b)
+        .count();
+    assert_eq!(
+        edge_count, 2,
+        "(src, tgt, relation) triple is the unique key — distinct relations live as distinct rows"
+    );
+
+    // 5. `list_links(None)` returns at least our two links (may include
+    //    rows from concurrent tests using other namespaces — assert
+    //    superset rather than equality).
+    let unscoped = store.list_links(None).await.expect("list_links unscoped");
+    assert!(
+        unscoped.len() >= 2,
+        "unscoped list_links must include namespace-scoped rows"
+    );
+}
+
+async fn contract_link_signed_roundtrip(store: &dyn MemoryStore) {
+    let ns = unique_namespace("c12-link-signed");
+    let mem_a = make_memory(&ns, "signed-source", "signed source body");
+    let mem_b = make_memory(&ns, "signed-target", "signed target body");
+    let id_a = store.store(&ctx(), &mem_a).await.expect("store a");
+    let id_b = store.store(&ctx(), &mem_b).await.expect("store b");
+
+    // Generate a fresh keypair (in-memory only — no disk write).
+    let kp = ai_memory::identity::keypair::generate("ai:contract-test").expect("generate keypair");
+    assert!(
+        kp.can_sign(),
+        "freshly generated keypair must hold a private key"
+    );
+
+    // Signed write — `attest_level` must be `"self_signed"`.
+    let link = make_link(&id_a, &id_b, "related_to");
+    let level = store
+        .link_signed(&ctx(), &link, Some(&kp))
+        .await
+        .expect("link_signed");
+    assert_eq!(
+        level, "self_signed",
+        "keypair-bearing link must report self_signed"
+    );
+
+    // Read back through `list_links` and verify the signature is
+    // 64 bytes (Ed25519) and `observed_by` matches the signer.
+    let listed = store
+        .list_links(Some(&ns))
+        .await
+        .expect("list_links signed");
+    let row = listed
+        .iter()
+        .find(|l| l.source_id == id_a && l.target_id == id_b)
+        .expect("signed link row");
+    assert_eq!(
+        row.signature.as_ref().map(Vec::len),
+        Some(64),
+        "Ed25519 signature is 64 bytes"
+    );
+    assert_eq!(
+        row.observed_by.as_deref(),
+        Some("ai:contract-test"),
+        "observed_by must echo the signing agent_id"
+    );
+
+    // Unsigned write (no keypair) — `attest_level = "unsigned"`,
+    // `signature = NULL`, `observed_by = NULL`.
+    let mem_c = make_memory(&ns, "unsigned-source", "unsigned source body");
+    let id_c = store.store(&ctx(), &mem_c).await.expect("store c");
+    let unsigned_link = make_link(&id_c, &id_b, "related_to");
+    let level_unsigned = store
+        .link_signed(&ctx(), &unsigned_link, None)
+        .await
+        .expect("link_signed unsigned");
+    assert_eq!(
+        level_unsigned, "unsigned",
+        "no-keypair path must surface unsigned"
+    );
+    let listed_unsigned = store
+        .list_links(Some(&ns))
+        .await
+        .expect("list_links unsigned");
+    let unsigned_row = listed_unsigned
+        .iter()
+        .find(|l| l.source_id == id_c && l.target_id == id_b)
+        .expect("unsigned link row");
+    assert!(
+        unsigned_row.signature.is_none(),
+        "unsigned write must leave signature NULL"
+    );
+    assert!(
+        unsigned_row.observed_by.is_none(),
+        "unsigned write must leave observed_by NULL"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 13. agent registration round-trip — F6 Gap 4 (v0.7.0).
+//
+// Both adapters MUST persist agent registrations in a re-readable form,
+// preserve `registered_at` across re-registration (caller-observable
+// provenance), and refresh `last_seen_at` on every re-register call.
+// ---------------------------------------------------------------------------
+
+async fn contract_agent_registration_roundtrip(store: &dyn MemoryStore) {
+    let agent_id = format!("ai:contract-{}", uuid::Uuid::new_v4());
+    let agent = AgentRegistration {
+        agent_id: agent_id.clone(),
+        agent_type: "test-runner".to_string(),
+        capabilities: vec!["read".to_string(), "write".to_string()],
+        registered_at: String::new(), // adapter populates
+        last_seen_at: String::new(),
+    };
+
+    // First registration must succeed.
+    store
+        .register_agent(&ctx(), &agent)
+        .await
+        .expect("register first time");
+
+    // Re-registration is idempotent (no error). The persisted record's
+    // `registered_at` must NOT regress on re-register; both adapters
+    // store the agent as a memory in `_agents`, so we read it back via
+    // `list` to assert.
+    let f = Filter {
+        namespace: Some("_agents".to_string()),
+        limit: 100,
+        ..Filter::default()
+    };
+    let all = store.list(&ctx(), &f).await.expect("list _agents");
+    let row_first = all
+        .iter()
+        .find(|m| m.title == format!("agent:{agent_id}"))
+        .expect("registered agent row")
+        .clone();
+    let registered_at_first = row_first
+        .metadata
+        .get("registered_at")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .expect("registered_at stamp");
+
+    // Sleep just enough to advance the wall clock past the timestamp's
+    // resolution before re-registering.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    store
+        .register_agent(&ctx(), &agent)
+        .await
+        .expect("register second time");
+
+    let all_after = store.list(&ctx(), &f).await.expect("list _agents 2");
+    let row_second = all_after
+        .iter()
+        .find(|m| m.title == format!("agent:{agent_id}"))
+        .expect("registered agent row 2")
+        .clone();
+    let registered_at_second = row_second
+        .metadata
+        .get("registered_at")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .expect("registered_at stamp 2");
+    assert_eq!(
+        registered_at_first, registered_at_second,
+        "registered_at must be preserved across re-registration"
+    );
+
+    let last_seen_first = row_first
+        .metadata
+        .get("last_seen_at")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .expect("last_seen_at stamp");
+    let last_seen_second = row_second
+        .metadata
+        .get("last_seen_at")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .expect("last_seen_at stamp 2");
+    assert!(
+        last_seen_second >= last_seen_first,
+        "last_seen_at must monotonically advance on re-registration \
+         (first={last_seen_first}, second={last_seen_second})"
+    );
+}
+
 // ===========================================================================
 // SQLite adapter wrappers — runs every contract above against a fresh
 // temp-DB SqliteStore. Matches the per-test-fresh-store pattern from
@@ -378,11 +656,12 @@ where
 
 mod sqlite_contract {
     use super::{
-        contract_capabilities_floor, contract_concurrent_writes_no_data_loss,
-        contract_delete_by_id, contract_double_delete_is_not_found,
-        contract_fts_search_finds_inserted, contract_insert_and_get, contract_list_respects_limit,
-        contract_namespace_filter_isolates, contract_update_preserves_id,
-        contract_verify_returns_report,
+        contract_agent_registration_roundtrip, contract_capabilities_floor,
+        contract_concurrent_writes_no_data_loss, contract_delete_by_id,
+        contract_double_delete_is_not_found, contract_fts_search_finds_inserted,
+        contract_insert_and_get, contract_link_signed_roundtrip, contract_links_crud_roundtrip,
+        contract_list_respects_limit, contract_namespace_filter_isolates,
+        contract_update_preserves_id, contract_verify_returns_report,
     };
     use ai_memory::store::sqlite::SqliteStore;
 
@@ -467,6 +746,24 @@ mod sqlite_contract {
         // the spawned tasks.
         drop(tmp);
     }
+
+    #[tokio::test]
+    async fn links_crud_roundtrip() {
+        let fx = fresh_store();
+        contract_links_crud_roundtrip(&fx.store).await;
+    }
+
+    #[tokio::test]
+    async fn link_signed_roundtrip() {
+        let fx = fresh_store();
+        contract_link_signed_roundtrip(&fx.store).await;
+    }
+
+    #[tokio::test]
+    async fn agent_registration_roundtrip() {
+        let fx = fresh_store();
+        contract_agent_registration_roundtrip(&fx.store).await;
+    }
 }
 
 // ===========================================================================
@@ -486,11 +783,12 @@ mod sqlite_contract {
 #[cfg(feature = "sal-postgres")]
 mod postgres_contract {
     use super::{
-        contract_capabilities_floor, contract_concurrent_writes_no_data_loss,
-        contract_delete_by_id, contract_double_delete_is_not_found,
-        contract_fts_search_finds_inserted, contract_insert_and_get, contract_list_respects_limit,
-        contract_namespace_filter_isolates, contract_update_preserves_id,
-        contract_verify_returns_report,
+        contract_agent_registration_roundtrip, contract_capabilities_floor,
+        contract_concurrent_writes_no_data_loss, contract_delete_by_id,
+        contract_double_delete_is_not_found, contract_fts_search_finds_inserted,
+        contract_insert_and_get, contract_link_signed_roundtrip, contract_links_crud_roundtrip,
+        contract_list_respects_limit, contract_namespace_filter_isolates,
+        contract_update_preserves_id, contract_verify_returns_report,
     };
     use ai_memory::store::postgres::PostgresStore;
 
@@ -600,5 +898,32 @@ mod postgres_contract {
         };
         let store = std::sync::Arc::new(store);
         contract_concurrent_writes_no_data_loss(store).await;
+    }
+
+    #[tokio::test]
+    async fn links_crud_roundtrip() {
+        let Some(store) = fresh_store().await else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        contract_links_crud_roundtrip(&store).await;
+    }
+
+    #[tokio::test]
+    async fn link_signed_roundtrip() {
+        let Some(store) = fresh_store().await else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        contract_link_signed_roundtrip(&store).await;
+    }
+
+    #[tokio::test]
+    async fn agent_registration_roundtrip() {
+        let Some(store) = fresh_store().await else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        contract_agent_registration_roundtrip(&store).await;
     }
 }

@@ -1,6 +1,8 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+// clippy allows (test scaffolding): pedantic lints with no behavioral impact.
+#![allow(clippy::doc_markdown)]
 //! v0.7.0 #628 H2 (review blocker H5) — `invalidate_link` must not
 //! silently corrupt a previously self-signed link.
 //!
@@ -25,6 +27,7 @@
 //!    row AND the matching `memory_link.invalidated` row to prove
 //!    intent.
 
+use ai_memory::models::ConfidenceSource;
 use std::sync::Mutex;
 
 use ai_memory::db;
@@ -93,6 +96,16 @@ fn seed(conn: &rusqlite::Connection, title: &str) -> String {
         last_accessed_at: None,
         expires_at: None,
         metadata: models::default_metadata(),
+        reflection_depth: 0,
+        memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &mem).expect("db::insert")
 }

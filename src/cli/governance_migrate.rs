@@ -568,4 +568,207 @@ decision = "deny"
         assert!(after.contains("[governance]"));
         assert_eq!(after.matches("[[permissions.rules]]").count(), 3);
     }
+
+    // ---------- E1 coverage uplift -----------------------------------
+    // Target: `run` (production entry point, lines 280-341), `toml_str`
+    // escape characters (lines 231-235), `merge_in_place` no-trailing-
+    // newline branch (line 264), `run_with_paths` create_dir_all branch
+    // (lines 387-390).
+
+    /// Build a `MigrateToPermissionsArgs` with the given config_in /
+    /// config_out + dry_run combo.
+    fn args(in_path: &Path, out_path: Option<&Path>, dry_run: bool) -> MigrateToPermissionsArgs {
+        MigrateToPermissionsArgs {
+            dry_run,
+            config_out: out_path.map(std::path::Path::to_path_buf),
+            config_in: Some(in_path.to_path_buf()),
+        }
+    }
+
+    #[test]
+    fn run_dry_run_default_writes_stdout() {
+        // Hits run() lines 280-300: dry-run path (no config-out + no
+        // --dry-run flag).
+        let mut env = TestEnv::fresh();
+        let cfg_path = env.db_path.parent().unwrap().join("cfg.toml");
+        std::fs::write(&cfg_path, sample_legacy_config()).unwrap();
+        let a = args(&cfg_path, None, false);
+        {
+            let mut o = env.output();
+            run(a, &mut o).unwrap();
+        }
+        let s = env.stdout_str();
+        assert_eq!(s.matches("[[permissions.rules]]").count(), 3);
+    }
+
+    #[test]
+    fn run_dry_run_explicit_flag_writes_stdout() {
+        // Same path but with explicit --dry-run + a config-out that's
+        // ignored.
+        let mut env = TestEnv::fresh();
+        let cfg_path = env.db_path.parent().unwrap().join("in.toml");
+        let out_path = env.db_path.parent().unwrap().join("should-not-exist.toml");
+        std::fs::write(&cfg_path, sample_legacy_config()).unwrap();
+        let a = args(&cfg_path, Some(&out_path), true);
+        {
+            let mut o = env.output();
+            run(a, &mut o).unwrap();
+        }
+        assert!(env.stdout_str().contains("[[permissions.rules]]"));
+        // out_path must NOT have been written.
+        assert!(!out_path.exists(), "dry-run must not touch config-out");
+    }
+
+    #[test]
+    fn run_writes_standalone_file_when_paths_differ() {
+        // Hits run() lines 306-326 — write-path standalone branch.
+        let mut env = TestEnv::fresh();
+        let in_path = env.db_path.parent().unwrap().join("in.toml");
+        let out_path = env.db_path.parent().unwrap().join("out.toml");
+        std::fs::write(&in_path, sample_legacy_config()).unwrap();
+        let a = args(&in_path, Some(&out_path), false);
+        {
+            let mut o = env.output();
+            run(a, &mut o).unwrap();
+        }
+        let written = std::fs::read_to_string(&out_path).unwrap();
+        assert_eq!(written.matches("[[permissions.rules]]").count(), 3);
+        // stdout reports the write.
+        assert!(env.stdout_str().contains("wrote 3 migrated rule(s)"));
+    }
+
+    #[test]
+    fn run_in_place_merge_when_paths_match() {
+        // Hits run() lines 308-317 — in-place merge branch.
+        let mut env = TestEnv::fresh();
+        let cfg_path = env.db_path.parent().unwrap().join("cfg.toml");
+        let mut original = String::from(sample_legacy_config());
+        original.push_str("\n[scoring]\nlegacy_scoring = false\n");
+        std::fs::write(&cfg_path, &original).unwrap();
+        let a = args(&cfg_path, Some(&cfg_path), false);
+        {
+            let mut o = env.output();
+            run(a, &mut o).unwrap();
+        }
+        let after = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(after.contains("[scoring]"));
+        assert!(after.contains("[governance]"));
+        assert!(after.contains("--- migrated from [governance] (v0.7.0 K11) ---"));
+        assert!(env.stdout_str().contains("merged 3 migrated rule(s)"));
+    }
+
+    #[test]
+    fn run_writes_warning_when_no_governance_block() {
+        // Hits run() lines 329-338 — the "nothing migrated" branch
+        // when the legacy file has no [governance] section. We pair it
+        // with --config-out so the write path runs (vs dry-run, which
+        // returns before the warning branch).
+        let mut env = TestEnv::fresh();
+        let in_path = env.db_path.parent().unwrap().join("empty.toml");
+        let out_path = env.db_path.parent().unwrap().join("empty-out.toml");
+        std::fs::write(&in_path, "tier = \"semantic\"\n").unwrap();
+        let a = args(&in_path, Some(&out_path), false);
+        {
+            let mut o = env.output();
+            run(a, &mut o).unwrap();
+        }
+        assert!(env.stderr_str().contains("no [governance] policies"));
+        // stdout reports 0 rules migrated.
+        assert!(env.stdout_str().contains("wrote 0 migrated rule(s)"));
+    }
+
+    #[test]
+    fn run_errors_when_input_missing() {
+        // Hits run() lines 286-287 — read_to_string failure.
+        let mut env = TestEnv::fresh();
+        let missing = env.db_path.parent().unwrap().join("no-such-file.toml");
+        let a = args(&missing, None, false);
+        let mut o = env.output();
+        let res = run(a, &mut o);
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("read config"));
+    }
+
+    #[test]
+    fn toml_str_escapes_special_chars() {
+        // Drives the escape-vec arms of `toml_str` (lines 231-235) —
+        // backslash, double-quote, newline, carriage-return, tab.
+        let policy = LegacyGovernancePolicy {
+            scope: Some("ns\"with\\quote".into()),
+            action: Some("op\nnewline".into()),
+            role: Some("role\ttab".into()),
+            agent_id: None,
+            decision: Some("dec\rret".into()),
+        };
+        let block = PermissionsBlock {
+            rules: vec![translate_policy(&policy)],
+        };
+        let rendered = render_permissions_block(&block);
+        // The backslash and double-quote both escape to `\\` / `\"`.
+        // The newline / CR / tab escape to the literal `\n` / `\r` /
+        // `\t` two-char sequences inside the TOML basic string.
+        assert!(
+            rendered.contains(r#"\""#),
+            "missing escaped quote: {rendered}"
+        );
+        assert!(
+            rendered.contains(r"\\"),
+            "missing escaped backslash: {rendered}"
+        );
+        assert!(
+            rendered.contains(r"\n"),
+            "missing escaped newline: {rendered}"
+        );
+        assert!(rendered.contains(r"\r"), "missing escaped CR: {rendered}");
+        assert!(rendered.contains(r"\t"), "missing escaped tab: {rendered}");
+    }
+
+    #[test]
+    fn merge_in_place_adds_newline_when_input_lacks_trailing_newline() {
+        // Hits the `if !out.ends_with('\n')` true arm of `merge_in_place`
+        // (line 264).
+        let existing = "tier = \"semantic\""; // no trailing newline
+        let rendered = "[[permissions.rules]]\n";
+        let merged = merge_in_place(existing, rendered);
+        assert!(merged.starts_with("tier = \"semantic\"\n"));
+    }
+
+    #[test]
+    fn run_with_paths_creates_missing_parent_directory() {
+        // Hits run_with_paths() lines 387-390: out_path parent doesn't
+        // exist → create_dir_all branch.
+        let mut env = TestEnv::fresh();
+        let in_path = env.db_path.parent().unwrap().join("in.toml");
+        let nested = env
+            .db_path
+            .parent()
+            .unwrap()
+            .join("nested/dir/permissions.toml");
+        std::fs::write(&in_path, sample_legacy_config()).unwrap();
+        assert!(!nested.parent().unwrap().exists());
+        let _ = {
+            let mut o = env.output();
+            run_with_paths(&in_path, Some(&nested), false, &mut o).unwrap()
+        };
+        let written = std::fs::read_to_string(&nested).unwrap();
+        assert_eq!(written.matches("[[permissions.rules]]").count(), 3);
+    }
+
+    #[test]
+    fn parse_invalid_toml_returns_err() {
+        // Drives parse_legacy_governance's context-wrapped error arm.
+        let raw = "this = not\nvalid_toml = at all = \"oops\"";
+        let res = parse_legacy_governance(raw);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn parse_with_governance_but_bogus_inner_returns_err() {
+        // [governance] section is present but `policy` is the wrong
+        // shape — try_into fails.
+        let raw = "[governance]\npolicy = 42\n";
+        let res = parse_legacy_governance(raw);
+        assert!(res.is_err());
+    }
 }

@@ -20,7 +20,7 @@
 //!   shared secret; the plaintext is returned **once** at
 //!   subscription time and never leaves the DB after.
 
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow};
@@ -604,6 +604,41 @@ pub fn dispatch_event_with_details(
                     hmac_sha256_hex(&key_hash, &canonical)
                 }),
             };
+            // R3-S1.HMAC (v0.7.0 fix campaign 2026-05-13): refuse to
+            // dispatch an unsigned payload. New subscriptions cannot
+            // register without a per-sub or server-wide secret (see
+            // `crate::handlers::subscribe` + MCP `handle_subscribe`), so
+            // hitting this branch means a legacy row was persisted before
+            // the gate landed, or the server-wide override was removed
+            // after registration. Either way, fail loudly to the DLQ
+            // instead of dispatching the body in clear so a receiver
+            // never has to guess whether a body is authentic.
+            if signature.is_none() {
+                tracing::error!(
+                    "subscription {sub_id} dispatch refused: no per-sub secret AND no \
+                     server-wide [hooks.subscription] hmac_secret configured. \
+                     Configure one of the two and replay via memory_subscription_replay. \
+                     (v0.7.0 fix campaign R3-S1.HMAC, 2026-05-13)"
+                );
+                let outcome = DeliveryOutcome::unsigned_refused();
+                let ok = outcome.success;
+                record_dispatch(&db_path, &sub_id, ok);
+                update_event_status(&db_path, &correlation_id, ok);
+                if let Err(e) = record_dlq(
+                    &db_path,
+                    &sub_id,
+                    &correlation_id,
+                    &event_owned,
+                    &body,
+                    outcome.attempts,
+                    &outcome.last_error,
+                    &outcome.first_failed_at,
+                    &outcome.last_failed_at,
+                ) {
+                    tracing::warn!("subscription DLQ write failed: {e}");
+                }
+                return;
+            }
             let outcome =
                 deliver_with_retry(&url, &body, &ts, signature.as_deref(), &correlation_id);
             let ok = outcome.success;
@@ -715,6 +750,26 @@ struct DeliveryOutcome {
     last_error: String,
     first_failed_at: String,
     last_failed_at: String,
+}
+
+impl DeliveryOutcome {
+    /// R3-S1.HMAC (v0.7.0 fix campaign 2026-05-13): synthesise a failure
+    /// outcome for a dispatch refused at the gate because neither a
+    /// per-sub secret nor a server-wide override was configured. The
+    /// DLQ row carries an explicit `last_error` so operators can tell a
+    /// missing-secret refusal apart from a transport failure.
+    fn unsigned_refused() -> Self {
+        let now = chrono::Utc::now().to_rfc3339();
+        Self {
+            success: false,
+            attempts: 0,
+            last_error: "dispatch refused: no per-subscription secret AND no server-wide \
+                 [hooks.subscription] hmac_secret configured (v0.7.0 R3-S1.HMAC)"
+                .to_string(),
+            first_failed_at: now.clone(),
+            last_failed_at: now,
+        }
+    }
 }
 
 /// v0.7.0 K6 — dispatcher driver. Issues the initial POST plus up to
@@ -955,7 +1010,7 @@ fn validate_url_dns_with(url: &str, allow_loopback: bool) -> Result<()> {
     };
     for addr in &addrs {
         let ip = addr.ip();
-        if is_private(ip) && !ip.is_loopback() {
+        if is_private(ip) && !is_loopback_normalized(ip) {
             return Err(anyhow!(
                 "host resolves to private/link-local IP {ip}: {url}"
             ));
@@ -964,7 +1019,7 @@ fn validate_url_dns_with(url: &str, allow_loopback: bool) -> Result<()> {
         // Default-OFF; operators with `[subscriptions]
         // allow_loopback_webhooks = true` accept loopback-resolving
         // hostnames.
-        if ip.is_loopback() && !allow_loopback {
+        if is_loopback_normalized(ip) && !allow_loopback {
             return Err(anyhow!(
                 "host resolves to loopback IP {ip}: {url} — rejected by default \
                  (SSRF guard); set `[subscriptions] allow_loopback_webhooks = true` \
@@ -1021,7 +1076,7 @@ fn validate_url_with(url: &str, allow_loopback: bool) -> Result<()> {
     // 5432, the hooks daemon, etc.).
     let is_loopback_hostname = matches!(host, "localhost" | "localhost.localdomain" | "");
     let parsed_ip = IpAddr::from_str(host).ok();
-    let is_loopback_ip = parsed_ip.is_some_and(|ip| ip.is_loopback());
+    let is_loopback_ip = parsed_ip.is_some_and(is_loopback_normalized);
     let is_loopback = is_loopback_hostname || is_loopback_ip;
     if is_loopback && !allow_loopback {
         return Err(anyhow!(
@@ -1034,7 +1089,7 @@ fn validate_url_with(url: &str, allow_loopback: bool) -> Result<()> {
         // Accept http only to parsed-loopback IPs; everything else
         // requires https.
         if let Some(ip) = parsed_ip {
-            if !ip.is_loopback() {
+            if !is_loopback_normalized(ip) {
                 return Err(anyhow!(
                     "webhook URL must be https for non-loopback host: {url}"
                 ));
@@ -1052,7 +1107,7 @@ fn validate_url_with(url: &str, allow_loopback: bool) -> Result<()> {
     // up reverse proxies or allow explicitly in config.
     if let Some(ip) = parsed_ip
         && is_private(ip)
-        && !ip.is_loopback()
+        && !is_loopback_normalized(ip)
     {
         return Err(anyhow!(
             "webhook URL targets private / link-local address: {url}"
@@ -1061,8 +1116,42 @@ fn validate_url_with(url: &str, allow_loopback: bool) -> Result<()> {
     Ok(())
 }
 
-fn is_private(ip: IpAddr) -> bool {
+// SSRF fix (#628 H3 follow-up): canonicalize IPv6 addresses that wrap an
+// IPv4 address (4-mapped `::ffff:a.b.c.d`, deprecated 4-compatible
+// `::a.b.c.d`, and the well-known NAT64 prefix `64:ff9b::/96`) into their
+// IPv4 form before applying SSRF checks. Without this, `Ipv6Addr::is_loopback()`
+// and the v6 branch of `is_private` silently miss `::ffff:127.0.0.1`,
+// `::ffff:10.0.0.1`, `::ffff:169.254.1.1`, and similar bypasses.
+fn normalize_ip(ip: IpAddr) -> IpAddr {
     match ip {
+        IpAddr::V6(v6) => {
+            let canonical = v6.to_canonical();
+            if matches!(canonical, IpAddr::V4(_)) {
+                return canonical;
+            }
+            let segs = v6.segments();
+            if segs[0] == 0x0064
+                && segs[1] == 0xff9b
+                && segs[2] == 0
+                && segs[3] == 0
+                && segs[4] == 0
+                && segs[5] == 0
+            {
+                let v4_bits = (u32::from(segs[6]) << 16) | u32::from(segs[7]);
+                return IpAddr::V4(Ipv4Addr::from(v4_bits));
+            }
+            IpAddr::V6(v6)
+        }
+        v4 @ IpAddr::V4(_) => v4,
+    }
+}
+
+fn is_loopback_normalized(ip: IpAddr) -> bool {
+    normalize_ip(ip).is_loopback()
+}
+
+fn is_private(ip: IpAddr) -> bool {
+    match normalize_ip(ip) {
         IpAddr::V4(v4) => {
             // SSRF fix (W11): include `is_unspecified` (0.0.0.0). On most
             // OSes the kernel routes 0.0.0.0 to a local listener, so an
@@ -1363,6 +1452,48 @@ mod tests {
         assert!(validate_url("ftp://example.com").is_err());
         assert!(validate_url("notaurl").is_err());
         assert!(validate_url("").is_err());
+    }
+
+    #[test]
+    fn rejects_v4_mapped_ipv6_loopback() {
+        // SSRF (#628 H3 follow-up): `Ipv6Addr::is_loopback()` returns false
+        // for `::ffff:127.0.0.1`, but on dual-stack hosts the kernel routes
+        // these to the v4 loopback service. `normalize_ip` collapses to v4
+        // before checking.
+        // Use `validate_url_with(.., false)` (loopback-disabled) to
+        // avoid racing with parallel tests that flip the process-wide
+        // allow_loopback flag (matches the `loopback_blocked_by_default`
+        // test pattern below).
+        assert!(validate_url_with("https://[::ffff:127.0.0.1]/hook", false).is_err());
+        assert!(validate_url_with("https://[::ffff:7f00:1]/hook", false).is_err());
+    }
+
+    #[test]
+    fn rejects_v4_mapped_ipv6_private() {
+        assert!(validate_url_with("https://[::ffff:10.0.0.1]/hook", false).is_err());
+        assert!(validate_url_with("https://[::ffff:192.168.1.1]/hook", false).is_err());
+        assert!(validate_url_with("https://[::ffff:172.16.0.1]/hook", false).is_err());
+        assert!(validate_url_with("https://[::ffff:169.254.1.1]/hook", false).is_err());
+        assert!(validate_url_with("https://[::ffff:0.0.0.0]/hook", false).is_err());
+    }
+
+    #[test]
+    fn rejects_nat64_well_known_prefix() {
+        // 64:ff9b::/96 — RFC 6052 well-known NAT64 prefix. On hosts with
+        // NAT64 deployed, packets to `64:ff9b::a.b.c.d` are translated to
+        // `a.b.c.d` and forwarded; an SSRF gadget if `a.b.c.d` is loopback
+        // or private.
+        assert!(validate_url_with("https://[64:ff9b::127.0.0.1]/hook", false).is_err());
+        assert!(validate_url_with("https://[64:ff9b::10.0.0.1]/hook", false).is_err());
+        assert!(validate_url_with("https://[64:ff9b::169.254.1.1]/hook", false).is_err());
+    }
+
+    #[test]
+    fn allows_v4_mapped_loopback_when_opted_in() {
+        // Symmetric with the existing loopback opt-in: when allow_loopback
+        // is true, `::ffff:127.0.0.1` should be accepted (same as plain
+        // `127.0.0.1`).
+        assert!(validate_url_with("http://[::ffff:127.0.0.1]/hook", true).is_ok());
     }
 
     #[test]
@@ -2579,7 +2710,9 @@ mod tests {
                 &NewSubscription {
                     url: &url,
                     events: "approval_requested",
-                    secret: None,
+                    // R3-S1.HMAC (2026-05-13): dispatch refuses
+                    // unsigned bodies; supply a per-sub secret.
+                    secret: Some("test-sub-secret"),
                     namespace_filter: None,
                     agent_filter: None,
                     created_by: None,
@@ -2792,7 +2925,9 @@ mod tests {
                 &NewSubscription {
                     url: &url,
                     events: "*",
-                    secret: None,
+                    // R3-S1.HMAC (2026-05-13): dispatch refuses
+                    // unsigned bodies; supply a per-sub secret.
+                    secret: Some("test-sub-secret"),
                     namespace_filter: None,
                     agent_filter: None,
                     created_by: None,
@@ -2867,7 +3002,9 @@ mod tests {
                 &NewSubscription {
                     url: &url,
                     events: "*",
-                    secret: None,
+                    // R3-S1.HMAC (2026-05-13): dispatch refuses
+                    // unsigned bodies; supply a per-sub secret.
+                    secret: Some("test-sub-secret"),
                     namespace_filter: None,
                     agent_filter: None,
                     created_by: None,

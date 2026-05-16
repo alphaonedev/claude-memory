@@ -1,0 +1,186 @@
+# v0.7.0 L0.7-1 baseline tier classification
+# Source: .local-runs/L0.7-1-baseline/summary.txt @ HEAD bfe9650
+# Tier targets per L0.7 playbook (memory 17148c61):
+#   A=98% (pure logic), B=95% (MCP/HTTP/CLI), C=92% (substrate),
+#   D=85% (LLM-bound, with documented rationale), E=90% (wire/IO), F=excluded
+
+[tier_?]
+target_line_coverage_pct = 90
+modules = [
+    "approvals.rs",  # current  99.1% (above target)
+    "autonomy.rs",  # current  96.8% (above target)
+    "bench.rs",  # current  97.1% (above target)
+    "color.rs",  # current 100.0% (above target)
+    "quotas.rs",  # current  76.9%, gap  13.1%
+]
+
+[tier_A]
+target_line_coverage_pct = 98
+modules = [
+    "audit.rs",  # current  96.2%, gap   1.8%
+    "errors.rs",  # current  96.2%, gap   1.8%
+    "hooks/events.rs",  # current 100.0% (above target)
+    "hooks/timeouts.rs",  # current 100.0% (above target)
+    "identity/keypair.rs",  # current  92.8%, gap   5.2%
+    "identity/mod.rs",  # current  96.9%, gap   1.1%
+    "identity/replay.rs",  # current  98.9% (above target)
+    "identity/sign.rs",  # current 100.0% (above target)
+    "identity/verify.rs",  # current  99.4% (above target)
+    "log_paths.rs",  # current  88.3%, gap   9.7%
+    "logging.rs",  # current  96.2%, gap   1.8%
+    "metrics.rs",  # current  93.8%, gap   4.2%
+    "models/link.rs",  # current  89.1%, gap   8.9%
+    "models/memory.rs",  # current  80.8%, gap  17.2%
+    "models/mod.rs",  # current 100.0% (above target)
+    "models/namespace.rs",  # current 100.0% (above target)
+    "profile.rs",  # current  99.6% (above target)
+    "replication.rs",  # current  98.8% (above target)
+    "signed_events.rs",  # current  97.6%, gap   0.4%
+    "sizes.rs",  # current 100.0% (above target)
+    "storage/migrations.rs",  # current  86.6%, gap  11.4%
+    "toon.rs",  # current  99.1% (above target)
+    "transcripts/mod.rs",  # current 100.0% (above target)
+    # transcripts/replay.rs RE-ELEVATED Tier F -> Tier A 2026-05-13
+    # (L2-4 landed the reflection-union walker + handler integration,
+    # restoring the file to a real module with substrate-level unit tests
+    # and integration acceptance tests. Original placeholder reclassification
+    # (1a2a5a8a) is now resolved per its §RESOLUTION step 3 — "when L2-4
+    # implements the reflection-union logic, that task's acceptance criteria
+    # add tests and reclassify replay.rs back to Tier A").
+    "transcripts/replay.rs",  # L2-4 acceptance — new module with substrate tests
+    "transcripts/storage.rs",  # current  94.7%, gap   3.3%
+    "validate.rs",  # current  97.0%, gap   1.0%
+]
+
+[tier_B]
+target_line_coverage_pct = 95
+modules = [
+    "cli/agents.rs",  # current  87.8%, gap   7.2%
+    "cli/archive.rs",  # current  90.8%, gap   4.2%
+    "cli/audit.rs",  # current  97.6% (above target)
+    "cli/backup.rs",  # current  95.7% (above target)
+    "cli/boot.rs",  # current  93.8%, gap   1.2%
+    "cli/consolidate.rs",  # current  93.3%, gap   1.7%
+    "cli/crud.rs",  # current  97.2% (above target)
+    "cli/curator.rs",  # current  93.3%, gap   1.7%
+    "cli/doctor.rs",  # current  92.0%, gap   3.0%
+    "cli/forget.rs",  # current  99.5% (above target)
+    "cli/gc.rs",  # current  98.9% (above target)
+    "cli/governance.rs",  # current  97.6% (above target)
+    "cli/governance_migrate.rs",  # current  80.2%, gap  14.8%
+    "cli/helpers.rs",  # current  91.1%, gap   3.9%
+    "cli/identity.rs",  # current  92.9%, gap   2.1%
+    "cli/install.rs",  # current  93.1%, gap   1.9%
+    "cli/io.rs",  # current  94.5%, gap   0.5%
+    "cli/io_writer.rs",  # current 100.0% (above target)
+    "cli/link.rs",  # current  96.8% (above target)
+    "cli/logs.rs",  # current  97.5% (above target)
+    "cli/promote.rs",  # current  95.1% (above target)
+    "cli/recall.rs",  # current  79.4%, gap  15.6%
+    "cli/schema_init.rs",  # current  56.9%, gap  38.1%
+    "cli/search.rs",  # current  97.1% (above target)
+    "cli/serve_banner.rs",  # current 100.0% (above target)
+    "cli/shell.rs",  # current  81.7%, gap  13.3%
+    "cli/store.rs",  # current  98.7% (above target)
+    "cli/sync.rs",  # current  97.8% (above target)
+    "cli/test_utils.rs",  # current 100.0% (above target)
+    "cli/update.rs",  # current  90.4%, gap   4.6%
+    "cli/wrap.rs",  # current  98.0% (above target)
+    "config.rs",  # current  94.4%, gap   0.6%
+    "handlers/federation_receive.rs",  # current  42.5%, gap  52.5%
+    "handlers/hook_subscribers.rs",  # current  46.7%, gap  48.3%
+    "handlers/http.rs",  # current  43.7%, gap  51.3%
+    "mcp/mod.rs",  # current  96.0% (above target)
+    "mcp/registry.rs",  # current  96.5% (above target)
+    "mcp/tools/agent.rs",  # current  91.3%, gap   3.7%
+    "mcp/tools/archive.rs",  # current  78.2%, gap  16.8%
+    "mcp/tools/capabilities.rs",  # current  88.4%, gap   6.6%
+    "mcp/tools/check_duplicate.rs",  # current  48.1%, gap  46.9%
+    "mcp/tools/consolidate.rs",  # current  62.8%, gap  32.2%
+    "mcp/tools/delete.rs",  # current  75.9%, gap  19.1%
+    "mcp/tools/entity_get_by_alias.rs",  # current  71.0%, gap  24.0%
+    "mcp/tools/entity_register.rs",  # current  92.5%, gap   2.5%
+    "mcp/tools/find_paths.rs",  # current  79.5%, gap  15.5%
+    "mcp/tools/forget.rs",  # current  88.5%, gap   6.5%
+    "mcp/tools/get.rs",  # current  87.5%, gap   7.5%
+    "mcp/tools/get_taxonomy.rs",  # current  96.9% (above target)
+    "mcp/tools/kg_invalidate.rs",  # current  94.0%, gap   1.0%
+    "mcp/tools/kg_query.rs",  # current  97.4% (above target)
+    "mcp/tools/kg_timeline.rs",  # current  94.4%, gap   0.6%
+    "mcp/tools/link.rs",  # current  80.2%, gap  14.8%
+    "mcp/tools/list.rs",  # current  95.7% (above target)
+    "mcp/tools/load_family.rs",  # current  84.9%, gap  10.1%
+    "mcp/tools/namespace.rs",  # current  80.1%, gap  14.9%
+    "mcp/tools/notify.rs",  # current  96.0% (above target)
+    "mcp/tools/pending.rs",  # current  82.5%, gap  12.5%
+    "mcp/tools/promote.rs",  # current  81.8%, gap  13.2%
+    "mcp/tools/quota_status.rs",  # current  86.7%, gap   8.3%
+    "mcp/tools/recall.rs",  # current  63.0%, gap  32.0%
+    "mcp/tools/reflect.rs",  # current   0.0%, gap  95.0%
+    "mcp/tools/replay.rs",  # current  80.4%, gap  14.6%
+    "mcp/tools/search.rs",  # current  96.8% (above target)
+    "mcp/tools/session_start.rs",  # current  74.5%, gap  20.5%
+    "mcp/tools/store.rs",  # current  54.8%, gap  40.2%
+    "mcp/tools/subscribe.rs",  # current  84.9%, gap  10.1%
+    "mcp/tools/update.rs",  # current  74.8%, gap  20.2%
+    "mcp/tools/verify.rs",  # current  90.9%, gap   4.1%
+    "migrate.rs",  # current  89.2%, gap   5.8%
+    "mine.rs",  # current  99.3% (above target)
+]
+
+[tier_C]
+target_line_coverage_pct = 92
+modules = [
+    "curator/candidates.rs",  # current  97.3% (above target)
+    "curator/mod.rs",  # current  96.7% (above target)
+    "curator/persist.rs",  # current  95.4% (above target)
+    "federation/mod.rs",  # current  97.2% (above target)
+    "federation/peer.rs",  # current  95.0% (above target)
+    "federation/quorum.rs",  # current 100.0% (above target)
+    "federation/receive.rs",  # current  73.9%, gap  18.1%
+    "federation/sync.rs",  # current  82.9%, gap   9.1%
+    "governance/mod.rs",  # current  92.0% (above target)
+    "hooks/chain.rs",  # current  84.7%, gap   7.3%
+    "hooks/config.rs",  # current  91.8%, gap   0.2%
+    "hooks/decision.rs",  # current  92.8% (above target)
+    "hooks/executor.rs",  # current  78.0%, gap  14.0%
+    "hooks/recall.rs",  # current  69.9%, gap  22.1%
+    "reranker.rs",  # current  84.5%, gap   7.5%
+    "storage/mod.rs",  # current  94.4% (above target)
+    "storage/reflect.rs",  # current  90.2%, gap   1.8%
+    "subscriptions.rs",  # current  97.1% (above target)
+]
+
+[tier_D]
+target_line_coverage_pct = 85
+modules = [
+    "llm.rs",  # current  93.1% (above target)
+    "mcp/tools/auto_tag.rs",  # current  18.4%, gap  66.6%
+    "mcp/tools/detect_contradiction.rs",  # current  22.6%, gap  62.4%
+    "mcp/tools/expand_query.rs",  # current  60.0%, gap  25.0%
+]
+
+[tier_E]
+target_line_coverage_pct = 90
+modules = [
+    "daemon_runtime.rs",  # current  67.7% — EXCEPTION (listener / sync-net; see coverage/policy.md)
+    "embeddings.rs",  # current  90.8% (above target — L0.7-6)
+    "handlers/mod.rs",  # current  97.6% (above target)
+    "handlers/transport.rs",  # current  95.6% (above target — L0.7-6)
+    "harness.rs",  # current  99.2% (above target)
+    "hnsw.rs",  # current  96.0% (above target)
+    "storage/connection.rs",  # current  96.7% (above target — L0.7-6)
+    "store/mod.rs",  # current  93.3% (above target — L0.7-6)
+    "store/postgres.rs",  # current  13.9% — EXCEPTION (live Postgres; see coverage/policy.md)
+    "store/sqlite.rs",  # current  97.5% (above target — L0.7-6)
+    "tls.rs",  # current  92.9% (above target)
+]
+
+[tier_F]
+target_line_coverage_pct = 0
+modules = [
+    "federation/reflection_bookkeeping.rs",  # current   0.0% (above target)
+    "lib.rs",  # current  95.2% (above target)
+    "main.rs",  # current  94.3% (above target)
+]
+

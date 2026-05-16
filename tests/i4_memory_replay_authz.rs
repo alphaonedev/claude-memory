@@ -1,6 +1,8 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+// clippy allows (test scaffolding): pedantic lints with no behavioral impact.
+#![allow(clippy::doc_markdown)]
 //! v0.7.0 #628 I4 (review blocker H6) — `memory_replay` authorisation.
 //!
 //! Before this fix `memory_replay` fetched and decompressed transcript
@@ -38,10 +40,12 @@ static RULES_GUARD: Mutex<()> = Mutex::new(());
 /// can be satisfied without dragging in the full store pipeline.
 fn insert_memory(conn: &rusqlite::Connection, id: &str, namespace: &str) {
     let now = chrono::Utc::now().to_rfc3339();
+    // v0.7.0 fix campaign R1-M2 — substrate CHECK trigger enforces
+    // tier ∈ {short, mid, long}.
     conn.execute(
         "INSERT INTO memories (
             id, tier, namespace, title, content, created_at, updated_at
-         ) VALUES (?1, 'short_term', ?2, ?3, 'body', ?4, ?4)",
+         ) VALUES (?1, 'short', ?2, ?3, 'body', ?4, ?4)",
         params![id, namespace, format!("title-{id}"), now],
     )
     .unwrap();

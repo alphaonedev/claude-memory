@@ -2,10 +2,14 @@
 
 > **Status:** SHIPPING with v0.7.0 — Track E task E2
 > **Owner:** release captain on duty when F5 (release-tag) lands
-> **Script:** [`scripts/post-ship-converge.sh`](../../scripts/post-ship-converge.sh)
-> **Sister task:** E1 (`scripts/t0-orchestrate.sh`) — same 6-question
-> set, run against the in-tree cargo build instead of the published
-> artefact.
+> **Binary:** [`tools/post-ship-converge/`](../../tools/post-ship-converge/) → `ai-memory-post-ship-converge`
+> **Sister task:** E1 (`tools/t0-orchestrate/` → `ai-memory-t0`) — same
+> 6-question set, run against the in-tree cargo build instead of the
+> published artefact.
+>
+> **Cross-platform port (#625):** the original `scripts/post-ship-converge.sh`
+> was reimplemented as a standalone Rust binary so the dry-run envelope
+> guard runs on every CI platform (Windows runners ship no bash).
 
 ---
 
@@ -48,10 +52,22 @@ been observed to lag on regional CDNs for ~30 min.
 
 ## How to run
 
+First build the verifier binary (one-time, then reuse for any
+version):
+
+```bash
+cargo build --manifest-path tools/post-ship-converge/Cargo.toml --release
+```
+
+Examples below show the `cargo run` form; once built, you can also
+invoke `tools/post-ship-converge/target/release/ai-memory-post-ship-converge`
+directly.
+
 ### Cargo install (default — most cross-platform)
 
 ```bash
-scripts/post-ship-converge.sh --version 0.7.0
+cargo run --manifest-path tools/post-ship-converge/Cargo.toml --release -- \
+    --version 0.7.0
 ```
 
 This runs `cargo install ai-memory --version 0.7.0` into a temp dir
@@ -60,7 +76,8 @@ and replays the 6 canonical questions against the resulting binary.
 ### Brew tap
 
 ```bash
-scripts/post-ship-converge.sh --version 0.7.0 --method brew
+cargo run --manifest-path tools/post-ship-converge/Cargo.toml --release -- \
+    --version 0.7.0 --method brew
 ```
 
 Use this on macOS hosts to verify the bottle. Requires the
@@ -69,7 +86,8 @@ Use this on macOS hosts to verify the bottle. Requires the
 ### GitHub release binary
 
 ```bash
-scripts/post-ship-converge.sh --version 0.7.0 --method binary
+cargo run --manifest-path tools/post-ship-converge/Cargo.toml --release -- \
+    --version 0.7.0 --method binary
 ```
 
 Pulls the prebuilt artefact from
@@ -80,12 +98,13 @@ specifically (the Homebrew bottle is downstream of this artefact).
 ### Dry-run (CI smoke)
 
 ```bash
-scripts/post-ship-converge.sh --version 0.7.0 --dry-run
+cargo run --manifest-path tools/post-ship-converge/Cargo.toml --release -- \
+    --version 0.7.0 --dry-run
 ```
 
 Skips the install + spawn steps and emits the JSON envelope with
 `dry_run: true`. Used by `tests/e2_post_ship_dry_run.rs` to keep
-the script output structure under CI guard.
+the binary's output structure under CI guard.
 
 ---
 
@@ -118,7 +137,7 @@ reconstruct what the published binary said vs. what was expected.
 
 ## The 6 canonical questions
 
-(Sister to E1's `scripts/t0-orchestrate.sh`. Drift between the two
+(Sister to E1's `tools/t0-orchestrate/` binary. Drift between the two
 question sets is itself a bug — both must change in lockstep.)
 
 | ID | Profile | Field | Kind | Source cell |

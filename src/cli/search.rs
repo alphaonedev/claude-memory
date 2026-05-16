@@ -36,6 +36,11 @@ pub struct SearchArgs {
     /// visibility filtering.
     #[arg(long)]
     pub as_agent: Option<String>,
+    /// v0.7.0 WT-1-E — when set, search returns archived sources
+    /// alongside their atoms. Default `false` excludes sources whose
+    /// atoms surface in their place (atom-preference search).
+    #[arg(long)]
+    pub include_archived: bool,
 }
 
 /// `search` handler. Mirrors `cmd_search` from `main.rs` verbatim except
@@ -69,6 +74,7 @@ pub fn run(
         args.tags.as_deref(),
         args.agent_id.as_deref(),
         args.as_agent.as_deref(),
+        args.include_archived,
     )?;
     if json_out {
         writeln!(
@@ -117,6 +123,7 @@ mod tests {
             tags: None,
             agent_id: None,
             as_agent: None,
+            include_archived: false,
         }
     }
 

@@ -742,6 +742,45 @@ follow-up — they are NOT drift in the doc surface, just transport-level
 surface-area differences captured here so operators don't re-derive
 them.
 
+## v0.7.0 net-new endpoints
+
+The eight HTTP routes added since v0.6.4. All accept the same auth +
+agent-identity headers documented above. Wire-shape source of truth is
+`src/handlers/http.rs` (the route file enumeration in `src/lib.rs`).
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/v1/quota/status` | K8 quota status — read the calling agent's daily quota row. Auto-inserts a default row on first call. See [`docs/k8-quotas.md`](k8-quotas.md). |
+| `GET`  | `/api/v1/approvals/stream` | K10 SSE approval channel — server-sent events for pending-approval state changes. HMAC body signature required on the partnered POST decide path. See [`docs/k10-sse-approvals.md`](k10-sse-approvals.md). |
+| `POST` | `/api/v1/auto_tag` | LLM auto-tag endpoint (v0.7 smart-tier surface). |
+| `POST` | `/api/v1/expand_query` | HTTP parity for the MCP `memory_expand_query` tool. |
+| `POST` | `/api/v1/kg/find_paths` | KG chain-walk over HTTP; Cypher on AGE / recursive-CTE on SQLite. |
+| `POST` | `/api/v1/links/verify` | Ed25519 link verification surface — wire shape: `{verified, attest_level, signature_present, observed_by, source_id, target_id, relation, findings}`. |
+| `POST` | `/api/v1/memory_load_family` | HTTP parity for the always-on `memory_load_family` MCP loader. |
+| `GET`  | `/api/v1/tools/list` | MCP `tools/list` mirror for harness ops — returns the live tool surface for the daemon's profile (71 at `full`, 7 at `core`). |
+
+> Total HTTP surface at v0.7.0: ~42 routes on the sqlite-backed daemon
+> (the v0.6.4 baseline of 34 + the 8 net-new above). Authoritative
+> count via the `.route(...)` grep in `src/lib.rs`.
+
+### v0.7.0 net-new MCP tools
+
+The 28 MCP tools added since v0.6.4 are documented inline in
+`src/mcp/registry.rs` and enumerated in
+[`docs/MIGRATION_v0.7.md` §"New MCP tools"](MIGRATION_v0.7.md#new-mcp-tools).
+Highlights for HTTP-equivalent surfaces:
+
+| MCP tool | HTTP equivalent | Notes |
+|---|---|---|
+| `memory_load_family` | `POST /api/v1/memory_load_family` | Always-on. |
+| `memory_quota_status` | `POST /api/v1/quota/status` | K8. |
+| `memory_find_paths` | `POST /api/v1/kg/find_paths` | J7. |
+| `memory_verify` | `POST /api/v1/links/verify` | H4. |
+| `memory_pending_list` / `memory_pending_approve` / `memory_pending_reject` | `GET /api/v1/pending`, `POST /api/v1/pending/{id}/approve`, `POST /api/v1/pending/{id}/reject` | K10. The MCP tool names changed from the v0.7-alpha drafts (`memory_approval_pending` / `memory_approval_decide`); the HTTP paths are stable. |
+
+For the canonical 71-tool full inventory: `grep -oE '"memory_[a-z_]+"'
+src/mcp/registry.rs | sort -u`.
+
 ## See also
 
 - `docs/USER_GUIDE.md` — MCP tool reference (parallel to this HTTP doc).

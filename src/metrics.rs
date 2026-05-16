@@ -52,6 +52,31 @@ pub struct Metrics {
     /// attempts failed (peer likely truly down); `id_drift` = retry
     /// observed the same peer id-drift as attempt 1.
     pub federation_fanout_retry_total: IntCounterVec,
+    /// H9 (v0.7.0 round-2): count of quorum writes that the leader
+    /// returned `200` for (W met) but where at least one configured
+    /// peer did NOT ack inside the deadline. Operators alert on
+    /// non-zero rate to detect mesh-divergence drift early — before a
+    /// follow-up catchup sync surfaces the gap.
+    pub federation_partial_quorum_total: IntCounter,
+    /// Cluster-A COR-3 (v0.7.0): count of memory rows whose Form 4
+    /// fact-provenance JSON columns (`citations`, `source_span`,
+    /// `confidence_signals`, or pre-Form-4 `metadata`) failed to parse
+    /// and were silently defaulted by `row_to_memory`. Non-zero
+    /// indicates schema drift, writer-side corruption, or a
+    /// migration that left malformed JSON in the column. Labeled by
+    /// column name (`citations` | `source_span` | `confidence_signals`
+    /// | `metadata`).
+    pub corrupt_provenance_rows_total: IntCounterVec,
+    /// v0.7-polish SEC-15 / COR-11 (issue #780): count of
+    /// `post_reflect.auto_export` detached worker invocations whose
+    /// outcome was a panic or a returned `Err`. Non-zero means an
+    /// operator-opted-in namespace had a reflection that did NOT
+    /// land on the filesystem and the failure would otherwise be
+    /// silent (the worker thread is detached; the reflection itself
+    /// already committed). The capabilities-v3 surface mirrors this
+    /// counter so operator dashboards can alert without scraping
+    /// `/metrics` directly.
+    pub auto_export_spawn_failed_total: IntCounter,
 }
 
 /// Lazily-built process-global metrics handle.
@@ -69,8 +94,32 @@ impl Metrics {
         Self::try_new().expect("prometheus registry init failed")
     }
 
+    // COVERAGE: every `?` Err-arm closure on `IntCounterVec::new(...)?`,
+    //           `IntCounter::new(...)?`, `IntGauge::new(...)?`,
+    //           `HistogramVec::new(...)?`, and
+    //           `registry.register(Box::new(...))?` in this function
+    //           is structurally unreachable in production:
+    //
+    //           1. The function constructs a fresh `Registry::new()`
+    //              per call (no shared state). Registration can only
+    //              fail on duplicate metric name; with a fresh registry
+    //              and unique names per counter, collision is
+    //              impossible.
+    //           2. Every metric name + label name passed to the
+    //              constructors is a compile-time string literal that
+    //              already matches the Prometheus regex
+    //              `[a-zA-Z_:][a-zA-Z0-9_:]*` — construction cannot
+    //              fail on name-validation grounds.
+    //
+    //           The Err-arms exist because the prometheus crate's
+    //           API returns `Result<...>` from these constructors, and
+    //           the `?` propagation is the idiomatic Rust pattern.
+    //           Triggering coverage would require a synthetic
+    //           registry-injection layer that doesn't exist (and
+    //           shouldn't — try_new owns its registry by design).
+    //           Documented per L0.7 playbook §3c.
     #[allow(clippy::too_many_lines)]
-    fn try_new() -> prometheus::Result<Self> {
+    pub(crate) fn try_new() -> prometheus::Result<Self> {
         let registry = Registry::new();
 
         let store_total = IntCounterVec::new(
@@ -195,6 +244,39 @@ impl Metrics {
         )?;
         registry.register(Box::new(federation_fanout_retry_total.clone()))?;
 
+        // H9 (v0.7.0 round-2) — partial-quorum observability.
+        let federation_partial_quorum_total = IntCounter::new(
+            "ai_memory_federation_partial_quorum_total",
+            "Quorum writes that succeeded (W met) but where at least one \
+             configured peer did not ack inside the deadline.",
+        )?;
+        registry.register(Box::new(federation_partial_quorum_total.clone()))?;
+
+        // Cluster-A COR-3 (v0.7.0) — corrupt-provenance observability.
+        let corrupt_provenance_rows_total = IntCounterVec::new(
+            prometheus::Opts::new(
+                "ai_memory_corrupt_provenance_rows_total",
+                "Memory rows whose Form 4 fact-provenance JSON columns \
+                 failed to deserialise and were silently defaulted. \
+                 Non-zero indicates schema drift, writer-side corruption, \
+                 or a migration leaving malformed JSON.",
+            ),
+            &["column"],
+        )?;
+        registry.register(Box::new(corrupt_provenance_rows_total.clone()))?;
+
+        // v0.7-polish SEC-15 / COR-11 (issue #780) — auto-export
+        // detached-worker failure observability.
+        let auto_export_spawn_failed_total = IntCounter::new(
+            "ai_memory_auto_export_spawn_failed_total",
+            "Detached post_reflect.auto_export worker invocations whose \
+             outcome was a panic or returned Err. Non-zero means at \
+             least one reflection was committed to the DB but its \
+             on-disk markdown/json artefact did not land — operators \
+             use this to alert on otherwise-silent disk-write failures.",
+        )?;
+        registry.register(Box::new(auto_export_spawn_failed_total.clone()))?;
+
         Ok(Self {
             registry,
             store_total,
@@ -212,8 +294,44 @@ impl Metrics {
             curator_cycle_duration_seconds,
             federation_fanout_dropped_total,
             federation_fanout_retry_total,
+            federation_partial_quorum_total,
+            corrupt_provenance_rows_total,
+            auto_export_spawn_failed_total,
         })
     }
+}
+
+/// Cluster-A COR-3 (v0.7.0) — record a single corrupt-provenance row
+/// observation. `column` is the offending JSON column name
+/// (`citations` / `source_span` / `confidence_signals` / `metadata`).
+/// Pairs with a `tracing::warn!` at the call site so operators see the
+/// row id + parse error.
+pub fn record_corrupt_provenance(column: &str) {
+    registry()
+        .corrupt_provenance_rows_total
+        .with_label_values(&[column])
+        .inc();
+}
+
+/// v0.7-polish SEC-15 / COR-11 (issue #780) — record one detached
+/// `auto_export` worker failure (panic OR returned `Err`). Pairs with
+/// a `tracing::warn!` at the call site so operators see the
+/// reflection id + failure mode. The counter is also mirrored onto the
+/// capabilities-v3 `hooks.auto_export_spawn_failed_total` field so
+/// dashboards that consume `memory_capabilities` (vs `/metrics`) see
+/// the same signal.
+pub fn record_auto_export_spawn_failed() {
+    registry().auto_export_spawn_failed_total.inc();
+}
+
+/// v0.7-polish SEC-15 / COR-11 (issue #780) — read the current value
+/// of the auto-export spawn-failure counter. Used by the
+/// capabilities-v3 builder to mirror the metric onto the
+/// `hooks.auto_export_spawn_failed_total` field without scraping
+/// `/metrics`.
+#[must_use]
+pub fn auto_export_spawn_failed_count() -> u64 {
+    registry().auto_export_spawn_failed_total.get()
 }
 
 /// Render the current registry state to the Prometheus text exposition
@@ -456,5 +574,104 @@ mod tests {
             .observe(0.42);
         let text = render();
         assert!(text.contains("ai_memory_curator_cycle_duration_seconds"));
+    }
+
+    // -----------------------------------------------------------------
+    // L0.7-2 Tier A — exercise try_new() directly so the metric-builder
+    // happy paths (lines 88-210) get covered. The process singleton
+    // registry() builds once on first access; we need a second pass for
+    // line coverage of every metric registration in the try_new body.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn try_new_builds_a_fresh_metrics_handle() {
+        // Build a second instance on top of an independent registry —
+        // hits every metric-construction line in `try_new` even when
+        // another test has already initialised the process-wide
+        // singleton. Each call uses a fresh Registry, so register()
+        // cannot collide.
+        let m = super::Metrics::try_new().expect("fresh registry must succeed");
+        // The handle must expose every metric family — touch each to
+        // exercise the assignment side of the struct literal.
+        m.store_total.with_label_values(&["short", "ok"]).inc();
+        m.recall_total.with_label_values(&["hybrid"]).inc();
+        m.recall_latency_seconds
+            .with_label_values(&["hybrid"])
+            .observe(0.001);
+        m.autonomy_hook_total.with_label_values(&["x", "ok"]).inc();
+        m.contradiction_detected_total.inc();
+        m.webhook_dispatched_total.inc();
+        m.webhook_failed_total.inc();
+        m.memories_gauge.set(1);
+        m.hnsw_size_gauge.set(1);
+        m.subscriptions_active_gauge.set(1);
+        m.curator_cycles_total.inc();
+        m.curator_operations_total
+            .with_label_values(&["auto_tag", "ok"])
+            .inc();
+        m.curator_cycle_duration_seconds
+            .with_label_values(&["true"])
+            .observe(1.0);
+        m.federation_fanout_dropped_total
+            .with_label_values(&["panic"])
+            .inc();
+        m.federation_fanout_retry_total
+            .with_label_values(&["ok"])
+            .inc();
+        m.federation_partial_quorum_total.inc();
+        m.auto_export_spawn_failed_total.inc();
+    }
+
+    #[test]
+    fn try_new_can_build_two_isolated_registries() {
+        // Two consecutive try_new() calls succeed because each builds
+        // its own Registry — no name collision.
+        let a = super::Metrics::try_new().expect("first");
+        let b = super::Metrics::try_new().expect("second");
+        // Tickle a counter on each so the family surfaces in gather().
+        a.store_total.with_label_values(&["short", "ok"]).inc();
+        b.store_total.with_label_values(&["short", "ok"]).inc();
+        let mut buf_a = Vec::new();
+        let mut buf_b = Vec::new();
+        let enc = TextEncoder::new();
+        enc.encode(&a.registry.gather(), &mut buf_a).unwrap();
+        enc.encode(&b.registry.gather(), &mut buf_b).unwrap();
+        assert!(String::from_utf8_lossy(&buf_a).contains("ai_memory_store_total"));
+        assert!(String::from_utf8_lossy(&buf_b).contains("ai_memory_store_total"));
+    }
+
+    #[test]
+    fn record_auto_export_spawn_failed_increments_singleton() {
+        // v0.7-polish #780 — record_auto_export_spawn_failed() must
+        // monotonically advance the process-wide counter that the
+        // capabilities-v3 builder mirrors onto
+        // `hooks.auto_export_spawn_failed_total`.
+        let before = auto_export_spawn_failed_count();
+        record_auto_export_spawn_failed();
+        let after = auto_export_spawn_failed_count();
+        assert!(
+            after >= before + 1,
+            "auto_export_spawn_failed_total did not advance \
+             (before={before}, after={after})"
+        );
+        // The render text must mention the metric name so /metrics
+        // scrapers see it.
+        let text = render();
+        assert!(
+            text.contains("ai_memory_auto_export_spawn_failed_total"),
+            "/metrics output missing auto_export counter\n\n{text}"
+        );
+    }
+
+    #[test]
+    fn curator_cycle_completed_no_progress_branch_skips_err_increment() {
+        // operations_attempted=0, auto_tagged=0, contradictions=0,
+        // errors=0 → failed = 0.saturating_sub(0+0) = 0 → the `if
+        // failed > 0 || errors > 0` block does NOT execute. Pins the
+        // negative branch.
+        let before = registry().curator_cycles_total.get();
+        curator_cycle_completed(0, 0, 0, 0);
+        let after = registry().curator_cycles_total.get();
+        assert!(after >= before + 1);
     }
 }

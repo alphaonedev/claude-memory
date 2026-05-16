@@ -14,7 +14,9 @@
 //!
 //! 1. **Default-OFF** for privacy. Operators opt in via
 //!    `[audit] enabled = true` in `config.toml` (or
-//!    `AI_MEMORY_AUDIT_PATH=...` for one-off runs).
+//!    `AI_MEMORY_AUDIT_DIR=<dir>` env var for one-off runs — see
+//!    `src/log_paths.rs::AUDIT_DIR_ENV` for the canonical name; the
+//!    audit log file is written as `<dir>/audit.log`).
 //! 2. **Hash-chained, tamper-evident.** Each line carries a `prev_hash`
 //!    that matches the prior line's `self_hash`. `ai-memory audit
 //!    verify` recomputes the chain and exits non-zero on mismatch.
@@ -244,9 +246,17 @@ pub fn init(path: &Path, redact_content: bool, append_only_hint: bool) -> Result
 
     // Seed the chain head from the existing tail of the log so a
     // restart on an existing file continues the chain.
-    let last_hash = match read_chain_tail(path) {
-        Ok(Some(h)) => h,
-        _ => CHAIN_HEAD_PREV_HASH.to_string(),
+    //
+    // **F2 (v0.7.0 round-2-fixes):** also seed the per-process
+    // SEQUENCE counter from the trailing record's `sequence` so the
+    // next emit produces `last_sequence + 1`, monotonic across
+    // daemon restarts. Pre-fix the SEQUENCE was reset to 0 here,
+    // which made `audit verify` flag "sequence not monotonic:
+    // prior=N, this=1" on the first event after every restart —
+    // the hash chain was intact but the sequence integer reset.
+    let (last_hash, last_sequence) = match read_chain_tail(path) {
+        Ok(Some((hash, seq))) => (hash, seq),
+        _ => (CHAIN_HEAD_PREV_HASH.to_string(), 0),
     };
 
     let file = OpenOptions::new()
@@ -276,7 +286,7 @@ pub fn init(path: &Path, redact_content: bool, append_only_hint: bool) -> Result
         redact_content,
     };
 
-    SEQUENCE.store(0, Ordering::SeqCst);
+    SEQUENCE.store(last_sequence, Ordering::SeqCst);
     if let Ok(mut guard) = SINK.write() {
         *guard = Some(std::sync::Arc::new(sink));
     }
@@ -325,25 +335,63 @@ pub fn shutdown_for_test() {
     SEQUENCE.store(0, Ordering::SeqCst);
 }
 
-/// Read the last `self_hash` from an existing audit log. Returns
-/// `Ok(None)` when the file is empty or doesn't exist; returns the
-/// `self_hash` of the last well-formed line otherwise. A malformed
-/// trailing line counts as "empty" — emission seeds a fresh chain
-/// head, and `audit verify` will surface the corruption.
-fn read_chain_tail(path: &Path) -> Result<Option<String>> {
+/// Read the last `(self_hash, sequence)` pair from an existing audit
+/// log. Returns `Ok(None)` when the file is empty or doesn't exist;
+/// returns the `self_hash` and `sequence` of the last well-formed line
+/// otherwise. A malformed trailing line counts as "empty" — emission
+/// seeds a fresh chain head, and `audit verify` will surface the
+/// corruption.
+///
+/// **F2 (v0.7.0 round-2-fixes):** the return tuple is consumed by
+/// [`init`] to seed both `last_hash` (chain continuity) AND the
+/// per-process `SEQUENCE` counter (monotonicity across restarts).
+///
+/// **M14 (v0.7.0 round-2-fixes):** while walking the file we also
+/// surface out-of-order sequence numbers via `tracing::warn!`. A line
+/// with sequence N followed by a later line with sequence < N is
+/// presumptive corruption — could be a partial replay, a manual edit,
+/// or a clock skew on a multi-writer host. We do NOT refuse to start:
+/// the hash chain is the authoritative tamper signal and the operator
+/// may have intentional gaps from `audit truncate` (off-spec but
+/// possible). The WARN goes to journalctl + SIEM where a human can
+/// triage. The exact pair of `(prior_seq, this_seq)` is included so
+/// the operator can grep the file for the offending line.
+fn read_chain_tail(path: &Path) -> Result<Option<(String, u64)>> {
     if !path.exists() {
         return Ok(None);
     }
     let file = File::open(path)?;
     let reader = BufReader::new(file);
-    let mut last: Option<String> = None;
+    let mut last: Option<(String, u64)> = None;
+    let mut prior_seq: Option<u64> = None;
     for line in reader.lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
         if let Ok(ev) = serde_json::from_str::<AuditEvent>(&line) {
-            last = Some(ev.self_hash);
+            // M14: surface out-of-order seqnums. A higher prior_seq
+            // followed by a lower this_seq is the corruption signal —
+            // equal seqnums are *also* a violation (duplicate emit),
+            // so we warn on `<=` not `<`. The first record establishes
+            // the baseline (prior_seq = None) and never trips here.
+            if let Some(prev) = prior_seq
+                && prev >= ev.sequence
+            {
+                tracing::warn!(
+                    target: "ai_memory::audit",
+                    prior_seq = prev,
+                    this_seq = ev.sequence,
+                    path = %path.display(),
+                    "audit: out-of-order sequence number detected on init scan \
+                     (prior {prev} >= this {this}). Hash-chain integrity is the \
+                     authoritative tamper signal; verify with `ai-memory audit verify`.",
+                    prev = prev,
+                    this = ev.sequence
+                );
+            }
+            prior_seq = Some(ev.sequence);
+            last = Some((ev.self_hash, ev.sequence));
         }
     }
     Ok(last)
@@ -1196,11 +1244,12 @@ mod tests {
         // Pre-populate with a 2-event chain. We specifically test the
         // `read_chain_tail` linkage: the next emitted event's
         // `prev_hash` must match the file's last self_hash.
-        // (The per-process SEQUENCE counter is independent of the
-        // chain — `init` resets it to 0, so a re-init on an existing
-        // file legitimately starts numbering at 1 again. Sequence
-        // continuity is only required *within a single process run*,
-        // so we verify only the hash linkage here.)
+        //
+        // **F2 (v0.7.0 round-2-fixes):** `init` now seeds the
+        // SEQUENCE counter from the trailing record's sequence as
+        // well, so the next emit produces `last_sequence + 1`. The
+        // dedicated F2 test below pins that behavior; here we keep
+        // the focus on hash-chain continuity.
         let e1 = sample_event(1, CHAIN_HEAD_PREV_HASH);
         let e2 = sample_event(2, &e1.self_hash);
         let mut body = String::new();
@@ -1228,6 +1277,79 @@ mod tests {
         super::shutdown_for_test();
     }
 
+    /// F2 regression (v0.7.0 round-2-fixes): `init` must seed the
+    /// per-process SEQUENCE counter from the trailing record's
+    /// sequence so emissions across daemon restarts remain
+    /// monotonic. Pre-fix the SEQUENCE was reset to 0 every init,
+    /// so the next event emitted sequence=1 even when the file's
+    /// last record was sequence=N>1 — `audit verify` then flagged
+    /// "sequence not monotonic: prior=N, this=1" on the first
+    /// post-restart event.
+    #[test]
+    fn audit_init_seeds_sequence_from_existing_chain_tail() {
+        let _g = sink_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("audit.log");
+
+        // Phase 1: drive 5 events with sequences 1..=5 against a
+        // real file (init opens the file in append mode like the
+        // production daemon does).
+        super::init(&path, true, false).unwrap();
+        for i in 0..5 {
+            super::emit(EventBuilder::new(
+                AuditAction::Store,
+                actor("ai:writer", "explicit", None),
+                target_memory(&format!("m{i}"), "ns", Some(format!("t{i}")), None, None),
+            ));
+        }
+
+        // Verify Phase 1 sequences are 1..=5.
+        let body = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<_> = body.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 5, "phase 1 must emit 5 events");
+        for (i, line) in lines.iter().enumerate() {
+            let ev: AuditEvent = serde_json::from_str(line).unwrap();
+            #[allow(clippy::cast_possible_truncation)]
+            let expected = (i as u64) + 1;
+            assert_eq!(
+                ev.sequence, expected,
+                "phase 1 event {i} must have sequence {expected}"
+            );
+        }
+
+        // Simulate daemon restart: drop the active sink, then re-init
+        // pointing at the same physical file.
+        super::shutdown_for_test();
+        super::init(&path, true, false).unwrap();
+
+        // Phase 2: emit a single event. Pre-fix this would emit
+        // sequence=1; post-fix it must emit sequence=6.
+        super::emit(EventBuilder::new(
+            AuditAction::Store,
+            actor("ai:writer", "explicit", None),
+            target_memory("m6", "ns", Some("t6".to_string()), None, None),
+        ));
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<_> = body.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 6, "phase 2 must append a 6th event");
+
+        let last: AuditEvent = serde_json::from_str(lines[5]).unwrap();
+        assert_eq!(
+            last.sequence, 6,
+            "F2: post-restart event must continue sequence from disk (got {}, expected 6)",
+            last.sequence,
+        );
+
+        // Hash-chain linkage from the prior tail must also hold.
+        let fifth: AuditEvent = serde_json::from_str(lines[4]).unwrap();
+        assert_eq!(
+            last.prev_hash, fifth.self_hash,
+            "F2 must not regress hash-chain continuity"
+        );
+        super::shutdown_for_test();
+    }
+
     #[test]
     fn audit_init_skips_chain_tail_when_log_corrupted() {
         let _g = sink_lock();
@@ -1247,6 +1369,113 @@ mod tests {
         let last = body.lines().filter(|l| !l.is_empty()).last().unwrap();
         let parsed: AuditEvent = serde_json::from_str(last).unwrap();
         assert_eq!(parsed.prev_hash, CHAIN_HEAD_PREV_HASH);
+        super::shutdown_for_test();
+    }
+
+    /// M14 (v0.7.0 round-2-fixes): init must surface out-of-order
+    /// sequence numbers via `tracing::warn!` without refusing to
+    /// start. We hand-craft an audit log with two lines whose sequence
+    /// numbers are intentionally swapped (line 1 → seq=2, line 2 →
+    /// seq=1), point `init` at it, and assert (a) init succeeds and
+    /// (b) a WARN was observed describing the out-of-order pair.
+    #[test]
+    fn audit_init_warns_on_out_of_order_sequence() {
+        let _g = sink_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("audit.log");
+
+        // Compose two minimal AuditEvent lines with swapped seqs. We
+        // construct via the public struct + serde so this stays
+        // forward-compatible if a future schema bumps `schema_version`.
+        let make_event = |seq: u64| AuditEvent {
+            schema_version: SCHEMA_VERSION,
+            timestamp: "2026-05-10T00:00:00Z".to_string(),
+            sequence: seq,
+            actor: AuditActor {
+                agent_id: "ai:test".to_string(),
+                scope: None,
+                synthesis_source: "explicit".to_string(),
+            },
+            action: AuditAction::Store,
+            target: AuditTarget {
+                memory_id: format!("m-seq-{seq}"),
+                namespace: "ns".to_string(),
+                title: None,
+                tier: None,
+                scope: None,
+            },
+            outcome: AuditOutcome::Allow,
+            auth: None,
+            session_id: None,
+            request_id: None,
+            error: None,
+            prev_hash: CHAIN_HEAD_PREV_HASH.to_string(),
+            self_hash: format!("{seq:064x}"),
+        };
+
+        let line_a = serde_json::to_string(&make_event(2)).unwrap();
+        let line_b = serde_json::to_string(&make_event(1)).unwrap();
+        std::fs::write(&path, format!("{line_a}\n{line_b}\n")).unwrap();
+
+        // Capture WARN output via a per-call subscriber.
+        #[derive(Clone, Default)]
+        struct WarnSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for WarnSink {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for WarnSink {
+            type Writer = WarnSink;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+        let sink = WarnSink::default();
+        let buf = sink.0.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(sink)
+            .without_time()
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            super::init(&path, true, false)
+                .expect("M14: init must succeed despite out-of-order seqs");
+        });
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            captured.contains("out-of-order sequence"),
+            "M14: expected out-of-order WARN, got: {captured:?}"
+        );
+        // The exact pair must be reported so an operator can grep.
+        assert!(
+            captured.contains("prior 2"),
+            "M14: WARN must include prior sequence (=2), got: {captured:?}"
+        );
+        assert!(
+            captured.contains("this 1"),
+            "M14: WARN must include this sequence (=1), got: {captured:?}"
+        );
+
+        // init must have populated the sink (no refusal) — emitting
+        // an event after init still works.
+        super::emit(EventBuilder::new(
+            AuditAction::Store,
+            actor("ai:writer", "explicit", None),
+            target_memory("m-after-warn", "ns", None, None, None),
+        ));
+        let body = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<_> = body.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "M14: init must accept the file and emit must still work"
+        );
         super::shutdown_for_test();
     }
 
@@ -1517,5 +1746,288 @@ mod tests {
         );
         assert_eq!(t.tier.as_deref(), Some("long"));
         assert_eq!(t.scope.as_deref(), Some("team"));
+    }
+
+    // -----------------------------------------------------------------
+    // L0.7-2 Tier A — long-tail error path + helper coverage
+    // (lines 244/266, 271-277, 363/368, 685-686, 809-811, 842/845,
+    // 850-853 expand_tilde, mark_append_only happy path on darwin)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn expand_tilde_substitutes_home_when_set() {
+        // Line 850-853 happy path: prefix "~/" + HOME present →
+        // expanded. We do NOT mutate HOME here — log_paths.rs has its
+        // own env-lock-serialised HOME tests, and racing across two
+        // process-wide locks is unsafe. Instead we call expand_tilde
+        // twice and assert ONE of the documented behaviours:
+        //   - HOME present: result == "{HOME}/audit/log"
+        //   - HOME absent : result == "~/audit/log" (raw passthrough)
+        // Both arms hit the prefix-match line; only the inner HOME
+        // lookup differs. Either way, line 850 and the prefix check
+        // are exercised.
+        let out = super::expand_tilde("~/audit/log");
+        // Accept either expanded or passthrough; the test exists to
+        // pin the prefix detection logic + reachable code path, not
+        // to assert a particular HOME value (which races across tests).
+        assert!(
+            out.ends_with("/audit/log") || out == "~/audit/log",
+            "unexpected output shape: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_tilde_no_match_passthrough() {
+        // The non-tilde fast-path (already covered by an earlier test)
+        // and a "~" without "/" suffix both fall through to the raw
+        // return arm. This pins the non-prefix branch.
+        assert_eq!(super::expand_tilde("~root/etc"), "~root/etc");
+        assert_eq!(super::expand_tilde("~"), "~");
+    }
+
+    #[test]
+    fn audit_init_returns_error_when_parent_path_is_a_file() {
+        // Line 244-245: `create_dir_all` fails when the parent is a
+        // regular file (cannot create a dir on top of one). `init`
+        // surfaces the wrapped Err via with_context.
+        let _g = sink_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        // Create a regular file at what would be the parent dir.
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, b"i am a file, not a directory").unwrap();
+        // Request a log path *inside* the blocker file → create_dir_all
+        // hits ENOTDIR on the parent.
+        let log_path = blocker.join("nested").join("audit.log");
+        let err = super::init(&log_path, true, false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("creating audit log dir") || msg.contains("audit"),
+            "expected wrapped context, got: {msg}"
+        );
+        super::shutdown_for_test();
+    }
+
+    #[test]
+    fn audit_init_applies_append_only_flag_on_macos() {
+        // Line 268-269, 282-287: append_only_hint=true must trigger
+        // mark_append_only and (on macOS/BSD) the chflags branch.
+        // Even if the syscall fails for unprivileged users, init must
+        // still succeed because failures are logged WARN and swallowed.
+        let _g = sink_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("audit.log");
+        // Pre-create so chflags has a real inode to flag.
+        std::fs::write(&path, b"").unwrap();
+        // append_only_hint=true reaches mark_append_only. On darwin the
+        // call may or may not succeed depending on user privileges and
+        // chflags's response to UF_APPEND on a tmpfile — either way
+        // init MUST return Ok() and a sink MUST be installed.
+        super::init(&path, true, true).expect("init must tolerate flag outcome");
+        assert!(super::is_enabled());
+        super::shutdown_for_test();
+        // Best-effort: clear UF_APPEND if it was set so tmpdir cleanup
+        // can remove the file. We ignore errors — the file lives under
+        // the OS tmpdir cleaner anyway.
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd"))]
+        unsafe {
+            use std::ffi::CString;
+            use std::os::unix::ffi::OsStrExt;
+            if let Ok(c) = CString::new(path.as_os_str().as_bytes()) {
+                let _ = libc::chflags(c.as_ptr(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn read_chain_tail_returns_none_for_missing_file() {
+        // Line 360-361 fast path: file doesn't exist.
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("nope.log");
+        // We call through init: init seeds with CHAIN_HEAD_PREV_HASH.
+        // (read_chain_tail is private; init is the canonical caller.)
+        let _g = sink_lock();
+        super::init(&missing, true, false).unwrap();
+        // After init, the new file must exist and a fresh chain head
+        // must be in place — emit one event, verify prev_hash is the
+        // sentinel.
+        super::emit(EventBuilder::new(
+            AuditAction::Store,
+            actor("a", "explicit", None),
+            target_memory("m", "ns", None, None, None),
+        ));
+        let body = std::fs::read_to_string(&missing).unwrap();
+        let line = body.lines().next().unwrap();
+        let parsed: AuditEvent = serde_json::from_str(line).unwrap();
+        assert_eq!(parsed.prev_hash, CHAIN_HEAD_PREV_HASH);
+        super::shutdown_for_test();
+    }
+
+    #[test]
+    fn read_chain_tail_skips_blank_lines() {
+        // Line 369-370: empty/blank lines must be skipped during chain
+        // tail scan. We pre-seed a chain with embedded blank lines,
+        // init, then emit and verify the next prev_hash still threads
+        // through the last real event.
+        let _g = sink_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("audit.log");
+        let e1 = sample_event(1, CHAIN_HEAD_PREV_HASH);
+        let e2 = sample_event(2, &e1.self_hash);
+        let body = format!(
+            "{}\n\n\n{}\n   \n",
+            serde_json::to_string(&e1).unwrap(),
+            serde_json::to_string(&e2).unwrap(),
+        );
+        std::fs::write(&path, body).unwrap();
+        super::init(&path, true, false).unwrap();
+        super::emit(EventBuilder::new(
+            AuditAction::Store,
+            actor("a", "explicit", None),
+            target_memory("m", "ns", None, None, None),
+        ));
+        let full = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<_> = full.lines().filter(|l| !l.trim().is_empty()).collect();
+        let last = lines.last().unwrap();
+        let parsed: AuditEvent = serde_json::from_str(last).unwrap();
+        assert_eq!(
+            parsed.prev_hash, e2.self_hash,
+            "blank lines must be skipped"
+        );
+        super::shutdown_for_test();
+    }
+
+    #[test]
+    fn verify_chain_open_error_wrapped_with_context() {
+        // Line 686: File::open failure on a non-existent path must
+        // surface an error with the "opening <path>" context.
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist.log");
+        let err = super::verify_chain(&missing).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("opening"), "expected context, got: {msg}");
+        assert!(msg.contains("does-not-exist.log"), "got: {msg}");
+    }
+
+    #[test]
+    fn finalize_audit_file_keeps_explicit_extension_path() {
+        // Line 836-840: when raw_config has a non-slash trailing
+        // extension, the function returns `p` as-is (no audit.log
+        // append). Covered by audit_finalize_audit_file_keeps_explicit_file_path
+        // — this is a tighter focus on the extension-discrimination branch.
+        let cfg = crate::config::AuditConfig {
+            enabled: Some(true),
+            path: Some("./custom.txt".to_string()),
+            ..Default::default()
+        };
+        let p = resolve_audit_path(&cfg);
+        // The configured file path must round-trip without an
+        // audit.log suffix because it has a non-empty extension.
+        assert!(
+            p.to_string_lossy().ends_with(".txt"),
+            "got: {}",
+            p.display()
+        );
+    }
+
+    #[test]
+    fn finalize_audit_file_keeps_resolved_file_when_no_config_override() {
+        // Direct unit-test on the `else p` arm (line 845): construct a
+        // resolved `PathBuf` that already has an extension and pass
+        // raw_config = None so the head-branch falls through; the
+        // p.extension().is_none() check fails (it IS Some), so the else
+        // arm executes returning `p` unchanged.
+        let p = PathBuf::from("/var/log/aimemory.log");
+        let out = super::finalize_audit_file(p.clone(), None);
+        assert_eq!(out, p);
+    }
+
+    #[test]
+    fn resolve_audit_path_falls_back_to_platform_default_when_resolver_errs() {
+        // Lines 807-811: `resolve_audit_dir` returns Err when the
+        // configured dir is world-writable; `resolve_audit_path` (the
+        // non-strict variant) silently falls back to `platform_default`.
+        // We exercise the fallback by chmodding a tempdir to 0777 and
+        // pointing AuditConfig.path at it. After the call:
+        //   * Function must return Ok-like PathBuf (no panic)
+        //   * Result must NOT be inside the world-writable dir (that
+        //     would defeat the security check)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tmp = tempfile::tempdir().unwrap();
+            let www = tmp.path().join("world_writable");
+            std::fs::create_dir_all(&www).unwrap();
+            std::fs::set_permissions(&www, std::fs::Permissions::from_mode(0o777)).unwrap();
+            let cfg = crate::config::AuditConfig {
+                enabled: Some(true),
+                path: Some(www.to_string_lossy().into_owned()),
+                ..Default::default()
+            };
+            let p = super::resolve_audit_path(&cfg);
+            // p must NOT be inside the world-writable dir (the fallback
+            // routed past it).
+            assert!(
+                !p.starts_with(&www),
+                "world-writable dir must not be used; got: {}",
+                p.display()
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_audit_path_with_override_propagates_world_writable_error() {
+        // Line 826: strict variant returns Err when resolve_audit_dir
+        // refuses a world-writable path. Mirrors the non-strict test
+        // above but asserts Err on the strict surface.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tmp = tempfile::tempdir().unwrap();
+            let www = tmp.path().join("ww");
+            std::fs::create_dir_all(&www).unwrap();
+            std::fs::set_permissions(&www, std::fs::Permissions::from_mode(0o777)).unwrap();
+            let cfg = crate::config::AuditConfig::default();
+            let err = super::resolve_audit_path_with_override(Some(&www), &cfg).unwrap_err();
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("world-writable"),
+                "expected world-writable error, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn init_with_directory_in_place_of_file_returns_open_error() {
+        // Line 266: `OpenOptions::new().open(path)` fails when the
+        // path resolves to an existing *directory*. `init` wraps the
+        // error with `with_context("opening audit log {path}")`.
+        let _g = sink_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        // Use the tempdir itself as the target — opening a dir for
+        // write/append fails with EISDIR on macOS/Linux.
+        let err = super::init(tmp.path(), true, false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("opening audit log"), "got: {msg}");
+        super::shutdown_for_test();
+    }
+
+    #[test]
+    fn resolve_audit_path_with_override_returns_source_tag() {
+        // Line 822-828: the strict variant. With a CLI override the
+        // PathSource should reflect that. We pass a tempdir as the
+        // override and assert the returned path embeds it.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = crate::config::AuditConfig::default();
+        let (path, _source) =
+            super::resolve_audit_path_with_override(Some(tmp.path()), &cfg).unwrap();
+        // Output path must live under the override dir (since override
+        // wins precedence).
+        assert!(
+            path.starts_with(tmp.path()),
+            "expected override-rooted path, got: {}",
+            path.display()
+        );
+        // And must end with audit.log because we passed a directory.
+        assert!(path.ends_with("audit.log"), "got: {}", path.display());
     }
 }

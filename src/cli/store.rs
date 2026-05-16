@@ -7,6 +7,7 @@
 use crate::cli::CliOutput;
 use crate::cli::governance::{GovernanceOutcome, enforce as enforce_governance};
 use crate::cli::helpers::auto_namespace;
+use crate::models::ConfidenceSource;
 use crate::{config, db, identity, models, validate};
 use anyhow::Result;
 use chrono::{Duration, Utc};
@@ -148,6 +149,16 @@ pub fn run(
         last_accessed_at: None,
         expires_at,
         metadata,
+        reflection_depth: 0,
+        memory_kind: crate::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
 
     // W5b/C5: governance enforcement routes through `cli::governance::enforce`

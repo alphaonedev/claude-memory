@@ -1,0 +1,51 @@
+-- v0.7.0 V-4 closeout (#698) — add SQL-side cross-row hash chain to
+-- `signed_events`. Per-row Ed25519 signatures (existing) prove
+-- individual event integrity; this migration adds `prev_hash` +
+-- `sequence` so the chain ITSELF is tamper-evident, mirroring the
+-- audit.jsonl property documented at `src/signed_events.rs:34-67`.
+--
+-- The Rust migrate ladder runs the column ALTERs from
+-- `src/storage/migrations.rs::migrate_v34_backfill_chain` because
+-- SQLite has no `ALTER TABLE ADD COLUMN IF NOT EXISTS` and the
+-- backfill UPDATE needs row-by-row access to a moving "previous row"
+-- digest (pure SQL `UPDATE ... SET` cannot reference the prior row's
+-- post-update state). This SQL file holds the supporting index +
+-- documentation; the ALTERs themselves live in Rust so the column-
+-- existence probe makes the migration idempotent.
+--
+-- # Chain shape
+--
+-- For each row in (rowid ASC) order:
+--
+-- - `sequence` is assigned monotonically starting at 1 (one-to-one
+--   with insert order; for backfill this is the rowid).
+-- - `prev_hash` is the SHA-256 over the canonical bytes of the
+--   PRECEDING row, or 32 zero bytes for the first row.
+--
+-- The canonical-bytes encoding (`canonical_chain_bytes` in
+-- `src/signed_events.rs`) commits to every column that uniquely
+-- identifies the row's content (id, agent_id, event_type,
+-- payload_hash, signature-or-empty, attest_level, timestamp,
+-- sequence-as-big-endian-8-bytes), separated by 0x1F (ASCII unit
+-- separator). The encoding is deterministic across replays so an
+-- auditor can recompute every row's expected prev_hash from the
+-- stored columns alone.
+--
+-- # Tamper-evidence
+--
+-- A DELETE of row N still passes per-row signature verification on
+-- the surviving rows individually, BUT row N+1's stored `prev_hash`
+-- will no longer match the recomputed digest of the (now-missing)
+-- row N — the chain break is detected at row N+1 by
+-- `signed_events::verify_chain`. An UPDATE of row N's payload (or
+-- any column included in the canonical-bytes encoding) similarly
+-- propagates: row N+1's stored prev_hash no longer matches the
+-- recomputed canonical-bytes of the tampered row N. A tampered
+-- `sequence` column breaks the contiguity check.
+--
+-- The cross-row chain is the LOAD-BEARING property; per-row Ed25519
+-- signatures remain as defense-in-depth (an attacker that bypasses
+-- the chain would still need to forge each per-row signature).
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signed_events_sequence
+    ON signed_events(sequence);

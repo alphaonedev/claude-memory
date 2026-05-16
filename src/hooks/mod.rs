@@ -30,12 +30,27 @@ pub mod executor;
 // stays a one-liner at the fire site.
 pub mod recall;
 pub mod timeouts;
+// v0.7.0 QW-1 — `post_reflect` substrate-side hook plug-ins (file-
+// backed auto-export, future post-commit notifications). These are
+// distinct from the cross-process `HookEvent::PostReflect` family in
+// `events.rs` — those serialise across subprocess boundaries; this
+// module is in-substrate (`std::thread::spawn` + the rusqlite
+// connection on the worker thread).
+pub mod post_reflect;
+
+// v0.7.0 WT-1-D — `pre_store` substrate-side hook plug-ins
+// (auto-atomisation deferred-enqueue, future pre-commit observers).
+// Same in-substrate discipline as `post_reflect` — distinct from the
+// cross-process `HookEvent::PreStore` family in `events.rs`.
+pub mod pre_store;
 
 // G2 lifted `HookEvent` out of `config.rs` into `events.rs` and
 // attached payload structs to every variant. The re-export keeps
 // G1's `use crate::hooks::HookEvent` (and the
 // `crate::hooks::config::HookEvent` compatibility alias) resolving.
-pub use chain::{AskUserPrompt, ChainResult, HookChain, fire_on_index_eviction};
+pub use chain::{
+    AskUserPrompt, ChainResult, HookChain, fire_on_index_eviction, spawn_eviction_observer,
+};
 pub use config::{FailMode, HookConfig, HookMode, HooksConfigError};
 pub use events::{EvictionEvent, HookEvent};
 // G4 — full HookDecision contract. G3 shipped a local `Allow +

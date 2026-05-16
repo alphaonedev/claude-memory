@@ -80,11 +80,33 @@ What it does NOT do:
 
 Reverting to the brew-managed binary: `brew link --overwrite ai-memory`.
 
+## Reproducing the v0.7.0 recursive-learning primitive
+
+`scripts/reproduce-recursive-learning.sh` is the self-contained end-to-end
+demo for the v0.7.0 recursive-learning add-on (issue #655, Tasks 1-4
+landed; Tasks 5-8 in flight on `feat/v0.7.0-recursive-learning`). It
+builds the release binary, creates a fresh sqlite DB under
+`.local-runs/repro-recursive-learning-<timestamp>/` (honoring the
+project no-`/tmp` HARD RULE), inserts 3 sample memories, drives
+`memory_reflect` over MCP stdio JSON-RPC up to the default depth cap
+(3), and demonstrates the refusal at depth=4 with a clearly-formatted
+`REFLECTION_DEPTH_EXCEEDED` verdict block. Idempotent (each run uses
+a fresh timestamped subdir).
+
+```bash
+scripts/reproduce-recursive-learning.sh
+# Set REPRO_KEEP_DB=1 to retain the demo DB for inspection after the run.
+```
+
+The full conceptual primer lives at `docs/RECURSIVE_LEARNING.md`; the
+release-notes intro lives under `docs/v0.7.0/release-notes.md`
+§"Substrate-native recursive refinement".
+
 ## Architecture
 
 **ai-memory** is a Rust-based persistent memory system exposing three interfaces over a shared SQLite database layer:
 
-1. **MCP Server** (`src/mcp.rs`) — stdio JSON-RPC 2.0 with 43 tools + 2 prompts
+1. **MCP Server** (`src/mcp/`) — stdio JSON-RPC 2.0 with 63 tools at full profile (5 default per v0.6.4 `--profile core`) + 2 prompts
 2. **HTTP API** (`src/handlers.rs`) — Axum REST server on port 9077, 50 endpoints at `/api/v1/`
 3. **CLI** (`src/main.rs`) — clap-based, 40 subcommands with optional `--json` output
 
@@ -208,3 +230,164 @@ Tracking issue: #198.
 - Copyright header on all source files: `// Copyright 2026 AlphaOne LLC` + `// SPDX-License-Identifier: Apache-2.0`
 - PRs target `develop` branch, not `main`. `main` is production releases only.
 - Commit format: `<type>: <summary>` (feat, fix, docs, style, refactor, test, chore, perf)
+
+## Commit & push policy (project override of global default)
+
+> This policy **overrides** Claude Code's global default ("NEVER commit unless
+> the user explicitly asks"). Two days of uncommitted work is bad engineering;
+> the loss of work on a local-only edit graph is a real failure mode. The
+> override below distinguishes **committing** (local, recoverable, low blast
+> radius) from **pushing** (shared-system write, higher blast radius) so each
+> can have its own discipline.
+
+**Commit autonomously when work crosses a logical checkpoint.** No need to
+ask first. Specifically commit when ANY of these become true:
+
+- A feature lands and all four gates (`cargo fmt --check`, clippy `-D warnings
+  -D clippy::all -D clippy::pedantic`, `AI_MEMORY_NO_CONFIG=1 cargo test`,
+  `cargo audit`) are green.
+- A fix lands and the regression test that pins it passes.
+- A patch series completes (e.g., L1-L15 patch batch, a 4-lane audit fix
+  series, a multi-issue fold-in).
+- A doc-only change is self-contained and the surrounding sections are not
+  in mid-rewrite (`grep -n "TODO\|XXX\|TBD" <file>` in your scope is clean).
+- An hour of focused work has accumulated and the working tree is at a clean
+  point (gates pass).
+- The agent is about to start a substantial in-flight task that could
+  conflict with the current dirty state (commit-before-pivot).
+
+**Group commits by intent.** Don't dump the whole working tree into one
+commit. Reasonable groupings (in this repo's recent ship history):
+
+- `feat(...)` per issue or per feature
+- `fix(...)` per bug or per finding (#318 / #355 / L14 / G5 / etc.)
+- `chore(deps)` for `Cargo.toml` + `Cargo.lock` together
+- `chore(tests)` for test-scaffold updates that follow a struct-field
+  addition
+- `docs(...)` per doc surface (CHANGELOG separate from ROADMAP separate
+  from release-notes when they touch different audiences)
+- `infra(...)` for Dockerfile + entrypoint changes
+
+**Stage explicit paths**, not `git add -A` or `git add .`. Prevents accidental
+inclusion of `.env`, credentials, large binaries, or work-in-progress
+sibling files the user didn't intend to land yet. The bash command this
+file already documents (`git add <specific>` then `git commit`) holds.
+
+**Use a HEREDOC for multi-line commit messages.** Every commit ends with
+the `Co-Authored-By:` trailer naming the model (matches the discipline in
+the existing AI Developer Workflow doc).
+
+### When to ASK before committing
+
+Ask the operator first when ANY of these apply:
+
+- Mass-deletion (more than ~5 tracked files about to be `git rm`-ed) that
+  isn't the result of an explicit "delete X" instruction.
+- The diff touches a file the operator has been actively hand-editing
+  in the same session (concurrent-edit risk; check `git diff` against
+  the most recent system-reminder of the file).
+- The commit would land secrets-looking content (anything matching
+  `password|secret|key|token|cred` patterns in the diff that isn't a
+  test fixture or doc).
+- The commit would re-introduce reverted code (check `git log -p`
+  against the relevant region).
+- The cert/CI signal is currently RED and the commit doesn't itself
+  close the failure.
+
+### Pushing — separate, higher bar
+
+**Pushing requires explicit operator authorization.** Each push to a shared
+remote branch is a write to an external system that may trigger CI, sync
+to a PR diff, or notify reviewers. Different blast radius from local
+commits. Default discipline:
+
+- Local commits accumulate freely under the rules above.
+- Push to `origin/<topic-branch>` (e.g., `round-2-fixes`,
+  `feat/...`) when the operator says so, or when the operator
+  authorizes the agent to push at agent's discretion for a defined
+  scope (e.g., "push everything you commit on this branch today").
+- **Never force-push** without explicit operator authorization, ever.
+- **Never push to `main` directly**, even with authorization to push to
+  other branches. `main` is production-tag-only.
+- **Never push to `develop`** without operator authorization specific to
+  `develop`, since `develop` is the integration branch.
+
+### Rationale
+
+This policy is the project's response to two empirical failure modes:
+
+1. **The default-NEVER-commit rule** produced 80-file working trees with
+   ~7,000 lines of uncommitted code after multi-day sessions, where a
+   power loss or container crash would have lost the work. That is
+   unacceptable engineering.
+2. **A blanket "always push" policy** would be reckless — pushing kicks
+   off CI, lands diffs on open PRs, and notifies reviewers. The separation
+   above lets the agent be safe (commit often) while keeping high-blast-
+   radius actions (push, force-push, push-to-main) under operator
+   control.
+
+The default-flexible-commit / explicit-push split is the cleaner discipline.
+
+## No agent-created files under /tmp, /var/tmp, /private/tmp, or any tmpfs (project hard rule)
+
+> This is a **project hard rule**, not a preference. It overrides any
+> tool, shell, or library default that would land scratch files on a
+> tmpfs path. It applies to every agent that touches this repository.
+
+**The rule.** Agents working in this repository MUST NOT create files
+under any of the following paths, ever:
+
+- `/tmp/...`
+- `/var/tmp/...`
+- `/private/tmp/...` (the macOS realpath of `/tmp`)
+- any other tmpfs-backed path the host exposes
+
+This covers, at minimum: bash one-liner output redirects (`> /tmp/log`),
+`heredoc` write-throughs, log captures, `script(1)` typescripts,
+container-test artifacts, capability JSON dumps, ad-hoc fixtures,
+benchmark output, dogfood-rebuild backup files, and any
+`mktemp`/`mktempfile` call where the path is not explicitly overridden
+to a project-local location. The rule applies to files that the agent
+itself creates; it does NOT apply to files OS tooling creates beneath
+the agent (e.g., compiler `/var/folders/...` scratch, the Claude Code
+harness's own session cache).
+
+**Allowed scratch location.** All agent-created scratch lives under:
+
+```
+/Users/fate/v07/v07-fixes/.local-runs/
+```
+
+This directory is gitignored (see `.gitignore`). It is the canonical
+home for: log captures from background `cargo` runs, container-test
+output dumps, ad-hoc verification scripts, throwaway fixture JSON,
+benchmark roll-ups, and similar transient artifacts. Sub-organize
+freely (`.local-runs/r8-cert/`, `.local-runs/2026-05-12/`, etc.) —
+the directory has no enforced internal structure.
+
+If a tool or third-party script defaults to `/tmp`, pass it an
+explicit `--output-dir` / `TMPDIR=$PWD/.local-runs` / equivalent.
+If it has no such override, write the output to a project-local
+path first and post-process it instead.
+
+**Why this is a hard rule.** During the v0.7.0 cert sequence
+(2026-05-11/05-12), accumulated agent scratch on `/private/tmp`
+across multiple agents (~30+ logs/scripts/typescripts) contributed to
+a full-disk ENOSPC failure that halted in-flight work, forced a
+`colima delete -f` to recover, and lost the Plan C container fleet.
+The root cause was not any single file — it was the absence of an
+enforced project-local scratch convention. This rule closes that
+gap. Future agents inherit the convention by reading this file at
+session start.
+
+**Discipline.** Zero strikes from here forward. A single violation
+is grounds for the agent to self-revert the offending command, move
+the file under `.local-runs/`, and update its working memory with
+the redirect so the mistake doesn't repeat in-session. The operator
+will be informed if a violation occurs so the convention can be
+hardened further (e.g., a pre-tool-use hook).
+
+**Cleanup.** `.local-runs/` is intentionally NOT auto-cleaned. Each
+agent is expected to delete its own scratch when a task finishes
+green and the artifacts are no longer needed for the handoff memory.
+A long-lived `.local-runs/` is a smell — flag it in the handoff.

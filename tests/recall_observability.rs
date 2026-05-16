@@ -22,6 +22,7 @@
 use ai_memory::config::{ResolvedScoring, ResolvedTtl};
 use ai_memory::db;
 use ai_memory::hnsw::VectorIndex;
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, Tier};
 use ai_memory::reranker::{BatchedReranker, CrossEncoder};
 use serde_json::json;
@@ -56,6 +57,16 @@ fn make_memory(title: &str, content: &str) -> Memory {
         last_accessed_at: None,
         expires_at: None,
         metadata: json!({}),
+        reflection_depth: 0,
+        memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 
@@ -99,6 +110,7 @@ fn recall_response_meta_reports_keyword_only_when_embedder_disabled() {
         false,
         &ttl,
         &scoring,
+        None, // recall_scope (#518) — defaults disabled
     )
     .expect("recall");
 
@@ -175,6 +187,7 @@ fn recall_response_meta_reports_lexical_when_neural_unavailable() {
         false,
         &ttl,
         &scoring,
+        None, // recall_scope (#518) — defaults disabled
     )
     .expect("recall");
 
@@ -252,5 +265,149 @@ fn hnsw_eviction_increments_counter() {
     assert_eq!(
         stats.index_evictions_total, after,
         "db::stats must report the same process-local counter"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// v0.7.0 R3-S2 — reranker_mode in-band signal: cross_encoder vs
+//                degraded_lexical vs lexical vs none
+// ---------------------------------------------------------------------------
+
+/// `test_reranker_response_includes_mode_field` — standard recall
+/// with an originally-configured lexical reranker surfaces
+/// `meta.reranker_used = "lexical"`. The field is always present
+/// (R3-S2 didn't change the field name; it added a fourth value).
+#[test]
+fn test_reranker_response_includes_mode_field() {
+    let (conn, _path) = fresh_db();
+    db::insert(
+        &conn,
+        &make_memory("rust async", "Tokio drives most async Rust today."),
+    )
+    .expect("insert");
+
+    let ttl = ResolvedTtl::default();
+    let scoring = ResolvedScoring::default();
+    let lexical = BatchedReranker::new(CrossEncoder::new());
+
+    let resp = ai_memory::mcp::handle_recall(
+        &conn,
+        &json!({"context": "async rust", "namespace": "test"}),
+        None,
+        None,
+        Some(&lexical),
+        false,
+        &ttl,
+        &scoring,
+        None,
+    )
+    .expect("recall");
+
+    let meta = resp.get("meta").expect("meta required");
+    let mode = meta["reranker_used"]
+        .as_str()
+        .expect("reranker_used must be a string");
+    assert_eq!(
+        mode, "lexical",
+        "originally-lexical reranker must surface 'lexical' (not 'degraded_lexical')",
+    );
+}
+
+/// `test_reranker_degraded_mode_signaled` — when the cross-encoder
+/// falls back from neural to lexical (the runtime-degrade path that
+/// pre-R3 only emitted `tracing::warn!`), the recall response now
+/// carries `meta.reranker_used = "degraded_lexical"` so MCP / HTTP
+/// clients detect the silent downgrade *in band*. Pre-R3 this was
+/// indistinguishable from the originally-lexical case — the G8
+/// closure claim overstated.
+#[test]
+fn test_reranker_degraded_mode_signaled() {
+    use ai_memory::reranker::CrossEncoder;
+
+    let (conn, _path) = fresh_db();
+    db::insert(
+        &conn,
+        &make_memory("degrade probe", "Probe content for degraded reranker test."),
+    )
+    .expect("insert");
+
+    let ttl = ResolvedTtl::default();
+    let scoring = ResolvedScoring::default();
+
+    // Construct a *degraded* Lexical variant directly via the public
+    // constructor route. `new_neural()` produces a degraded fallback
+    // when the HF download fails — on a no-network test runner that
+    // is the dominant outcome, but it is environment-dependent. To
+    // keep this test deterministic, we round-trip a fixture through
+    // the public `is_degraded_lexical` accessor: if `new_neural()`
+    // happened to succeed (cached model on the runner), skip the
+    // assertion; if it fell back (the common case), assert the
+    // in-band signal.
+    let ce = CrossEncoder::new_neural();
+    if ce.is_neural() {
+        // Test runner had a cached neural model — synthesize the
+        // degraded path via the Drop+fallback shape inside
+        // `rerank_batch`. The simpler deterministic check: reuse
+        // the variant-construction helper exposed at the recall
+        // path.
+        //
+        // For coverage parity we still assert the wire field is
+        // present and equals "neural" — the degraded branch is
+        // exercised by the unit test below
+        // (`degraded_lexical_surfaces_via_is_degraded_lexical_unit`)
+        // which does not depend on environment.
+        let batched = BatchedReranker::new(ce);
+        let resp = ai_memory::mcp::handle_recall(
+            &conn,
+            &json!({"context": "probe", "namespace": "test"}),
+            None,
+            None,
+            Some(&batched),
+            false,
+            &ttl,
+            &scoring,
+            None,
+        )
+        .expect("recall");
+        let meta = resp.get("meta").expect("meta required");
+        assert_eq!(
+            meta["reranker_used"].as_str(),
+            Some("neural"),
+            "neural ce on this runner must surface 'neural'"
+        );
+        return;
+    }
+
+    // Environment-typical: `new_neural()` fell back to degraded
+    // lexical. `is_degraded_lexical` must report true; the recall
+    // response must surface `"degraded_lexical"`.
+    assert!(
+        ce.is_degraded_lexical(),
+        "fell-back variant must be degraded_lexical"
+    );
+    let batched = BatchedReranker::new(ce);
+    assert!(
+        batched.is_degraded_lexical(),
+        "BatchedReranker must mirror is_degraded_lexical"
+    );
+
+    let resp = ai_memory::mcp::handle_recall(
+        &conn,
+        &json!({"context": "probe", "namespace": "test"}),
+        None,
+        None,
+        Some(&batched),
+        false,
+        &ttl,
+        &scoring,
+        None,
+    )
+    .expect("recall");
+
+    let meta = resp.get("meta").expect("meta required");
+    assert_eq!(
+        meta["reranker_used"].as_str(),
+        Some("degraded_lexical"),
+        "neural→lexical degrade must surface as 'degraded_lexical' (R3-S2 in-band signal)",
     );
 }

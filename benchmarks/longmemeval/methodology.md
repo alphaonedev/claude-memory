@@ -38,13 +38,30 @@ hardware should append its own row rather than overwrite the reference row.
 
 ### Model pins (verified by hash)
 
-| Role | Model | Provider | Pin / SHA-256 |
-|---|---|---|---|
-| Embedding (semantic) | `sentence-transformers/all-MiniLM-L6-v2` | HuggingFace | revision `e4ce9877abf3edfe10b0d82785e83bdcb973e22e`, dim **384** |
-| Embedding (autonomous) | `nomic-embed-text:v1.5` | Ollama | digest `sha256:0a4c8e6d...` (Ollama tag `nomic-embed-text:1.5`), dim **768** |
-| Cross-encoder reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` | HuggingFace | revision `ce0834f22110de6d9222af7a7a03628121708969` |
-| Curator (autonomous) | `gemma3:4b` | Ollama | digest `sha256:c0476f...` (Ollama tag `gemma3:4b`) |
-| Query expansion (LLM) | `gemma3:4b` | Ollama | same as curator |
+| Role | v0.6.3.1 baseline | v0.7.0 update | Provider | Pin |
+|---|---|---|---|---|
+| Embedding (semantic) | `sentence-transformers/all-MiniLM-L6-v2` | unchanged | HuggingFace | revision `e4ce9877abf3edfe10b0d82785e83bdcb973e22e`, dim **384** |
+| Embedding (autonomous) | `nomic-embed-text:v1.5` | unchanged | Ollama | digest `sha256:0a4c8e6d...` (Ollama tag `nomic-embed-text:1.5`), dim **768** |
+| Cross-encoder reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` | unchanged | HuggingFace | revision `ce0834f22110de6d9222af7a7a03628121708969` |
+| **Curator + LLM expansion** (autonomous) | `gemma3:4b` | **`gemma4:e4b`** (primary `llm_model`) | Ollama | v0.7.0 default; reasoning-tier model. Digest `sha256:dc5c14...` for `gemma4:e4b`. |
+| **`auto_tag` fast-path** (new in v0.7.0) | n/a (always `llm_model`) | `gemma3:4b` (override via `auto_tag_model`) | Ollama | v0.7.0 L15 — keeps the 5-tag prompt bounded by the H8 30s per-LLM-call timeout. Digest `sha256:c0476f...` |
+
+#### v0.7.0 disclosure (closes honesty gap before tag-cut)
+
+v0.6.3.1 anchored the autonomous-curator-on row with `gemma3:4b` as both
+curator and LLM-expansion model. v0.7.0 flips the default `llm_model` to
+`gemma4:e4b` (thinking-mode reasoning tier) and introduces a separate
+`auto_tag_model` (defaulted to `gemma3:4b`) for short structured-output
+calls. The autonomous-tier recall pipeline in v0.7.0 therefore exercises
+**`gemma4:e4b`** for curator + query expansion, not `gemma3:4b`. The
+results matrix (`results.md`) carries a fifth row to disclose the v0.7.0
+numbers; until that row lands measured values, **do not cite the
+v0.6.3.1 autonomous-curator-on row as representative of v0.7.0 default
+shipping behavior**.
+
+The harness consumes `CURATOR_MODEL` from env (default `gemma3:4b`).
+Re-run with `CURATOR_MODEL=gemma4:e4b ./run_variants.sh autonomous-curator-on`
+on reference hardware.
 
 To verify locally:
 

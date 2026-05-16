@@ -30,6 +30,7 @@
 
 use ai_memory::db;
 use ai_memory::mcp::handle_smart_load;
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, Tier};
 use chrono::Utc;
 use serde_json::{Value, json};
@@ -65,6 +66,16 @@ fn seed_family_memory(
         last_accessed_at: None,
         expires_at: None,
         metadata: json!({"family": family}),
+        reflection_depth: 0,
+        memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &mem).expect("db::insert")
 }

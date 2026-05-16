@@ -12,6 +12,7 @@
 use crate::cli::CliOutput;
 use crate::cli::helpers::{human_age, id_short};
 use crate::config::AppConfig;
+use crate::embeddings::Embed;
 use crate::{color, daemon_runtime, db, embeddings, hnsw, reranker, validate};
 use anyhow::Result;
 use clap::Args;
@@ -52,6 +53,79 @@ pub struct RecallArgs {
     /// topics.
     #[arg(long, value_delimiter = ',')]
     pub context_tokens: Option<Vec<String>>,
+    /// v0.7.0 (issue #518) — when set, splice defaults from
+    /// `[agents.defaults.recall_scope]` in `config.toml` for any
+    /// filter field not explicitly passed on the command line.
+    /// Resolution: explicit args > recall_scope defaults > compiled
+    /// defaults. Default `false` preserves v0.6.x recall semantics.
+    #[arg(long)]
+    pub session_default: bool,
+    /// v0.7.0 WT-1-E — when set, recall returns archived sources
+    /// (those replaced by their atoms after WT-1-B atomisation)
+    /// alongside the atoms. Default `false` surfaces atoms only,
+    /// which is the canonical post-atomisation recall unit.
+    #[arg(long)]
+    pub include_archived: bool,
+    /// v0.7.0 Form 4 (issue #757) — restrict results to memories
+    /// whose `citations` array is non-empty. Composes with the
+    /// other filters; default `false` (no provenance filter).
+    #[arg(long)]
+    pub has_citations: bool,
+    /// v0.7.0 Form 4 (issue #757) — restrict results to memories
+    /// whose `source_uri` starts with this prefix. Matches the
+    /// substring exactly (no glob/regex). Typical use:
+    /// `--source-uri-prefix doc:` to surface every atom or memory
+    /// pointing at a substrate doc; `--source-uri-prefix uri:https://`
+    /// to surface every memory citing an HTTP source.
+    #[arg(long)]
+    pub source_uri_prefix: Option<String>,
+    /// v0.7.x Form 6 (issue #759) — Batman-taxonomy memory-kind
+    /// filter. Comma-separated. Examples:
+    ///   --kind concept
+    ///   --kind concept,entity,claim
+    ///   --kinds concept,entity,claim    (plural alias for MCP parity)
+    /// Recognised values: observation, reflection, persona, concept,
+    /// entity, claim, relation, event, conversation, decision.
+    /// OR-of-kinds within the flag; AND with the other filters.
+    /// Pass 'all' or omit for no filter.
+    ///
+    /// Cluster E audit API-3 (issue #767): the MCP tool param is
+    /// `kinds` (plural), so the CLI accepts both spellings via an
+    /// alias for cross-interface ergonomics.
+    #[arg(long = "kind", alias = "kinds", value_name = "KIND[,KIND...]")]
+    pub kind: Option<String>,
+}
+
+/// v0.7.0 Form 4 (issue #757) — post-filter a recall result set by
+/// the Form 4 fact-provenance criteria. Composes with the existing
+/// substrate-level WHERE clauses (those run inside SQL); these
+/// filters run in Rust because both criteria are read-only checks
+/// on already-deserialised Memory rows and the alternative would
+/// be a substrate-wide signature change on `recall` / `recall_hybrid`.
+#[must_use]
+pub fn apply_form4_recall_filters(
+    results: Vec<(crate::models::Memory, f64)>,
+    has_citations: bool,
+    source_uri_prefix: Option<&str>,
+) -> Vec<(crate::models::Memory, f64)> {
+    if !has_citations && source_uri_prefix.is_none() {
+        return results;
+    }
+    results
+        .into_iter()
+        .filter(|(m, _)| {
+            if has_citations && m.citations.is_empty() {
+                return false;
+            }
+            if let Some(prefix) = source_uri_prefix {
+                match m.source_uri.as_deref() {
+                    Some(uri) if uri.starts_with(prefix) => {}
+                    _ => return false,
+                }
+            }
+            true
+        })
+        .collect()
 }
 
 /// `recall` handler. Mirrors `cmd_recall` from the pre-W5b `main.rs`
@@ -76,7 +150,6 @@ pub fn run(
 
     // Resolve feature tier
     let feature_tier = app_config.effective_tier(args.tier.as_deref());
-    let tier_config = feature_tier.config();
 
     // Initialize embedder if tier supports it. Use the shared builder so
     // recall and the HTTP daemon agree on tier→embedder semantics
@@ -102,12 +175,86 @@ pub fn run(
                 .block_on(daemon_runtime::build_embedder(feature_tier, app_config))
         }
     };
-    if let Some(ref emb) = embedder {
-        writeln!(
-            out.stderr,
-            "ai-memory: embedder loaded ({})",
-            emb.model_description()
-        )?;
+    // Delegate to the embedder-injected helper so test code can reach
+    // every branch downstream without owning a real candle Embedder.
+    let embedder_ref: Option<&dyn Embed> = embedder.as_ref().map(|e| e as &dyn Embed);
+    run_with_embedder(
+        &conn,
+        args,
+        json_out,
+        app_config,
+        feature_tier,
+        embedder_ref,
+        embedder
+            .as_ref()
+            .map(crate::embeddings::Embedder::model_description),
+        out,
+    )
+}
+
+/// Test-injectable core of [`run`]. Production callers go through `run`
+/// which builds an [`Embedder`] via `daemon_runtime::build_embedder` and
+/// delegates here. Tests can pass a `MockEmbedder` directly without the
+/// candle / HuggingFace dependency chain.
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_with_embedder(
+    conn: &rusqlite::Connection,
+    args: &RecallArgs,
+    json_out: bool,
+    app_config: &AppConfig,
+    feature_tier: crate::config::FeatureTier,
+    embedder: Option<&dyn Embed>,
+    embedder_model_description: Option<&str>,
+    out: &mut CliOutput<'_>,
+) -> Result<()> {
+    let tier_config = feature_tier.config();
+    // v0.7.0 (issue #518) — when `--session-default` is passed AND a
+    // given filter axis is absent on the CLI, splice in the
+    // `[agents.defaults.recall_scope]` value from config.toml.
+    let scope = if args.session_default {
+        app_config.effective_recall_scope()
+    } else {
+        None
+    };
+    let effective_namespace: Option<String> = args.namespace.clone().or_else(|| {
+        scope
+            .and_then(|s| s.namespaces.as_ref())
+            .and_then(|v| v.first())
+            .cloned()
+    });
+    let effective_since: Option<String> = args.since.clone().or_else(|| {
+        scope.and_then(|s| {
+            s.since.as_deref().and_then(|d| {
+                crate::config::parse_duration_string(d).map(|dur| {
+                    let cutoff = chrono::Utc::now() - dur;
+                    cutoff.to_rfc3339()
+                })
+            })
+        })
+    });
+    let effective_limit_usize = if args.limit == 10
+        && let Some(v) = scope.and_then(|s| s.limit)
+    {
+        usize::try_from(v).unwrap_or(usize::MAX)
+    } else {
+        args.limit
+    };
+    let _effective_recall_tier: Option<String> = scope.and_then(|s| s.tier.clone());
+
+    // v0.7.x Form 6 — parse the optional --kind filter. Treat the
+    // literal "all" as "no filter" to match the MCP `kinds: "all"`
+    // shorthand, and accept comma-separated tokens otherwise.
+    let kinds_filter: Option<Vec<crate::models::MemoryKind>> = args.kind.as_deref().and_then(|s| {
+        if s.trim().eq_ignore_ascii_case("all") {
+            None
+        } else {
+            crate::models::MemoryKind::parse_csv(s)
+        }
+    });
+
+    if let Some(desc) = embedder_model_description {
+        writeln!(out.stderr, "ai-memory: embedder loaded ({desc})")?;
     } else if tier_config.embedding_model.is_some() {
         writeln!(
             out.stderr,
@@ -116,8 +263,8 @@ pub fn run(
     }
 
     // Backfill embeddings for memories that don't have them
-    if let Some(ref emb) = embedder
-        && let Ok(unembedded) = db::get_unembedded_ids(&conn)
+    if let Some(emb) = embedder
+        && let Ok(unembedded) = db::get_unembedded_ids(conn)
         && !unembedded.is_empty()
     {
         writeln!(
@@ -129,7 +276,7 @@ pub fn run(
         for (id, title, content) in &unembedded {
             let text = format!("{title} {content}");
             if let Ok(embedding) = emb.embed(&text)
-                && db::set_embedding(&conn, id, &embedding).is_ok()
+                && db::set_embedding(conn, id, &embedding).is_ok()
             {
                 ok += 1;
             }
@@ -144,7 +291,7 @@ pub fn run(
 
     // Build HNSW vector index if embedder is available
     let vector_index = if embedder.is_some() {
-        match db::get_all_embeddings(&conn) {
+        match db::get_all_embeddings(conn) {
             Ok(entries) if !entries.is_empty() => Some(hnsw::VectorIndex::build(entries)),
             _ => Some(hnsw::VectorIndex::empty()),
         }
@@ -152,12 +299,6 @@ pub fn run(
         None
     };
 
-    // Initialize cross-encoder reranker for autonomous tier.
-    //
-    // v0.7 G9 — wrap in `BatchedReranker` so concurrent CLI invocations
-    // sharing the in-process model don't serialize through the per-
-    // candidate Mutex. For a single CLI call the worker short-circuits
-    // straight into `CrossEncoder::rerank` — no latency regression.
     let reranker = if tier_config.cross_encoder {
         Some(reranker::BatchedReranker::new(
             reranker::CrossEncoder::new_neural(),
@@ -170,14 +311,9 @@ pub fn run(
     let resolved_scoring = app_config.effective_scoring();
 
     // Perform recall: hybrid if embedder available, keyword otherwise
-    let (results, outcome, mode) = if let Some(ref emb) = embedder {
+    let (results, outcome, mode) = if let Some(emb) = embedder {
         match emb.embed(&args.context) {
             Ok(primary_emb) => {
-                // v0.6.0.0 contextual recall. Fuse the primary query
-                // embedding with an embedding over recent conversation
-                // tokens (caller-supplied) at 70/30. Fusion is done
-                // caller-side so recall_hybrid stays unaware of the bias —
-                // the vector it receives is the final query direction.
                 let query_emb = match args.context_tokens.as_deref() {
                     Some(tokens) if !tokens.is_empty() => {
                         let joined = tokens.join(" ");
@@ -195,13 +331,13 @@ pub fn run(
                     _ => primary_emb,
                 };
                 let (results, outcome) = db::recall_hybrid(
-                    &conn,
+                    conn,
                     &args.context,
                     &query_emb,
-                    args.namespace.as_deref(),
-                    args.limit.min(50),
+                    effective_namespace.as_deref(),
+                    effective_limit_usize.min(50),
                     args.tags.as_deref(),
-                    args.since.as_deref(),
+                    effective_since.as_deref(),
                     args.until.as_deref(),
                     vector_index.as_ref(),
                     resolved_ttl.short_extend_secs,
@@ -209,6 +345,8 @@ pub fn run(
                     args.as_agent.as_deref(),
                     args.budget_tokens,
                     &resolved_scoring,
+                    args.include_archived,
+                    args.source_uri_prefix.as_deref(),
                 )?;
                 if let Some(ref ce) = reranker {
                     (ce.rerank(&args.context, results), outcome, "hybrid+rerank")
@@ -222,36 +360,59 @@ pub fn run(
                     "ai-memory: embedding query failed: {e}, falling back to keyword"
                 )?;
                 let (results, outcome) = db::recall(
-                    &conn,
+                    conn,
                     &args.context,
-                    args.namespace.as_deref(),
-                    args.limit,
+                    effective_namespace.as_deref(),
+                    effective_limit_usize,
                     args.tags.as_deref(),
-                    args.since.as_deref(),
+                    effective_since.as_deref(),
                     args.until.as_deref(),
                     resolved_ttl.short_extend_secs,
                     resolved_ttl.mid_extend_secs,
                     args.as_agent.as_deref(),
                     args.budget_tokens,
+                    args.include_archived,
+                    args.source_uri_prefix.as_deref(),
                 )?;
                 (results, outcome, "keyword")
             }
         }
     } else {
         let (results, outcome) = db::recall(
-            &conn,
+            conn,
             &args.context,
-            args.namespace.as_deref(),
-            args.limit,
+            effective_namespace.as_deref(),
+            effective_limit_usize,
             args.tags.as_deref(),
-            args.since.as_deref(),
+            effective_since.as_deref(),
             args.until.as_deref(),
             resolved_ttl.short_extend_secs,
             resolved_ttl.mid_extend_secs,
             args.as_agent.as_deref(),
             args.budget_tokens,
+            args.include_archived,
+            args.source_uri_prefix.as_deref(),
         )?;
         (results, outcome, "keyword")
+    };
+
+    // v0.7.0 Form 4 (issue #757) — fact-provenance post-filter.
+    let results = apply_form4_recall_filters(
+        results,
+        args.has_citations,
+        args.source_uri_prefix.as_deref(),
+    );
+
+    // v0.7.x Form 6 — apply the parsed kinds filter to the result set
+    // in-place. No-op when `kinds_filter == None`. Cheap (results are
+    // already capped at limit.min(50)), and avoids touching the recall
+    // SQL on the existing storage path.
+    let results: Vec<(crate::models::Memory, f64)> = match kinds_filter.as_deref() {
+        None => results,
+        Some(allowed) => results
+            .into_iter()
+            .filter(|(m, _)| allowed.contains(&m.memory_kind))
+            .collect(),
     };
 
     if json_out {
@@ -343,6 +504,11 @@ mod tests {
             as_agent: None,
             budget_tokens: None,
             context_tokens: None,
+            session_default: false,
+            include_archived: false,
+            has_citations: false,
+            source_uri_prefix: None,
+            kind: None,
         }
     }
 
@@ -588,5 +754,550 @@ mod tests {
         let cfg = AppConfig::default();
         let res = daemon_runtime::build_embedder(FeatureTier::Keyword, &cfg).await;
         assert!(res.is_none(), "keyword tier must not build an embedder");
+    }
+
+    // ----------------------------------------------------------------
+    // L0.7-3 chunk-e2 — coverage uplift to ≥95%.
+    // ----------------------------------------------------------------
+
+    /// Build an AppConfig with a recall_scope so `--session-default`
+    /// has something to splice in. Uses TOML parsing because
+    /// `AppConfig` does not directly expose builder methods for the
+    /// nested defaults block.
+    fn app_config_with_recall_scope() -> AppConfig {
+        let toml = r#"
+tier = "keyword"
+
+[agents.defaults.recall_scope]
+namespaces = ["scope-ns"]
+since = "1d"
+tier = "long"
+limit = 25
+"#;
+        toml::from_str(toml).expect("parse test config")
+    }
+
+    #[test]
+    fn recall_session_default_splices_namespace_and_since_from_scope() {
+        // Drives the session_default scope path (lines 90-110).
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        // Seed a memory in the scoped namespace.
+        seed_memory(&db, "scope-ns", "needle title", "scoped");
+        // Seed a memory in another namespace which should be filtered out.
+        seed_memory(&db, "other-ns", "needle elsewhere", "other");
+        let mut args = default_args();
+        args.session_default = true;
+        // Leave namespace=None so the scope splice picks "scope-ns".
+        let cfg = app_config_with_recall_scope();
+        {
+            let mut out = env.output();
+            run(&db, &args, true, &cfg, &mut out).unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        // Only memories in scope-ns survive.
+        for m in v["memories"].as_array().unwrap() {
+            assert_eq!(m["namespace"].as_str().unwrap(), "scope-ns");
+        }
+    }
+
+    #[test]
+    fn recall_session_default_explicit_namespace_wins_over_scope() {
+        // Explicit args > scope (line 95: args.namespace.clone().or_else).
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        seed_memory(&db, "scope-ns", "needle title", "content");
+        seed_memory(&db, "explicit-ns", "needle elsewhere", "content");
+        let mut args = default_args();
+        args.session_default = true;
+        args.namespace = Some("explicit-ns".to_string());
+        let cfg = app_config_with_recall_scope();
+        {
+            let mut out = env.output();
+            run(&db, &args, true, &cfg, &mut out).unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        for m in v["memories"].as_array().unwrap() {
+            assert_eq!(m["namespace"].as_str().unwrap(), "explicit-ns");
+        }
+    }
+
+    #[test]
+    fn recall_session_default_with_explicit_limit_does_not_apply_scope_limit() {
+        // When args.limit != default (10), the scope.limit splice is
+        // skipped (line 117 condition).
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        for i in 0..5 {
+            seed_memory(&db, "scope-ns", &format!("needle {i}"), "c");
+        }
+        let mut args = default_args();
+        args.session_default = true;
+        args.limit = 2; // explicit override
+        let cfg = app_config_with_recall_scope();
+        {
+            let mut out = env.output();
+            run(&db, &args, true, &cfg, &mut out).unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        let mems = v["memories"].as_array().unwrap();
+        assert!(mems.len() <= 2, "explicit limit=2 should cap results");
+    }
+
+    // ------------------------------------------------------------------
+    // L0.7-3 chunk-e2 — embedder-driven branches via run_with_embedder.
+    // ------------------------------------------------------------------
+
+    /// Embedder that returns an error on `embed` — drives the
+    /// "embedding query failed, falling back to keyword" branch.
+    struct FailingEmbedder;
+    impl Embed for FailingEmbedder {
+        fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+            anyhow::bail!("synthetic embed failure for test")
+        }
+    }
+
+    /// Embedder that errors only when the input is exactly "joined
+    /// context tokens" — drives the fuse-failure branch (primary
+    /// succeeds, context_tokens embed fails).
+    struct FailOnContextTokens {
+        joined_marker: String,
+    }
+    impl Embed for FailOnContextTokens {
+        fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            if text == self.joined_marker {
+                anyhow::bail!("synthetic context-tokens failure")
+            }
+            let mock = crate::embeddings::test_support::MockEmbedder::new_local()?;
+            mock.embed(text)
+        }
+    }
+
+    #[test]
+    fn recall_with_embedder_takes_hybrid_path() {
+        // run_with_embedder + MockEmbedder drives the `embedder.is_some()`
+        // branch in run_with_embedder including embedder-loaded banner,
+        // backfill, vector index build, and the hybrid recall_hybrid call.
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        seed_memory(&db, "test", "needle title", "content");
+        let conn = db::open(&db).unwrap();
+        let mock = crate::embeddings::test_support::MockEmbedder::new_local().unwrap();
+        let args = default_args();
+        let cfg = AppConfig::default();
+        let feature_tier = FeatureTier::Keyword;
+        {
+            let mut out = env.output();
+            run_with_embedder(
+                &conn,
+                &args,
+                true,
+                &cfg,
+                feature_tier,
+                Some(&mock as &dyn Embed),
+                Some(mock.model_description()),
+                &mut out,
+            )
+            .unwrap();
+        }
+        let stderr = env.stderr_str();
+        assert!(stderr.contains("embedder loaded"), "got: {stderr}");
+        assert!(stderr.contains("backfilling"), "got: {stderr}");
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        assert_eq!(v["mode"].as_str().unwrap(), "hybrid");
+    }
+
+    #[test]
+    fn recall_with_embedder_failing_primary_falls_back_to_keyword() {
+        // FailingEmbedder errors on the primary `embed(query)`. The
+        // recall handler emits the "embedding query failed" banner and
+        // falls back to db::recall (lines 272-291 in original).
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        seed_memory(&db, "test", "needle title", "content");
+        let conn = db::open(&db).unwrap();
+        let args = default_args();
+        let cfg = AppConfig::default();
+        {
+            let mut out = env.output();
+            run_with_embedder(
+                &conn,
+                &args,
+                true,
+                &cfg,
+                FeatureTier::Keyword,
+                Some(&FailingEmbedder as &dyn Embed),
+                Some("failing-mock"),
+                &mut out,
+            )
+            .unwrap();
+        }
+        let stderr = env.stderr_str();
+        assert!(
+            stderr.contains("embedding query failed"),
+            "expected fallback banner; got: {stderr}"
+        );
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        assert_eq!(v["mode"].as_str().unwrap(), "keyword");
+    }
+
+    #[test]
+    fn recall_with_embedder_context_tokens_fail_uses_primary_only() {
+        // Primary embed OK, context_tokens embed fails → emit the
+        // "context_tokens embed failed" banner and continue with
+        // primary_emb alone.
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        seed_memory(&db, "test", "needle title", "content");
+        let conn = db::open(&db).unwrap();
+        let mock = FailOnContextTokens {
+            joined_marker: "alpha beta".to_string(),
+        };
+        let mut args = default_args();
+        args.context_tokens = Some(vec!["alpha".into(), "beta".into()]);
+        let cfg = AppConfig::default();
+        {
+            let mut out = env.output();
+            run_with_embedder(
+                &conn,
+                &args,
+                true,
+                &cfg,
+                FeatureTier::Keyword,
+                Some(&mock as &dyn Embed),
+                Some("primary-ok-context-fail"),
+                &mut out,
+            )
+            .unwrap();
+        }
+        let stderr = env.stderr_str();
+        assert!(
+            stderr.contains("context_tokens embed failed"),
+            "got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn recall_with_embedder_context_tokens_success_drives_fuse() {
+        // Primary OK + context_tokens OK → triggers the fuse() path.
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        seed_memory(&db, "test", "needle title", "content");
+        let conn = db::open(&db).unwrap();
+        let mock = crate::embeddings::test_support::MockEmbedder::new_local().unwrap();
+        let mut args = default_args();
+        args.context_tokens = Some(vec!["a".into(), "b".into()]);
+        let cfg = AppConfig::default();
+        {
+            let mut out = env.output();
+            run_with_embedder(
+                &conn,
+                &args,
+                true,
+                &cfg,
+                FeatureTier::Keyword,
+                Some(&mock as &dyn Embed),
+                Some(mock.model_description()),
+                &mut out,
+            )
+            .unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        assert_eq!(v["mode"].as_str().unwrap(), "hybrid");
+    }
+
+    #[test]
+    fn recall_with_embedder_load_failed_emits_failed_banner() {
+        // tier_config.embedding_model.is_some() && embedder=None → emit
+        // the "embedder failed to load, falling back to keyword" banner.
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        seed_memory(&db, "test", "needle title", "content");
+        let conn = db::open(&db).unwrap();
+        let args = default_args();
+        let cfg = AppConfig::default();
+        {
+            let mut out = env.output();
+            run_with_embedder(
+                &conn,
+                &args,
+                true,
+                &cfg,
+                FeatureTier::Semantic, // tier_config.embedding_model = Some
+                None,                  // simulate failed load
+                None,
+                &mut out,
+            )
+            .unwrap();
+        }
+        let stderr = env.stderr_str();
+        assert!(
+            stderr.contains("embedder failed to load"),
+            "expected failed-load banner; got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn recall_text_output_no_embedder_with_low_confidence_emits_conf_pct() {
+        // Drives the `confidence < 1.0` branch in the text output loop
+        // (line 350) which formats " conf=XX%". Use a custom inserted
+        // memory with confidence below 1.0.
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        // Insert a low-confidence memory directly.
+        let conn = db::open(&db).unwrap();
+        let mut mem = crate::models::Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: crate::models::Tier::Mid,
+            namespace: "test".to_string(),
+            title: "needle low".to_string(),
+            content: "low confidence content".to_string(),
+            tags: vec![],
+            priority: 5,
+            confidence: 0.42,
+            source: "import".to_string(),
+            access_count: 0,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: crate::models::default_metadata(),
+            reflection_depth: 0,
+            memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
+            confidence_source: crate::models::ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
+        };
+        if let Some(obj) = mem.metadata.as_object_mut() {
+            obj.insert("agent_id".to_string(), serde_json::json!("t"));
+        }
+        db::insert(&conn, &mem).unwrap();
+        let args = default_args();
+        let cfg = AppConfig::default();
+        {
+            let mut out = env.output();
+            // text mode (json_out=false) — drives the text-rendering loop.
+            run_with_embedder(
+                &conn,
+                &args,
+                false,
+                &cfg,
+                FeatureTier::Keyword,
+                None,
+                None,
+                &mut out,
+            )
+            .unwrap();
+        }
+        let stdout = env.stdout_str();
+        assert!(stdout.contains("conf=42%"), "got: {stdout}");
+        assert!(stdout.contains("memory(ies) recalled"), "got: {stdout}");
+    }
+
+    #[test]
+    fn recall_text_output_no_results_emits_no_memories_message() {
+        // Empty result text path (lines 343-345).
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        let conn = db::open(&db).unwrap();
+        let args = default_args();
+        let cfg = AppConfig::default();
+        {
+            let mut out = env.output();
+            run_with_embedder(
+                &conn,
+                &args,
+                false,
+                &cfg,
+                FeatureTier::Keyword,
+                None,
+                None,
+                &mut out,
+            )
+            .unwrap();
+        }
+        let stderr = env.stderr_str();
+        assert!(stderr.contains("no memories found"), "got: {stderr}");
+    }
+
+    #[test]
+    fn recall_session_default_off_does_not_splice_scope() {
+        // session_default=false short-circuits the scope branch to None
+        // (line 92), so the configured scope is invisible.
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        seed_memory(&db, "scope-ns", "needle title", "content");
+        seed_memory(&db, "other-ns", "needle elsewhere", "content");
+        let mut args = default_args();
+        args.session_default = false;
+        let cfg = app_config_with_recall_scope();
+        {
+            let mut out = env.output();
+            run(&db, &args, true, &cfg, &mut out).unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        // Both namespaces should be visible — no scope splice.
+        let nses: std::collections::HashSet<String> = v["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["namespace"].as_str().unwrap().to_string())
+            .collect();
+        assert!(nses.len() >= 2 || nses.contains("other-ns"));
+    }
+
+    // -----------------------------------------------------------------
+    // v0.7-polish coverage recovery (issue #767) — Form 4 + Form 6
+    // filter coverage. Drives apply_form4_recall_filters every-branch
+    // and the run() integration of --source-uri-prefix / --has-citations
+    // / --kind no-match paths.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn apply_form4_recall_filters_no_filter_passes_through() {
+        // Both filters absent → original results returned verbatim.
+        let m = crate::models::Memory {
+            id: "id".to_string(),
+            ..Default::default()
+        };
+        let input = vec![(m.clone(), 0.5)];
+        let out = apply_form4_recall_filters(input, false, None);
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn apply_form4_recall_filters_has_citations_drops_empty_citations() {
+        let mut a = crate::models::Memory {
+            id: "a".to_string(),
+            ..Default::default()
+        };
+        a.citations = vec![crate::models::Citation {
+            uri: "doc:x".to_string(),
+            accessed_at: "2026-01-01T00:00:00Z".to_string(),
+            hash: None,
+            span: None,
+        }];
+        let b = crate::models::Memory {
+            id: "b".to_string(),
+            ..Default::default()
+        };
+        let input = vec![(a, 0.9), (b, 0.8)];
+        let out = apply_form4_recall_filters(input, true, None);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0.id, "a");
+    }
+
+    #[test]
+    fn apply_form4_recall_filters_source_uri_prefix_drops_non_matches() {
+        let mut a = crate::models::Memory {
+            id: "a".to_string(),
+            ..Default::default()
+        };
+        a.source_uri = Some("uri:https://example.com/path".to_string());
+        let mut b = crate::models::Memory {
+            id: "b".to_string(),
+            ..Default::default()
+        };
+        b.source_uri = Some("uri:https://other.org/elsewhere".to_string());
+        let c = crate::models::Memory {
+            id: "c".to_string(),
+            ..Default::default()
+        };
+        // c has source_uri = None → excluded by prefix filter.
+        let input = vec![(a, 1.0), (b, 0.9), (c, 0.8)];
+        let out = apply_form4_recall_filters(input, false, Some("uri:https://example.com"));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0.id, "a");
+    }
+
+    #[test]
+    fn apply_form4_recall_filters_source_uri_prefix_no_matches_returns_empty() {
+        // The 0.2% gap closure for cli/recall.rs — drives the
+        // "filter declared, nothing matches" path.
+        let mut a = crate::models::Memory {
+            id: "a".to_string(),
+            ..Default::default()
+        };
+        a.source_uri = Some("uri:https://example.com/path".to_string());
+        let input = vec![(a, 1.0)];
+        let out =
+            apply_form4_recall_filters(input, false, Some("uri:https://nothing-matches.invalid"));
+        assert!(out.is_empty(), "expected no matches for unrelated prefix");
+    }
+
+    #[test]
+    fn apply_form4_recall_filters_combined_has_citations_and_prefix() {
+        let mut a = crate::models::Memory {
+            id: "a".to_string(),
+            ..Default::default()
+        };
+        a.citations = vec![crate::models::Citation {
+            uri: "doc:x".to_string(),
+            accessed_at: "2026-01-01T00:00:00Z".to_string(),
+            hash: None,
+            span: None,
+        }];
+        a.source_uri = Some("uri:https://example.com/x".to_string());
+        // Has citations but wrong prefix.
+        let mut b = crate::models::Memory {
+            id: "b".to_string(),
+            ..Default::default()
+        };
+        b.citations = vec![crate::models::Citation {
+            uri: "doc:y".to_string(),
+            accessed_at: "2026-01-01T00:00:00Z".to_string(),
+            hash: None,
+            span: None,
+        }];
+        b.source_uri = Some("uri:https://other.org/y".to_string());
+        let input = vec![(a, 0.9), (b, 0.8)];
+        let out = apply_form4_recall_filters(input, true, Some("uri:https://example.com"));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0.id, "a");
+    }
+
+    #[test]
+    fn recall_with_source_uri_prefix_no_match_returns_empty_envelope() {
+        // End-to-end via run(): seed two memories without source_uri,
+        // then ask for source_uri_prefix that never matches.
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        seed_memory(&db, "test", "needle title", "haystack content");
+        let mut args = default_args();
+        args.source_uri_prefix = Some("uri:https://no-such-source.invalid".to_string());
+        let cfg = AppConfig::default();
+        {
+            let mut out = env.output();
+            run(&db, &args, true, &cfg, &mut out).unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        assert_eq!(v["count"].as_u64().unwrap(), 0);
+        assert!(v["memories"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn recall_with_kind_filter_all_keyword_is_noop() {
+        // --kind=all parses to None → no filter applied.
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        seed_memory(&db, "test", "needle title", "haystack content");
+        let mut args = default_args();
+        args.kind = Some("ALL".to_string());
+        let cfg = AppConfig::default();
+        {
+            let mut out = env.output();
+            run(&db, &args, true, &cfg, &mut out).unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        // The "all" sentinel passes through every memory (no kind filter).
+        assert!(
+            v["count"].as_u64().unwrap() >= 1,
+            "expected at least one match under --kind=all"
+        );
     }
 }

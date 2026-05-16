@@ -181,9 +181,13 @@ fn cap_v2_omits_dropped_fields_in_v2_response() {
     );
 
     // Planned-feature objects (memory_reflection, compaction, transcripts).
-    assert_eq!(val["features"]["memory_reflection"]["planned"], true);
-    assert_eq!(val["features"]["memory_reflection"]["enabled"], false);
-    assert_eq!(val["features"]["memory_reflection"]["version"], "v0.7+");
+    // v0.7.0 recursive-learning (issue #655) Tasks 1-6 shipped the
+    // primitive, so memory_reflection flips to
+    // `planned=false, enabled=true, version="v0.7.0"`. The other two
+    // planned-feature objects remain on the roadmap.
+    assert_eq!(val["features"]["memory_reflection"]["planned"], false);
+    assert_eq!(val["features"]["memory_reflection"]["enabled"], true);
+    assert_eq!(val["features"]["memory_reflection"]["version"], "v0.7.0");
     assert_eq!(val["compaction"]["planned"], true);
     assert_eq!(val["compaction"]["enabled"], false);
     assert_eq!(val["compaction"]["version"], "v0.8+");

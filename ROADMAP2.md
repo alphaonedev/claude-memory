@@ -11,7 +11,7 @@
 
 ## 0. Executive position in one paragraph
 
-Everything that compiles into the `ai-memory` binary is Apache 2.0, forever. There is no closed-source roadmap. There is no commercial-only feature. There is no "open-core" gotcha where the substrate is free but the useful parts cost money. The four-charter set and the prior phased roadmap are reconciled here: every engineering deliverable in either is OSS, every gap surfaced in the v0.6.3 source-code audit has a slot, every commitment that vanished in the prior rewrite is recovered or formally cut. AgenticMem (separate document) consumes this substrate but paywalls none of it.
+Everything that compiles into the `ai-memory` binary is Apache 2.0, forever. There is no closed-source roadmap. There is no commercial-only feature. There is no "open-core" gotcha where the substrate is free but the useful parts cost money. The four-charter set and the prior phased roadmap are reconciled here: every engineering deliverable in either is OSS, every gap surfaced in the v0.6.3 source-code audit has a slot, every commitment that vanished in the prior rewrite is recovered or formally cut. A managed-service deployment tier consumes this substrate but paywalls none of it.
 
 ---
 
@@ -68,6 +68,9 @@ This is the floor every plan below builds on. Numbers are sourced from the publi
 | Modules ≥ 90% coverage (v0.6.3 baseline) | 39 of 47 (7 at 100%) | evidence.html |
 | Platform CI matrix | ubuntu-latest, macos-latest, windows-latest | evidence.html |
 | Schema version (v0.6.3.1) | v19 (was v15 on v0.6.3; ladder v15→v17→v18→v19) | release notes |
+| Schema version (v0.7.0 grand-slam ship, HEAD `12a7f29`) | **v34** (sqlite) / **v33** (postgres) — ladder v19 → v20 (v0.6.4 audit log) → v22 (v0.7.0 RC: attestation + recursive-learning inclusion) → v29 (L0.7-1 base, recursive-learning Task 1/8 reflection_depth) → v30 (L1-1) → v33 (L2 wave `memory_links.relation` CHECK constraint, commit `58877c7`) → v34 (V-4 closeout #698: `signed_events.prev_hash` + `signed_events.sequence` cross-row chain) | commit log on `feat/v0.7.0-grand-slam` |
+
+> **Doc-vs-substrate qualifier.** Schema versions can advance ahead of this document during in-flight work; the doc is updated at every layer §16 gate. Numbers in this row are "as of" the named commit on the named integration branch.
 
 ### 4.2 Ship-gate (4 phases on 4-node DigitalOcean)
 
@@ -143,6 +146,13 @@ CI guard: `bench --baseline performance/baseline.json` fails any PR that exceeds
 - **4 feature tiers:** keyword (FTS5 only) · semantic (+ MiniLM 384d) · smart (+ Ollama LLM) · autonomous (+ nomic 768d + cross-encoder rerank)
 - **3 memory tiers:** short (6 h) · mid (7 d) · long (permanent)
 - **6-factor recall scoring:** FTS relevance · priority · access count · confidence · tier boost · recency decay
+
+**v0.7.0 grand-slam ship (as of `feat/v0.7.0-layer-1` HEAD, registry-confirmed):**
+
+- **63 MCP tools total** at v0.7.0 grand-slam ship (HEAD `12a7f29`, pinned by `src/mcp/mod.rs::tool_definitions_for_profile_full_registers_51` asserting `len() == 63`): 43 baseline + `memory_reflect` (recursive-learning Task 4/8) + 7 `memory_skill_*` (L1-5 register/list/get/resource/export + L2-6 `promote_from_reflection` + L2-7 `compositional_context` — the L2-6 promote tool LANDED in v0.7.0 per `05e0cb9a` v0.7.1-fold decision, not v0.8.0 as earlier drafts implied) + `memory_load_family` (B1 always-on) + `memory_smart_load` (B2) + `memory_subscribe_replay` / `_dlq_list` (K7) + `memory_find_paths` (J7) + `memory_quota_status` (K8) + `memory_replay` (I4) + `memory_verify` (H4) + `memory_reflection_origin` (L2-2) + `memory_dependents_of_invalidated` (L2-3) + `memory_check_agent_action` + `memory_rule_list` (L1-6 / #691)
+- **25 hook events on `l1/compaction-pipeline`** at L1-7 ship: 20 baseline (Bucket 0 plan) + `pre_recall_expand` (G10 hot-path) + `pre_reflect` + `post_reflect` (recursive-learning Task 6/8, `21 → 23`) + `pre_compaction` + `on_compaction_rollback` (L1-7, `23 → 25`). v0.7.0 RC base before recursive-learning lands ships **22 events** (20 + 2 from G10 + Bucket 0 substrate); the `23` floor sits on `feat/v0.7.0-recursive-learning`; the `25` floor sits on `feat/v0.7.0-layer-1` after L1-7 lands
+
+> **Doc-vs-substrate qualifier.** The hook count and tool count in this block are "as of" the named integration branch HEAD at the time of writing. Both can advance in subsequent layer work; the doc is updated at every §16 gate.
 
 ### 4.8 Certification posture (cold honesty)
 
@@ -314,7 +324,7 @@ Defer: G5/G6/G9, R7 (doctor), TOON wire format polish.
 
 Programmable lifecycle events at every memory operation point. Subprocess JSON-over-stdio with daemon-mode IPC for hot paths.
 
-- 20 lifecycle events (16 base + 2 compaction + 2 transcripts).
+- 20 lifecycle events at plan time (16 base + 2 compaction + 2 transcripts). **Actual grand-slam ship is 25** on `feat/v0.7.0-layer-1` (20 plan + `pre_recall_expand` G10 + `pre_reflect` + `post_reflect` recursive-learning Task 6/8 + `pre_compaction` + `on_compaction_rollback` L1-7); see §4.7 grand-slam block for the ladder.
 - Decision types: `Allow` / `Modify(MemoryDelta)` / `Deny` / `AskUser`.
 - Chain ordering by priority with first-deny-wins short-circuit.
 - Hard timeouts per event class (5000 ms write, 2000 ms read).
@@ -343,7 +353,7 @@ Fills the v0.6.3 dead `signature` column with real cryptographic attestation.
 
 **Exit criteria:** `verify()` returns `signature_verified: true` for at least one signed link in the test corpus. (Closes G12.)
 
-**Out of OSS scope:** Hardware-backed key storage (TPM/HSM/Secure Enclave) deployment. The OSS provides the *abstraction*; the certified-managed *deployment* is AgenticMem's commercial layer.
+**Out of OSS scope:** Hardware-backed key storage (TPM/HSM/Secure Enclave) deployment. The OSS provides the *abstraction*; the certified-managed *deployment* is the commercial-service tier.
 
 #### Bucket 1.7 — Sidechain Transcripts
 
@@ -396,68 +406,295 @@ Refactors the existing `governance` system into the rules+modes+hooks model; ext
 Keep: Bucket 0, Bucket 1, Bucket 1.7, Bucket 2, **G1 inheritance fix**.
 Defer to v0.7.1: A2A test scenarios full sweep, per-agent quotas, full governance-to-permissions migration.
 
-### 7.4 v0.8 — Coordination Primitives — Q4 2026
+### 7.4 v0.8 — Distributed Coordination Substrate — Q4 2026
 
-#### Pillar 1 — Distributed Task Queue
+**Document classification:** AI-NHI-advised, deconflicted with ROADMAP2.md baseline at the v0.7.0 → v0.8.0 transition.
+**Anchor reference:** AI-NHI advisory dated 2026-05-11 (final after v0.7.0 ship).
+**Deconflict discipline:** Every item below is checked against this file's §5 audit findings, §6 recovered commitments, and §7 release plan. Net-new items vs the original 2026-04-29 §7.4 are flagged explicitly.
 
-- `task` typed memory with state machine: `pending → claimed → in_progress → done/failed/abandoned`.
-- `memory_task_enqueue`, `memory_task_claim`, `memory_task_complete`, `memory_task_abandon` MCP tools.
-- Dependency-DAG enforcement.
-- Lease + heartbeat for resilience.
-- Federation-aware (W-of-N quorum on shared namespaces).
+**Executive position.** v0.8.0 is the **Distributed Coordination Substrate** release. The original §7.4 charter scoped three pillars (Distributed Task Queue, Typed Cognition, CRDTs) plus Pillar 2.5 (Compaction Pipeline). This expansion adds three new primitives to Pillar 1 (signed signals, attested checkpoints, routines) borrowed from the rohitg00/agentmemory competitive analysis but differentiated by cryptographic non-repudiation and federation across organizational trust boundaries. It adds five strategic adjacencies surfaced during v0.7.0 ship-window analysis: Claude Code plugin marketplace install, vLLM as first-class inference backend, LongMemEval Gemma 4 refresh, model-signature verification chain, and a real-time WebSocket viewer. **Total net add against the prior §7.4 scope: +22.5 sessions** (8.5 for coordination expansion + 14 for adjacencies + cross-cutting). New v0.8 total: ~47 sessions. Compatible with Q4 2026 ship target at the demonstrated cadence.
 
-#### Pillar 2 — Typed Cognition
+#### Competitive landscape — what changed during the v0.7.0 ship window
 
-- Typed memory enums: `Goal`, `Plan`, `Step`, `Observation`, `Decision`.
+| Reference | Strategic posture | v0.8 implication |
+|---|---|---|
+| **Anthropic Managed Agents** (dreaming / outcomes / multiagent orchestration, 2026-05-06) | Two-markets, not one-market. Anthropic owns managed-memory inside Claude. ai-memory owns substrate-ownership outside Claude (regulated multi-org, air-gapped, customer hardware, vendor-failure resilient). | No scope change. The positioning is durable; their orchestration runs within a single Anthropic-managed deployment, this substrate's federation runs across organizational trust boundaries. |
+| **rohitg00/agentmemory** (v0.7.2, Apr 2026) | Apache 2.0, ~20K LOC TypeScript on iii-engine, 581 tests, 41 MCP tools, triple-stream retrieval, 4-tier consolidation, P2P mesh sync. Wins on developer-experience polish. | Three primitives belong in this substrate (signals, checkpoints, routines — expanded below). Three developer-experience adjacencies in §4.8.x: Claude Code plugin marketplace install, WebSocket viewer, bi-directional CLAUDE.md sync. Sentinels and sketches stay deferred — runtime-layer, not substrate. |
+| **Muvon/octocode** | Code-search-and-graph tool. Different product category. | No scope change. Confirms "Apache 2.0 + Rust + MCP" alone is not a differentiator — substrate ownership, federation, and forensic substrate must carry the strategic position. |
+
+#### Pillar 1 — Distributed Coordination Substrate (expanded)
+
+Original §7.4 Pillar 1 (preserved verbatim): action/task with state machine (pending → claimed → in_progress → done | failed | abandoned), dependency-DAG enforcement, lease + heartbeat for resilience, federation-aware W-of-N quorum on shared namespaces. Baseline ~12.5 sessions.
+
+##### Already in baseline (restated)
+
+- `memory_action_create / update / transition / delete / query / dag` MCP tools
+- Action state machine with substrate-enforced transitions
+- Dependency DAG with typed edges (`requires` / `unlocks` / `blocks` / `gated_by` / `sibling`)
+- Lease + heartbeat for resilience (sweeper releases expired leases, emits `signed_events` audit entry)
+- Federation-aware quorum claiming (W-of-N agreement among peer namespaces required for transitions)
+- Vector clock per `action_id` for federation merge
+- `memory_lease_acquire / renew / release / query` MCP tools
+
+##### NEW — Signed signals (+3 sessions)
+
+Multi-agent coordination across federation boundaries with cryptographic non-repudiation. Today this happens via shared-memory polling or out-of-band channels (Slack, webhooks) — neither auditable, tamper-evident, nor federation-aware. Signals are first-class memory: durable, queryable, federation-replicable, cryptographically attested.
+
+**Differentiated from competitors.** agentmemory signals carry read receipts but no cryptographic guarantee. This substrate's signals are Ed25519-signed by the sender (reusing v0.7.0 Track H attestation infrastructure), verified on read, hash-chained into `signed_events`. Sender cannot repudiate. Recipient cannot fabricate. Audit chain is procurement-defensible.
+
+Data model (additive to the v0.7.0 grand-slam terminal schema, see §4.1 ladder):
+
+```sql
+CREATE TABLE signals (
+    id              TEXT PRIMARY KEY,
+    namespace       TEXT NOT NULL,
+    from_agent      TEXT NOT NULL,
+    to_agent        TEXT,                         -- NULL = broadcast within namespace
+    subject         TEXT NOT NULL,
+    body            TEXT NOT NULL,                -- JSON-typed payload
+    signal_type     TEXT NOT NULL,                -- authorize | notify | request | response | broadcast
+    in_reply_to     TEXT,                         -- threading
+    correlation_id  TEXT,                         -- group related signals
+    references      TEXT NOT NULL DEFAULT '[]',   -- JSON array of memory_ids or action_ids
+    created_at      INTEGER NOT NULL,
+    expires_at      INTEGER,
+    delivered_at    INTEGER,
+    read_at         INTEGER,
+    acknowledged_at INTEGER,
+    signature       BLOB NOT NULL,                -- Ed25519 over canonical content
+    sender_pubkey   BLOB NOT NULL,                -- explicit, not just agent_id reference
+    FOREIGN KEY (namespace) REFERENCES namespaces(name),
+    FOREIGN KEY (in_reply_to) REFERENCES signals(id)
+);
+```
+
+Federation semantics: cross-namespace signal delivery requires sender's pubkey to be allowlisted in recipient's federation peers. W-of-N quorum on signal-creation. **The multi-org-trust-boundary primitive** — a compliance agent in one organization cannot send into another's namespace unless the recipient's federation allowlist includes that agent's pubkey.
+
+MCP tools (5): `memory_signal_send`, `memory_signal_read`, `memory_signal_inbox`, `memory_signal_thread`, `memory_signal_ack`.
+
+##### NEW — Attested checkpoints (+3 sessions) — **cutline-protected**
+
+Regulated workflows require waiting on external conditions before proceeding: compliance review completion, CI green, security scan passed, human approval received, deployment window opened, regulatory clearance issued. Today these conditions live in disparate systems (Jira, ServiceNow, Jenkins, manual email approval, regulator portals). Checkpoints are first-class memory: an external condition with cryptographically attested resolution.
+
+**Procurement-grade-critical.** Separation of duties is a regulatory requirement (SOX §404, FFIEC, HIPAA §164.308(a)(3), GDPR Article 32). A checkpoint primitive with Ed25519 resolution attestation turns SoD enforcement into a substrate-level guarantee: the agent literally cannot proceed past the checkpoint, the resolution is cryptographically attested, the resolver's identity is verified, the audit chain is tamper-evident. Regulators ask about this by name during examination. **No competitor in the field offers this primitive.**
+
+Four condition types: `approval` (resolver pubkey must match approver list), `external_signal` (resolved by inbound signal with matching correlation_id), `condition_predicate` (background evaluator periodically checks namespace state), `deadline` (auto-resolves at timestamp).
+
+MCP tools (4): `memory_checkpoint_create`, `memory_checkpoint_resolve`, `memory_checkpoint_query`, `memory_checkpoint_verify` (returns full attestation chain as procurement-grade evidence packet).
+
+##### NEW — Routines (+2 sessions)
+
+Parameterized action templates with frozen-immutability for regulatory hold. JSON template with action declarations + edge declarations using `{{parameter}}` placeholders. Useful for FFIEC-aligned loan origination, HIPAA-aligned consent capture, drug-trial enrollment checklists. `memory_routine_run` instantiates with parameter values, creating actions + edges + checkpoints atomically.
+
+MCP tools (5): `memory_routine_create`, `memory_routine_freeze`, `memory_routine_run`, `memory_routine_status`, `memory_routine_list`.
+
+##### NEW — Explicit frontier/next MCP surface (+0.5 session)
+
+Agent runtimes (Claude Code, OpenClaw, Cursor) ask "what should I do next" thousands of times across deployments. Surfacing this explicitly removes the need for every runtime to write its own priority-ranking SQL over actions + leases:
+
+- `memory_action_frontier` — return ranked list of currently-unblocked actions (no unmet dependencies, no active lease) in a namespace
+- `memory_action_next` — return the single highest-priority unblocked action for the calling agent's namespace permissions
+
+Trivial implementation over Pillar 1 baseline.
+
+##### What is NOT in Pillar 1 scope
+
+- **Sentinels** (event-driven watchers: webhook/timer/threshold/pattern/approval triggers). Straddles substrate/runtime boundary. Defer to v0.9 or v1.0+ research. Promote earlier only on commercial-tier customer demand.
+- **Sketches** (ephemeral exploratory action graphs). Developer-experience nicety. Belongs in agent runtime. Decline.
+- **LLM-orchestrated action selection.** Substrate exposes frontier; runtime decides. §10 agent-runtime cut applies cleanly.
+- **Outbound notification delivery** (email, Slack, webhook outbound for signals). Signals are stored, queryable, federation-replicated. Outbound delivery is integration layer, not substrate.
+
+#### Pillar 2 — Typed Cognition (unchanged from prior §7.4)
+
+- Typed memory enums: `Goal`, `Plan`, `Step`, `Observation`, `Decision`
 - Relation taxonomy: `step.advances → plan`, `plan.serves → goal`, etc.
-- `memory_cognition_register`, `memory_cognition_query`, `memory_cognition_supersede`.
+- `memory_cognition_register`, `memory_cognition_query`, `memory_cognition_supersede` MCP tools
 - Strict typing validation: Plan must point at Goal; Step at Plan; etc.
+- Promote becomes a typed state machine, not a column flip (closes §5.2 narrowness)
+- Tag taxonomy as constrained overlay (closes auto_tag uncurated-free-text issue)
+- Typed contradiction detection: Decision A vs Decision B on same Goal as candidate set
+- Naming hygiene: rename `memory_get_taxonomy` → `memory_namespace_taxonomy`; new `memory_cognition_taxonomy` returns typed-memory distribution
 
-**Audit absorbs:**
-- Promote becomes a typed state machine, not a column flip (closes the §5.2 narrowness).
-- Tag taxonomy as constrained overlay (closes the auto_tag uncurated-free-text issue).
-- Typed contradiction detection: `Decision A` vs `Decision B` on same `Goal` as candidate set. Replaces FTS-title-match heuristic with semantic-typed candidate set.
+Effort: ~4 sessions baseline.
 
-**Naming hygiene:** rename existing `memory_get_taxonomy` → `memory_namespace_taxonomy` (it returns namespace folder counts, not tags). New `memory_cognition_taxonomy` returns typed-memory distribution.
-
-#### Pillar 2.5 — Compaction Pipeline
+#### Pillar 2.5 — Compaction Pipeline (unchanged from prior §7.4)
 
 Six-stage with verify+rollback. Maps to typed-cognition supersession.
 
-- Pipeline: dedupe → cluster → eligibility → summarize → persist → verify.
-- Stage 6 rollback when verify fails.
-- Pressure triggers calibrated against PERFORMANCE.md p95 budgets.
-- Bounded compaction subagent: single LLM call, no tools, no loops, structured JSON output.
-- New hook events `pre_compaction` and `on_compaction_rollback`.
-- Default `enabled = false` (Ollama dependency means silent fail otherwise; operator opts in).
-- `prune_after_days = 0` (never) for archive default.
+- Pipeline: dedupe → cluster → eligibility → summarize → persist → verify
+- Stage 6 rollback when verify fails
+- Pressure triggers calibrated against PERFORMANCE.md p95 budgets
+- Bounded compaction subagent: single LLM call, no tools, no loops, structured JSON output
+- New hook events `pre_compaction` and `on_compaction_rollback`
+- Default `enabled = false` (Ollama dependency)
+- Cosine clustering as primary path; Jaccard becomes the cheap pre-filter
+- Size-pressure GC triggers (closes "GC is TTL-only")
+- **R4 — `ai-memory curator` standalone daemon CLI** wraps Pillar 2.5's compaction + Bucket 0's auto-link-inference + auto-extraction into one operator-visible daemon
 
-**Audit absorbs:**
-- Cosine clustering as primary path; Jaccard becomes the cheap pre-filter (upgrades the lexical-Jaccard-only path of v0.6.3 auto-consolidation).
-- Size-pressure GC triggers (closes "GC is TTL-only").
+Effort: ~5 sessions baseline.
 
-**Recoveries absorb:**
-- **R4 — `ai-memory curator` standalone daemon CLI** wraps Pillar 2.5's compaction + Bucket 0's auto-link-inference + auto-extraction into one operator-visible daemon. ~2 sessions.
+#### Pillar 3 — CRDTs (unchanged from prior §7.4)
 
-#### Pillar 3 — CRDTs
+- Core CRDT type set: G-Counter (`access_count`), PN-Counter (general counters), LWW-Register with attested-identity tiebreak, OR-Set (`tags`)
+- Per-memory vector clock (agent_id → Lamport tick)
+- Federation push/pull merges via CRDT semantics (replaces last-writer-wins on `updated_at`)
+- Conflict-aware curator: distinguishes mergeable conflicts from human-resolution-required
+- LWW-Register tiebreak: ship as `(attestation_level, agent_id, monotonic_local_clock)` with documented consequences
+- **R6 — Consensus-based truth determination.** When N agents store conflicting facts, confidence becomes function of agent count (4-of-5 agree → 0.95)
 
-- Core CRDT type set: G-Counter (access_count), PN-Counter (general counters), LWW-Register with attested-identity tiebreak, OR-Set (tags).
-- Per-memory vector clock (agent_id → Lamport tick).
-- Federation push/pull merges via CRDT semantics (replaces last-writer-wins on `updated_at`).
-- Conflict-aware curator: distinguishes mergeable conflicts from human-resolution-required.
+Effort: ~3 sessions baseline.
 
-**Audit absorbs:**
-- `access_count` cap (currently 1M global) becomes per-replica when promoted to G-Counter; document merge.
-- `memory_links` directionality vs `get_links`-undirected-on-read: pin down the OR-Set semantic now, not at merge time.
-- LWW-Register tiebreak: ship as `(attestation_level, agent_id, monotonic_local_clock)` with documented consequences. **Do not ship "CRDTs" as a vague banner. Ship the four typed primitives with documented merge semantics.**
+#### Strategic adjacencies — NET-NEW from v0.7.0 ship-window analysis
 
-**Recoveries absorb:**
-- **R6 — Consensus-based truth determination.** When N agents store conflicting facts, confidence becomes function of agent count (4-of-5 agree → 0.95). Pairs with LWW-Register tiebreak. ~3 sessions.
+##### §7.4.A LongMemEval Gemma 4 refresh — pre-v0.7.0 distribution (+1 session, urgent)
 
-#### v0.8 cutline if slipping
+Current state: published numbers ran with gemma3:4b. Production v0.7.0 deploys Gemma 4 throughout. Honesty-discipline gap.
 
-Keep: Pillar 1, Pillar 3 (CRDT four-primitive set with documented merge), G1 if it slipped from v0.7.
-Defer Pillar 2 typed cognition to v0.8.1 if substrate ships clean.
+Fix: re-run with `CURATOR_MODEL=gemma4:e4b` on reference hardware. Publish updated R@5/R@10/R@20 plus per-category breakdown alongside reranker-variant disclosure. ~30 minutes of compute. ~1 session of work end-to-end. Belongs *before* v0.7.0 procurement-grade distribution; flagged inside v0.8 §7.4 only because it was identified during strategic-planning sessions and must not drop.
+
+##### §7.4.B Claude Code plugin marketplace install (+1 session)
+
+Today installation requires manual MCP config in `~/.claude.json` — friction wall before first recall. agentmemory's one-line `/plugin install` is procurement-grade developer-onboarding ergonomics this substrate does not yet match.
+
+Fix: create `.claude-plugin/` directory in repo with marketplace manifest. Register the MCP server, the four shipped skills (`/recall`, `/remember`, `/search`, `/forget`), v0.7.0 hooks. Publish to Claude Code plugin marketplace.
+
+##### §7.4.C vLLM as first-class inference backend (per RFC #651) (+5 sessions) — **cutline-protected**
+
+Issue #651 RFC proposes a 7-backend trait architecture with Cargo features for compile-time selection. Make first-class **Ollama + vLLM**, not Ollama + candle:
+
+- Operator ergonomics: vLLM is what regulated enterprise NVIDIA H100/H200/L40S clusters actually deploy at scale (PagedAttention for multi-tenant throughput). candle is fine for in-process but newest model support is hit-or-miss.
+- Failure-mode discipline: Ollama HTTP isolates inference failure from daemon. In-process candle crashes the daemon. For 24/7 federation daemons in regulated production, isolation matters more than the 10-30ms HTTP overhead.
+- Cross-platform consistency: Ollama works the same on macOS/Linux/Windows/WSL. candle requires per-platform build artifacts.
+
+v0.8.0 scope: implement the trait; keep Ollama as default forever; add vLLM as first-class alternative (OpenAI-compatible HTTP, accommodates customer-managed inference clusters). Defer candle, mistralrs, mlx-rs, llama-cpp-rs, TensorRT-LLM, ChatRTX, MLX-LM-remote to v0.8.x or community-supported.
+
+**Why v0.8.0 not later.** The enterprise NVIDIA cluster path is what procurement-grade buyers ask about. Without vLLM, the commercial deployment tier cannot honestly answer "yes, ai-memory deploys on our H100 fleet at scale."
+
+##### §7.4.D Model signature verification chain (+2 sessions) — strategic IP
+
+Federal procurement asks specifically about supply-chain attestation on model weights. The v0.7.0 Ed25519 attestation infrastructure (already shipping for `memory_links` via Track H) reapplies cleanly to model weights:
+
+| Component | Today | v0.8.0 |
+|---|---|---|
+| Model digest tracked | implicit (Ollama-supplied) | explicit; written into `signed_events` on first load |
+| Model identity attested | no | Ed25519 over `(digest, vendor, version)` by AlphaOne release key |
+| Loader verification | trust-on-first-use via Ollama | reject mismatched digest at load; refuse to start if signature absent/invalid |
+| Audit chain | not tied to model used | every `signed_events` row carries the `model_digest` that produced it |
+| Customer evidence packet | none | `ai-memory model-attest --evidence > packet.json` |
+
+New `model_attestations` table (additive on top of v0.7.0 grand-slam terminal schema, see §4.1 ladder): `model_id`, `model_digest`, `attested_by_pubkey`, `signature`, `attestation_date`, `source_url`. Loader gains `verify_model_attestation()` before model instantiation; refuses to load on signature mismatch. Audit chain records `model_id` with every LLM-derived output.
+
+**Why it's strategic.** Turns "we run Gemma 4" into "we run cryptographically attested Gemma 4 with verifiable supply-chain provenance." Different procurement conversation entirely. Currently **no competitor has this** — neither Anthropic Managed Memory, agentmemory, Total Recall, Hindsight, nor Mastra OM. See issue #654 for the IP-investment dossier.
+
+##### §7.4.E Distilled hot-path model — research, lands v0.8 cycle if corpus collection clears
+
+Investment A from issue #654. Train a small model (300M-700M) on Gemma 4 teacher outputs for the four bounded structured-output tasks (`auto_tag`, `detect_contradiction`, `expand_query`, `summarize_memories`). Ship distilled weights embedded with the published binary; <2GB payload; CPU-only with mlx/wgpu acceleration when available.
+
+| Task | v0.7.0 model | Distilled target | Latency target |
+|---|---|---|---|
+| `auto_tag` | gemma3:4b @ ~0.7s p50 | 300M | <100ms p50 |
+| `detect_contradiction` | gemma4:e4b @ ~3-30s p50 | 300M | <200ms p50 |
+| `expand_query` | gemma4:e4b @ ~3-15s p50 | 500M | <500ms p50 |
+| `summarize_memories` | gemma4:e4b @ ~5-30s p50 | 700M | <2s p50 |
+
+**Long pole**: training-corpus collection (~100k pairs per task at the Gemma 4 teacher quality bar; $1k-5k API budget). Engineering itself is small (few days on a single H100). Composes with §7.4.D so distilled weights themselves get attested signatures — cryptographic provenance over the entire inference path including substrate-owned weights.
+
+##### §7.4.F Real-time WebSocket viewer (+2 sessions) — v0.8.1 candidate
+
+Optional axum subroute on the HTTP daemon (`ai-memory serve --viewer`) exposing WebSocket stream of memory events + namespace tree + active leases/signals/checkpoints + recent `signed_events`. Default off (security-by-default — no listening port unless explicitly enabled). Protected by an operator-supplied secret when on. Belongs in the next minor after Pillar 1 lands; not blocking v0.8.0.
+
+#### Hook pipeline expansion — v0.7.0 → v0.8.0
+
+v0.7.0 grand-slam ships **25 lifecycle events** on `feat/v0.7.0-layer-1` (20 plan baseline + `pre_recall_expand` G10 + `pre_reflect` + `post_reflect` recursive-learning Task 6/8 + `pre_compaction` + `on_compaction_rollback` L1-7). v0.8.0 adds 10 events for coordination substrate on top of that. Backward compatible.
+
+| Event | Fires at | Decision types |
+|---|---|---|
+| `pre_action_create` | Before action insert | Allow / Modify(action_delta) / Deny / AskUser |
+| `pre_state_change` | Before action transition | Allow / Deny |
+| `post_state_change` | After action transition | Notify only |
+| `pre_lease_acquire` | Before lease insert | Allow / Deny |
+| `on_lease_expire` | When sweeper releases expired lease | Notify only |
+| `pre_signal_send` | Before signal write | Allow / Modify(signal_delta) / Deny |
+| `post_signal_ack` | After signal acknowledged | Notify only |
+| `pre_checkpoint_create` | Before checkpoint write | Allow / Deny |
+| `post_checkpoint_resolve` | After checkpoint resolved | Notify only |
+| `pre_routine_run` | Before routine instantiation | Allow / Modify(parameters) / Deny |
+
+#### Schema migration — v34 → v3X
+
+v0.7.0 grand-slam terminal schema is **v34** (sqlite) / **v33** (postgres) at HEAD `12a7f29` (ladder per §4.1 schema row — v20 → v22 → v29 → v30 → v33 (L2 wave `memory_links.relation` CHECK constraint, commit `58877c7`) → v34 (V-4 closeout #698 `signed_events.prev_hash` + `sequence` cross-row chain)).
+The original §7.4 plan called for v21 (audit log + Ed25519 attestation columns) → v22 (Pillar 1); the in-flight v0.7.0 work consumed v20–v34 ahead of doc-time, so v0.8.0 Pillar 1 expansion lands at **v3X (above v34)** with the additive tables enumerated below — exact terminal version pinned at the §16 gate.
+
+Migration v34 → v3X (above v34):
+- Add `actions` + `action_edges` tables
+- Add `leases` table
+- Add `signals` table
+- Add `checkpoints` table
+- Add `routines` + `routine_runs` tables
+- Add `model_attestations` table (per §7.4.D)
+
+All `CREATE TABLE` operations are additive. No existing table modifications. Migration idempotent + reversible. Discipline matches §11 quality gates.
+
+#### Effort summary — v0.8.0 total scope
+
+| Component | Baseline | Expansion | Total |
+|---|---|---|---|
+| Pillar 1 — actions/leases/DAG/federation (baseline) | 12.5 | 0 | 12.5 |
+| Pillar 1 — Signed signals (NEW) | 0 | +3 | 3 |
+| Pillar 1 — Attested checkpoints (NEW) | 0 | +3 | 3 |
+| Pillar 1 — Routines (NEW) | 0 | +2 | 2 |
+| Pillar 1 — Frontier/next surface (NEW) | 0 | +0.5 | 0.5 |
+| Pillar 2 — Typed Cognition | 4 | 0 | 4 |
+| Pillar 2.5 — Compaction + R4 curator daemon | 5 | 0 | 5 |
+| Pillar 3 — CRDTs + R6 consensus | 3 | 0 | 3 |
+| §7.4.B Claude Code plugin marketplace install | 0 | +1 | 1 |
+| §7.4.C vLLM first-class inference backend (RFC #651) | 0 | +5 | 5 |
+| §7.4.D Model signature verification chain | 0 | +2 | 2 |
+| Hook pipeline integration (10 new events) | 0 | +1.5 | 1.5 |
+| Schema migration v34 → v3X (above v34) | 0 | +0.5 | 0.5 |
+| Test suite (~540 new tests) | 0 | +3 | 3 |
+| Documentation + reproducibility scripts | 0 | +1 | 1 |
+| **TOTAL** | **24.5** | **+22.5** | **~47 sessions** |
+
+At the demonstrated cadence (4 production releases in 14 days through v0.6.4 + v0.7.0), 22.5 net-new sessions ≈ 6-8 calendar weeks. Compatible with Q4 2026 ship target.
+
+#### v0.8.0 cutline if slipping
+
+**Keep (cutline-protected):**
+- Pillar 1 base (actions + leases + DAG + federation) — baseline
+- **Attested checkpoints (§Pillar 1 NEW)** — procurement-grade separation-of-duties primitive
+- **Pillar 3 CRDT four-primitive set with documented merge** — baseline
+- **vLLM first-class inference backend (§7.4.C)** — enterprise NVIDIA path
+
+**Defer to v0.8.1 if substrate ships clean:**
+- Routines
+- Claude Code plugin marketplace install
+- Real-time WebSocket viewer
+- Pillar 2 typed cognition
+
+**Defer to v0.9 if slippage severe:**
+- Signed signals — keep if possible
+- Model signature verification chain
+
+#### The three highest-leverage moves in v0.8.0
+
+Updated from §9 (which named v0.6.3.1, v0.7 G1, and v0.7 hooks). v0.8.0's three are:
+
+1. **Attested checkpoints.** Separation-of-duties primitive that regulators ask about by name. No competitor has it. Cutline-protected — ships even if other Pillar 1 work slips. **The single highest-leverage commitment in v0.8.0.**
+2. **Signed signals across organizational trust boundaries.** Cryptographically non-repudiable inter-agent messaging across federation peers. Hardens the federation thesis from "memory sync" to "workflow coordination with cryptographic audit." Pairs structurally with checkpoints (signal can resolve a checkpoint).
+3. **vLLM as first-class inference backend.** Closes the "can ai-memory deploy at scale on our NVIDIA H100 fleet" procurement question. PagedAttention is the difference between handling 10 concurrent agents and 1,000 in regulated multi-tenant production.
+
+Bonus strategic IP (not cutline-protected): **model signature verification chain.** Substrate-level supply-chain attestation no competitor offers.
+
+#### Commercial-tier coupling (what v0.8.0 enables)
+
+Note: this section names commercial deployment surfaces in generic terms ("commercial deployment tier", "managed-service offering"). Brand-specific commitments live outside ROADMAP2; everything here is Apache 2.0 substrate.
+
+- **Federate tier:** operational support for cross-org signal allowlist management, checkpoint approver matrix, routine versioning across trust boundaries. New service surface that did not exist before v0.8.
+- **Vertical tier (Financial Services):** pre-built routine templates for FFIEC-aligned workflows — loan origination, KYC, AML escalation, suspicious activity reporting. Customers customize parameters; substrate enforces structure and audit chain.
+- **Vertical tier (Healthcare):** pre-built routine templates for HIPAA-aligned workflows — consent capture, BAA tracking, breach response, 42 CFR Part 2 release authorization.
+- **Attest tier:** procurement-grade evidence packets for separation-of-duties controls. "Here is the cryptographic chain proving Compliance Officer X authorized Action Y at Time T, verifiable independently against the substrate's `signed_events` log."
+- **Inference layer:** vLLM first-class backend + model signature verification = the commercial tier can honestly answer two procurement questions today's competitors cannot: (1) "Does ai-memory deploy at scale on our NVIDIA H100 fleet?" — yes, via vLLM with PagedAttention; (2) "How do we know the model wasn't swapped between attestation and inference?" — cryptographic chain from `model_attestations`.
 
 ### 7.5 v0.9 — Skill Memories + Function Calling + Default-On Reranker — Q1 2027
 
@@ -465,6 +702,10 @@ Defer Pillar 2 typed cognition to v0.8.1 if substrate ships clean.
 - **Function calling in `llm.rs`** — wire local Gemma 4 LLM to a tool-calling protocol so curator passes can use targeted operations rather than blind text generation.
 - **Cross-encoder reranker default-on** — closes the published reranker-on quality range. HF-Hub model auto-fetch on first use; **fail loud (`mode: "degraded"`)** when model not available, no silent lexical fallback.
 - **Streaming tool responses** — for long-running MCP tools (recall over very large stores, federation broadcasts).
+
+#### Operator-controlled telemetry — v0.7.0 commitment carried forward
+
+`ai-memory` does not phone home. No outbound network call is initiated by the binary except to destinations the operator has explicitly configured (federation peers on the mTLS allowlist, optional HuggingFace embedder fetch, optional Ollama LLM endpoint). All tracing spans go to operator-configured sinks only: stderr by default, opt-in rolling file appender via `[logging]` in `config.toml`, and an OTLP exporter shipping at v1.0 per §7.6. Span content is operation metadata only — `agent_id`, namespace, duration, result — never memory content. `AI_MEMORY_ANONYMIZE=1` redacts the agent_id in externally-visible spans. Full policy: [`docs/telemetry.md`](docs/telemetry.md).
 
 **Audit absorbs:**
 - G3 — HNSW persistence to disk (sqlite-vec migration or on-disk index). Removes O(N) cold-start.
@@ -490,10 +731,10 @@ Defer Pillar 2 typed cognition to v0.8.1 if substrate ships clean.
 
 Forever. Including:
 
-- **Hardware attestation hooks** — TPM/HSM/Secure Enclave abstraction. (Certified-managed deployment is AgenticMem's commercial layer; the abstraction is OSS.)
+- **Hardware attestation hooks** — TPM/HSM/Secure Enclave abstraction. (Certified-managed deployment is the commercial-service tier; the abstraction is OSS.)
 - **Cross-modal memory** — image/audio/code-AST embeddings on the same HNSW index, different embedders.
 - **Federated learning of recall weights** — agents adapt scoring locally, sync the *weights* across the mesh, not just the memories.
-- **Skill marketplace protocol** — registration/discovery/signing/invocation. (Curated marketplace ops = AgenticMem; the protocol is OSS.)
+- **Skill marketplace protocol** — registration/discovery/signing/invocation. (Curated marketplace ops = the commercial-service tier; the protocol is OSS.)
 - **Custom embedder integrations** — OpenAI, Voyage, Cohere, Ollama, local Sentence Transformers, all behind a trait.
 
 ---
@@ -578,6 +819,11 @@ Plus per-release:
 | Changelog | github.com/alphaonedev/ai-memory-mcp/blob/main/CHANGELOG.md | per release |
 | Roadmap (this doc) | github.com/alphaonedev/ai-memory-mcp/blob/main/ROADMAP2.md | live |
 | Memory Portability Spec | memory.dev/spec/v1 (or equivalent) | v0.6.3.1 launch |
+| Production Deployment Guide | github.com/alphaonedev/ai-memory-mcp/blob/main/docs/production-deployment.md | v0.7.0 (gap A1, issue #692) |
+| Security Policy | github.com/alphaonedev/ai-memory-mcp/blob/main/SECURITY.md | v0.7.0 (gap E2, issue #692) |
+| Telemetry & Observability Policy | github.com/alphaonedev/ai-memory-mcp/blob/main/docs/telemetry.md | v0.7.0 (gap E3, issue #692) |
+| Adoption Metrics Dashboard | alphaonedev.github.io/ai-memory-mcp/adoption.html | v0.7.0 (gap F2, issue #692; auto-update via `scripts/update-adoption-metrics.sh`) |
+| Competitive Benchmarks | github.com/alphaonedev/ai-memory-mcp/tree/main/benchmarks/competitive-benchmarks | v0.7.0 launch (gap F1, issue #692; scaffolding shipped, full run at launch) |
 
 ---
 
@@ -595,9 +841,9 @@ Pre-built binaries via `cargo binstall ai-memory` or direct download from GitHub
 
 ## 14. Trademark and brand discipline
 
-`ai-memory™` and `AgenticMem™` are USPTO-registered trademarks owned by AlphaOne LLC.
+`ai-memory™` is a USPTO-registered trademark owned by AlphaOne LLC. Brand-specific commercial-service-tier trademarks live outside this document.
 
-Apache 2.0 explicitly does not grant trademark rights. Forks of the codebase cannot use the names `ai-memory` or `AgenticMem`. This is the brand moat that survives even if the code becomes a commodity.
+Apache 2.0 explicitly does not grant trademark rights. Forks of the codebase cannot use the name `ai-memory`. This is the brand moat that survives even if the code becomes a commodity.
 
 ---
 
@@ -606,15 +852,110 @@ Apache 2.0 explicitly does not grant trademark rights. Forks of the codebase can
 1. **No relicense.** Never to BSL, SSPL, AGPL, Elastic License, or any other non-OSI-approved license.
 2. **No paywall on existing features.** No feature that ships in any released version of ai-memory will subsequently be removed and reintroduced as commercial-only.
 3. **No commercial-only roadmap items.** This document is the complete roadmap. There is no parallel closed-source roadmap.
-4. **No code-locked-behind-services.** AgenticMem services do not require running modified ai-memory code. Customers can switch from AgenticMem to self-managed at any time without code changes.
+4. **No code-locked-behind-services.** Commercial-service-tier offerings do not require running modified ai-memory code. Customers can switch from a managed tier to self-managed at any time without code changes.
 
 If any of these commitments are ever broken, OSS users have the right to fork the last Apache 2.0 release and continue indefinitely. The trademark prevents the fork from using the `ai-memory` name; the code path remains open.
 
 ---
 
-## 16. Net
+## 16. v0.8.0 Policy Engine 100% Audit Trail Closeout
 
-ai-memory v0.6.3 shipped clean: 1,809 tests, 93.08% coverage, ship-gate 4/4, A2A 48/48 mTLS, 5/5 channels, LongMemEval R@5 97.8% / R@10 99.0% / R@20 99.8%, 43 MCP tools, schema v15. v0.6.3.1 then landed (2026-04-30) with the never-lose-context release: 1,886 lib tests (+281), 93.84% line coverage, schema v19 (ladder v15→v17→v18→v19), 7 new CLI surfaces (boot/install/wrap/logs/audit/doctor/bench), and 17 documented integrations across 10 platforms.
+Closes the remaining ~5% gap between v0.7.0 Option B (issues
+[#693](https://github.com/alphaonedev/ai-memory-mcp/issues/693) +
+[#691](https://github.com/alphaonedev/ai-memory-mcp/issues/691) +
+[#694](https://github.com/alphaonedev/ai-memory-mcp/issues/694) +
+[#695](https://github.com/alphaonedev/ai-memory-mcp/issues/695) +
+[#696](https://github.com/alphaonedev/ai-memory-mcp/issues/696)) and
+the full property documented by the operator directive of 2026-05-14:
+
+> "Every tool call passes through a policy engine; the engine logs
+> every refusal cryptographically; severity-classified rules can
+> escalate to human."
+
+Tracking: [#697](https://github.com/alphaonedev/ai-memory-mcp/issues/697)
+(epic) with 8 sub-tasks (V08-PE-1 through V08-PE-8). Full architectural
+detail at [`docs/policy-engine.md`](docs/policy-engine.md) and audit
+coverage matrix at
+[`docs/security/audit-trail-coverage.md`](docs/security/audit-trail-coverage.md).
+
+### Sub-task summary
+
+- **V08-PE-1: Mandatory-hook profile** — `--enforce` for
+  procurement-tier deployments. The daemon refuses to serve when the
+  Claude Code PreToolUse hook is not installed. Closes the
+  out-of-band-actions gap by raising the cost of "I forgot to install
+  the hook" from silent permissiveness to refuse-to-start.
+- **V08-PE-2: Read-action gating** — `AgentAction::Read` variant +
+  wire-point coverage across recall / search / list / get /
+  session_boot. Today the K9 `Permissions::evaluate` pipeline gates
+  the substrate-INTERNAL read path (memory-scoped); V08-PE-2 adds the
+  top-level engine surface so reads land in `signed_events` alongside
+  writes.
+- **V08-PE-3: Subprocess-chain visibility** — eBPF on Linux, dtrace
+  on macOS. Surfaces the fork+exec chain underneath a permitted Bash
+  invocation so a `bash -c "evil_thing"` whose child then spawns an
+  unrelated process is visible to the engine and chain-logged.
+- **V08-PE-4: Persistent audit queue** — durable across daemon
+  restart. Closes the hard-crash gap in PE-3's process-local
+  deferred queue ([#696](https://github.com/alphaonedev/ai-memory-mcp/issues/696)).
+  Design candidate: on-disk WAL-style queue with periodic
+  fsync + drain-on-recovery at boot.
+- **V08-PE-5: Severity-based human escalation** — adds
+  `Decision::Escalate { rule_id, prompt }`. Pairs with the L1-8
+  Approval-API surface (already shipped): an Escalate verdict emits
+  a `pending_action`, the operator dashboard surfaces it, the
+  operator's allow/deny decision joins the audit chain. Closes the
+  "rules can escalate to human" half of the operator directive.
+- **V08-PE-6: TPM-bound binary integrity** — daemon attests the
+  shipping binary against a signed manifest at boot. Closes the
+  last partial mitigation for out-of-band actions: a forked binary
+  that no-ops the hook fails attestation and the operator's TPM
+  refuses to release the rule-signing key.
+- **V08-PE-7: Refuse-by-default profile** — procurement-tier rule
+  set that ships `enabled = 1, attest_level = operator_signed` out
+  of the box for a vendored operator key (with an opt-out path for
+  fresh self-hosted operators who want the default-permissive
+  cold-start contract).
+- **V08-PE-8: Audit-trail completeness verifier** — `ai-memory
+  verify-audit-trail`. Walks the `signed_events` chain end to end:
+  monotonic sequence check + Ed25519 signature check per row +
+  cross-reference against the expected event surface (memories,
+  links, approvals, migrations). Closes the verification loop the
+  v0.7.0 ship cannot mechanically perform today.
+
+### Effort
+
+22-28 sessions · 3-4 weeks wall-clock · MEDIUM-HIGH risk. At the v0.7.0
+cadence (4 production releases in 14 days through v0.6.4 + v0.7.0),
+22-28 sessions sit inside the Q4 2026 v0.8.0 window without
+displacing any prior commitment from §7.4 (Distributed Coordination
+Substrate). The audit-trail closeout is **additive** to the v0.8.0
+scope — it does not replace Pillar 1 / Pillar 2 / Pillar 2.5 / Pillar 3
+or the strategic adjacencies (§7.4.A-F).
+
+### Cutline discipline if slipping
+
+- **Keep (cutline-protected):** V08-PE-1 mandatory-hook profile,
+  V08-PE-5 severity-based escalation, V08-PE-8 completeness verifier
+  — these are the three sub-tasks that close the operator's stated
+  property literally.
+- **Defer to v0.8.1 if substrate slips:** V08-PE-3 subprocess-chain
+  visibility (eBPF / dtrace work has platform-specific risk).
+- **Defer to v0.9 if slippage severe:** V08-PE-6 TPM-bound integrity
+  (depends on TPM toolchain maturity in the deployment fleet);
+  V08-PE-7 refuse-by-default profile (operator-side rollout
+  exercise).
+
+The three cutline-protected sub-tasks together close ~90% of the
+remaining 5% gap. V08-PE-2 read-action gating folds in if cycle
+budget allows — it widens visibility but does not close a
+distinct property the operator directive named.
+
+---
+
+## 17. Net
+
+ai-memory v0.6.3 shipped clean: 1,809 tests, 93.08% coverage, ship-gate 4/4, A2A 48/48 mTLS, 5/5 channels, LongMemEval R@5 97.8% / R@10 99.0% / R@20 99.8%, 43 MCP tools, schema v15. v0.6.3.1 then landed (2026-04-30) with the never-lose-context release: 1,886 lib tests (+281), 93.84% line coverage, schema v19 (ladder v15→v17→v18→v19), 7 new CLI surfaces (boot/install/wrap/logs/audit/doctor/bench), and 17 documented integrations across 10 platforms. v0.7.0 grand-slam terminal ship state (HEAD `12a7f29` on `feat/v0.7.0-grand-slam`): schema **v34 sqlite / v33 postgres** (ladder per §4.1, including V-4 closeout #698 `signed_events` cross-row chain), **63 MCP tools** total (7 Agent Skills tools = L1-5 register/list/get/resource/export + L2-6 `promote_from_reflection` + L2-7 `compositional_context`, with the L2-6 promote tool landed at v0.7.0 per `05e0cb9a` v0.7.1-fold decision), **25 hook lifecycle events** (see §4.7 grand-slam block for the ladder), and Policy Engine Option B foundation (L1-6 substrate rules + PE-1/PE-2/PE-3 all merged on grand-slam).
 
 The audit found 22 distinct gaps. None block the published v0.6.3 claims. One (G1 — namespace-inheritance enforcement) is a security-shaped bug that gets a cutline-protected slot in v0.7 Bucket 3. Eight are capabilities-JSON theater that v0.6.3.1 Capabilities v2 makes honest. The remaining thirteen distribute cleanly across v0.6.3.1 / v0.7 / v0.8 / v0.9 / v1.0.
 

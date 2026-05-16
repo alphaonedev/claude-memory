@@ -139,7 +139,67 @@ fn spawn_stderr_drain(mut stderr: ChildStderr, ring: StderrRing) -> JoinHandle<(
     })
 }
 
-/// Emit a WARN log carrying the buffered stderr tail iff non-empty.
+/// Redact patterns that look like secrets from a stderr tail before
+/// it reaches the operator log. Hook authors are already trusted at
+/// filesystem scope, but a hostile hook running `printenv >&2; exit 1`
+/// should not be able to exfiltrate environment variables (or other
+/// secret-shaped strings) into the operator log feed, which may be
+/// ingested by less-trusted aggregation systems.
+///
+/// Two filters: (1) replace the value half of any `VAR=value`
+/// assignment where the variable name is shell-identifier-shaped,
+/// (2) drop any line matching one of the well-known secret keywords.
+/// Conservative — favours over-redaction over leaking.
+fn redact_stderr_tail(tail: &str) -> String {
+    const SECRET_KEYWORDS: &[&str] = &[
+        "secret",
+        "password",
+        "passwd",
+        "token",
+        "api_key",
+        "apikey",
+        "bearer",
+        "private_key",
+        "private-key",
+        " auth",
+        "credential",
+        "cookie",
+        "x-amz-",
+        "aws_",
+        "ssh-rsa",
+        "ssh-ed25519",
+        "begin private",
+        "begin rsa",
+        "begin ec",
+        "begin openssh",
+    ];
+    tail.lines()
+        .map(|line| {
+            let lower = line.to_ascii_lowercase();
+            if let Some(eq_pos) = line.find('=') {
+                let prefix: &str = &line[..eq_pos];
+                if !prefix.is_empty()
+                    && prefix
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && prefix
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                {
+                    return format!("{prefix}=<redacted>");
+                }
+            }
+            if SECRET_KEYWORDS.iter().any(|kw| lower.contains(kw)) {
+                return "<redacted: matched secret-keyword filter>".to_string();
+            }
+            line.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Emit a WARN log carrying the redacted stderr tail iff non-empty.
 /// Free function (rather than a method) so it can be called from the
 /// `exchange` failure arms without re-borrowing `&self` or the
 /// connection guard — the borrow-checker won't let us hold `conn`
@@ -148,11 +208,12 @@ fn spawn_stderr_drain(mut stderr: ChildStderr, ring: StderrRing) -> JoinHandle<(
 /// `conn` is live.
 fn warn_stderr_tail(command: &std::path::Path, stage: &str, tail: &str) {
     if !tail.is_empty() {
+        let redacted = redact_stderr_tail(tail);
         tracing::warn!(
             command = %command.display(),
             stage,
-            stderr_tail = %tail,
-            "hooks: daemon child stderr at failure"
+            stderr_tail = %redacted,
+            "hooks: daemon child stderr at failure (redacted — env-var-shaped values + secret-keyword lines stripped)"
         );
     }
 }
@@ -209,6 +270,12 @@ pub enum ExecutorError {
     /// The daemon child crashed or was unreachable after exhausting
     /// the reconnect budget.
     DaemonUnavailable { attempts: u32 },
+    /// v0.7.0 (issue #691 fold-1) — the governance pre-action wire
+    /// hook refused the `ProcessSpawn` action. `reason` carries the
+    /// operator-authored explanation from the matched rule. Surfaced
+    /// to the chain runner so the cascade policy can treat it as a
+    /// distinct outcome from a Spawn / Io error.
+    GovernanceRefused { command: String, reason: String },
 }
 
 impl std::fmt::Display for ExecutorError {
@@ -218,10 +285,19 @@ impl std::fmt::Display for ExecutorError {
                 write!(f, "hook spawn failed for {command}: {source}")
             }
             ExecutorError::Io(e) => write!(f, "hook io error: {e}"),
-            ExecutorError::ChildExit { code, stderr } => {
+            ExecutorError::ChildExit { code, stderr: _ } => {
+                // P2 (#628 agent-5): the stderr tail is in the operator
+                // log (redacted via `redact_stderr_tail`) — do not
+                // include it here. `Display for ExecutorError` flows
+                // into `ChainResult::Deny.reason`, which is sent back
+                // to the JSON-RPC caller; surfacing raw stderr there
+                // is a credential-exfiltration vector for hostile
+                // hooks (`printenv >&2; exit 1`).
                 let code_str = code.map_or_else(|| "<signaled>".into(), |c| c.to_string());
-                let preview = stderr.chars().take(256).collect::<String>();
-                write!(f, "hook child exited (code {code_str}): {preview}")
+                write!(
+                    f,
+                    "hook child exited (code {code_str}); see operator log for redacted stderr"
+                )
             }
             ExecutorError::Decode { reason } => {
                 write!(f, "hook decision decode failed: {reason}")
@@ -233,6 +309,12 @@ impl std::fmt::Display for ExecutorError {
                 write!(
                     f,
                     "hook daemon unavailable after {attempts} reconnect attempts"
+                )
+            }
+            ExecutorError::GovernanceRefused { command, reason } => {
+                write!(
+                    f,
+                    "hook spawn refused by governance for {command}: {reason}"
                 )
             }
         }
@@ -365,6 +447,39 @@ pub struct ExecExecutor {
     metrics: MetricsCounters,
 }
 
+/// SEC-17 (Cluster D, issue #767) — convert an `OsStr` (the raw
+/// command path) into the wire-check `AgentAction::ProcessSpawn.binary`
+/// string with the highest fidelity available on the host. On Unix
+/// the underlying bytes are forwarded verbatim through
+/// `OsStrExt::as_bytes` + `String::from_utf8_lossy` (the lossy
+/// conversion is a substitution, not a truncation — every non-UTF-8
+/// byte becomes a U+FFFD REPLACEMENT CHARACTER, preserving the byte
+/// count so a downstream substring match cannot accidentally collide
+/// with a sanitised value). On Windows / wasm the standard
+/// `OsStr::to_string_lossy` path is the best the platform exposes.
+///
+/// Why not `display().to_string()` everywhere? `PathBuf::display` is
+/// designed for human-facing output and may collapse or reshape
+/// non-UTF-8 sequences depending on the platform. The matcher engine
+/// is a security boundary — it must see the same bytes the kernel
+/// will exec, with no platform-specific rewriting.
+#[cfg(unix)]
+fn os_str_lossless_for_wire_check(s: &std::ffi::OsStr) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    // `from_utf8_lossy` substitutes invalid bytes with U+FFFD WITHOUT
+    // shrinking the byte length (each invalid byte becomes one
+    // replacement char), so a substring matcher sees a stable shape.
+    String::from_utf8_lossy(s.as_bytes()).into_owned()
+}
+
+/// Non-Unix fallback — `to_string_lossy` is the best the platform
+/// surface exposes. On Windows the path is WTF-8 internally so the
+/// lossy conversion is generally a no-op for legitimate paths.
+#[cfg(not(unix))]
+fn os_str_lossless_for_wire_check(s: &std::ffi::OsStr) -> String {
+    s.to_string_lossy().into_owned()
+}
+
 impl ExecExecutor {
     #[must_use]
     pub fn new(config: HookConfig) -> Self {
@@ -375,6 +490,40 @@ impl ExecExecutor {
     }
 
     async fn fire_inner(&self, event: HookEvent, payload: Value) -> Result<HookDecision> {
+        // v0.7.0 (issue #691 fold-1) — wire the ProcessSpawn governance
+        // gate BEFORE the Command::new(...).spawn() call. The closure
+        // installed by bootstrap_serve consults the governance_rules
+        // table for a refusal verdict (e.g. R004 — cargo forbidden on
+        // low-disk system). Refusal short-circuits cleanly with a
+        // typed ExecutorError::GovernanceRefused so the chain runner
+        // can apply the cascade policy without confusing it with a
+        // legitimate spawn IO failure.
+        //
+        // SEC-13 / SEC-17 (Cluster D, issue #767) — build the binary
+        // identifier from the raw `OsStr` (NOT
+        // `display().to_string()`, which is lossy on non-UTF-8 path
+        // injections). The lossy conversion is reserved for log
+        // surfaces / error messages where readability outweighs the
+        // fidelity loss. The matcher engine sees the full OS-string
+        // representation so a non-UTF-8 path injection does not
+        // sneak past a substring-match rule. We pass an empty argv
+        // here because the hook executor never spawns the child with
+        // positional args (HookConfig has no `args` field); the
+        // matcher's optional `args_contain` field is a no-op for the
+        // hooks path but ready for the next caller (CLI shell-out,
+        // skill-export, etc.) that adds positional args.
+        let binary = os_str_lossless_for_wire_check(self.config.command.as_os_str());
+        let command_str = self.config.command.display().to_string();
+        let spawn_action = crate::governance::agent_action::AgentAction::ProcessSpawn {
+            binary,
+            args: Vec::new(),
+        };
+        if let Err(refusal) = crate::governance::wire_check::check(&spawn_action) {
+            return Err(ExecutorError::GovernanceRefused {
+                command: command_str,
+                reason: refusal.reason,
+            });
+        }
         let envelope = FireEnvelope {
             event,
             payload: &payload,
@@ -743,6 +892,22 @@ impl DaemonExecutor {
     }
 
     fn spawn_one(&self) -> Result<DaemonConnection> {
+        // v0.7.0 (issue #691 fold-1) — same ProcessSpawn gate as the
+        // exec-mode path above. Daemon-mode hooks spawn at most once
+        // per (process, hook) so this fires at start-up rather than
+        // per-event; a governance refusal here aborts the daemon
+        // connection attempt cleanly.
+        let command_str = self.config.command.display().to_string();
+        let spawn_action = crate::governance::agent_action::AgentAction::ProcessSpawn {
+            binary: command_str.clone(),
+            args: Vec::new(),
+        };
+        if let Err(refusal) = crate::governance::wire_check::check(&spawn_action) {
+            return Err(ExecutorError::GovernanceRefused {
+                command: command_str,
+                reason: refusal.reason,
+            });
+        }
         let mut child = Command::new(&self.config.command)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -942,6 +1107,43 @@ mod tests {
         assert_eq!(parse_decision_line("{}").unwrap(), HookDecision::Allow);
     }
 
+    // P2 (#628 agent-5) — stderr secret-redaction.
+    #[test]
+    fn redact_stderr_strips_env_var_assignments() {
+        let raw = "AWS_SECRET_ACCESS_KEY=AKIA1234567890ABCDEF\nDATABASE_URL=postgres://u:p@h/db\nGITHUB_TOKEN=ghp_abcdef\nuser-message-fine\n";
+        let red = redact_stderr_tail(raw);
+        assert!(!red.contains("AKIA1234567890ABCDEF"));
+        assert!(!red.contains("ghp_abcdef"));
+        assert!(red.contains("AWS_SECRET_ACCESS_KEY=<redacted>"));
+        assert!(red.contains("GITHUB_TOKEN=<redacted>"));
+        // Unrelated lines pass through.
+        assert!(red.contains("user-message-fine"));
+    }
+
+    #[test]
+    fn redact_stderr_drops_secret_keyword_lines() {
+        let raw = "Authorization: Bearer eyJ.fake.jwt\nset-cookie: session=abc\nmsg=normal\n";
+        let red = redact_stderr_tail(raw);
+        assert!(!red.contains("Bearer eyJ.fake.jwt"));
+        assert!(!red.contains("session=abc"));
+    }
+
+    #[test]
+    fn child_exit_display_excludes_stderr_content() {
+        let err = ExecutorError::ChildExit {
+            code: Some(1),
+            stderr: "AWS_SECRET_ACCESS_KEY=AKIA-secret-content".to_string(),
+        };
+        let s = err.to_string();
+        // Stderr content must NOT flow into the user-visible Display
+        // (which becomes ChainResult::Deny.reason → JSON-RPC caller).
+        assert!(!s.contains("AKIA-secret-content"));
+        assert!(!s.contains("AWS_SECRET_ACCESS_KEY"));
+        // Exit code IS surfaced — operator log carries the full
+        // (redacted) stderr separately.
+        assert!(s.contains("code 1"));
+    }
+
     #[test]
     fn parse_decision_line_allow_explicit() {
         let d = parse_decision_line(r#"{"action":"allow"}"#).unwrap();
@@ -1078,10 +1280,183 @@ mod tests {
             },
             ExecutorError::Timeout { ms: 1234 },
             ExecutorError::DaemonUnavailable { attempts: 5 },
+            ExecutorError::GovernanceRefused {
+                command: "/usr/bin/cargo".into(),
+                reason: "R004: cargo forbidden on low-disk".into(),
+            },
         ];
         for e in cases {
             let s = e.to_string();
             assert!(!s.is_empty(), "Display empty for {e:?}");
+        }
+    }
+
+    #[test]
+    fn executor_error_governance_refused_display_names_both_fields() {
+        // v0.7.0 (issue #691 fold-1) — pin the user-visible message
+        // shape for the PE-1 wire-point refusal so an operator-facing
+        // log line carries the command path AND the rule's authored
+        // reason (no truncation, no PII rewrite). The chain runner's
+        // cascade policy may classify on the prefix "hook spawn refused
+        // by governance" — change the wording here in lockstep.
+        let err = ExecutorError::GovernanceRefused {
+            command: "/opt/homebrew/bin/cargo".into(),
+            reason: "R004 cargo forbidden".into(),
+        };
+        let s = err.to_string();
+        assert!(
+            s.contains("/opt/homebrew/bin/cargo"),
+            "Display must surface the command path: {s}"
+        );
+        assert!(
+            s.contains("R004 cargo forbidden"),
+            "Display must surface the rule's reason: {s}"
+        );
+        assert!(
+            s.contains("refused by governance"),
+            "Display must carry the governance-refusal marker: {s}"
+        );
+    }
+
+    #[test]
+    fn executor_error_governance_refused_source_is_none() {
+        // GovernanceRefused has no underlying io error or cause —
+        // `Error::source` must return `None` so the anyhow chain
+        // doesn't accidentally show an empty "caused by:" line in
+        // operator logs. The Spawn / Io variants are the only ones
+        // that carry sources; this pins the negative case so a future
+        // refactor that adds a wrapped error here is forced to update
+        // the test explicitly.
+        let err = ExecutorError::GovernanceRefused {
+            command: "/bin/x".into(),
+            reason: "denied".into(),
+        };
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn executor_error_from_io_error_wraps_into_io_variant() {
+        let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "nope");
+        let err: ExecutorError = io_err.into();
+        assert!(matches!(err, ExecutorError::Io(_)));
+        let s = err.to_string();
+        assert!(s.contains("hook io error"));
+        assert!(std::error::Error::source(&err).is_some());
+    }
+
+    #[test]
+    fn executor_error_spawn_source_chain() {
+        let io_err = io::Error::new(io::ErrorKind::NotFound, "no such cmd");
+        let err = ExecutorError::Spawn {
+            command: "/bin/missing".into(),
+            source: io_err,
+        };
+        assert!(std::error::Error::source(&err).is_some());
+        let s = err.to_string();
+        assert!(s.contains("/bin/missing"));
+        assert!(s.contains("no such cmd"));
+    }
+
+    #[test]
+    fn executor_error_child_exit_with_signaled_code() {
+        let err = ExecutorError::ChildExit {
+            code: None,
+            stderr: "killed".into(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("<signaled>"));
+        // P2 (#628 agent-5) / release/v0.7.0 cbe934c: stderr is REDACTED out
+        // of the Display impl to avoid credential-exfiltration via hostile
+        // hooks (`printenv >&2; exit 1`). The redacted tail still reaches
+        // the operator log via `log_redacted_stderr_at_failure`, but it
+        // must NOT appear in the caller-facing reason string.
+        assert!(!s.contains("killed"));
+        assert!(s.contains("see operator log for redacted stderr"));
+    }
+
+    #[test]
+    fn executor_error_child_exit_stderr_is_truncated_for_display() {
+        let big = "x".repeat(1024);
+        let err = ExecutorError::ChildExit {
+            code: Some(1),
+            stderr: big,
+        };
+        let s = err.to_string();
+        // Display previews at most 256 chars of stderr.
+        // The total display is "hook child exited (code 1): " (28) + up to 256 chars.
+        assert!(s.len() < 1024);
+    }
+
+    #[test]
+    fn executor_error_decode_display_carries_reason() {
+        let err = ExecutorError::Decode {
+            reason: "bad parse".into(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("decode failed"));
+        assert!(s.contains("bad parse"));
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn executor_error_timeout_display_carries_ms() {
+        let err = ExecutorError::Timeout { ms: 5000 };
+        let s = err.to_string();
+        assert!(s.contains("5000ms"));
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn executor_error_daemon_unavailable_carries_attempts() {
+        let err = ExecutorError::DaemonUnavailable { attempts: 7 };
+        let s = err.to_string();
+        assert!(s.contains("7"));
+        assert!(s.contains("reconnect attempts"));
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn executor_metrics_serialize_to_json() {
+        let m = ExecutorMetrics {
+            events_fired: 42,
+            events_dropped: 1,
+            mean_latency_us: 250,
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"events_fired\":42"));
+        assert!(json.contains("\"events_dropped\":1"));
+        assert!(json.contains("\"mean_latency_us\":250"));
+    }
+
+    #[test]
+    fn metrics_counters_overflow_safe_latency() {
+        let m = MetricsCounters::default();
+        // Use a huge duration; record_fire clamps to u64::MAX via try_from.
+        m.record_fire(Duration::from_micros(u64::MAX));
+        m.record_fire(Duration::from_micros(0));
+        let snap = m.snapshot();
+        assert_eq!(snap.events_fired, 2);
+    }
+
+    #[test]
+    fn registry_default_is_empty_and_default_eq_new() {
+        let reg = ExecutorRegistry::default();
+        assert!(reg.is_empty());
+        assert_eq!(reg.len(), 0);
+    }
+
+    #[test]
+    fn parse_decision_line_modify_invalid_delta_wraps_to_decode() {
+        let err = parse_decision_line(r#"{"action":"modify","delta":99}"#).unwrap_err();
+        assert!(matches!(err, ExecutorError::Decode { .. }));
+    }
+
+    #[test]
+    fn parse_decision_line_array_payload_wraps_to_decode() {
+        let err = parse_decision_line(r#"[1,2,3]"#).unwrap_err();
+        match err {
+            ExecutorError::Decode { reason } => assert!(reason.contains("object")),
+            other => panic!("expected Decode, got {other:?}"),
         }
     }
 }

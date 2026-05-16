@@ -4,8 +4,8 @@
 use anyhow::{Result, bail};
 
 use crate::models::{
-    CreateMemory, MAX_CONTENT_SIZE, MAX_NAMESPACE_DEPTH, Memory, UpdateMemory, VALID_AGENT_TYPES,
-    VALID_SCOPES,
+    Citation, CreateMemory, MAX_CONTENT_SIZE, MAX_NAMESPACE_DEPTH, Memory, SourceSpan,
+    UpdateMemory, VALID_AGENT_TYPES, VALID_SCOPES,
 };
 
 const MAX_TITLE_LEN: usize = 512;
@@ -38,7 +38,48 @@ const VALID_SOURCES: &[&str] = &[
     // never reaches the target's inbox on peer nodes.
     "notify",
 ];
-const VALID_RELATIONS: &[&str] = &["related_to", "supersedes", "contradicts", "derived_from"];
+// Canonical relation taxonomy. The validator (`validate_relation`) accepts
+// these names via the fast-path branch and also accepts any caller-supplied
+// `[a-z0-9_]+` identifier via the lenient branch (post-cb92998). Adding a
+// name here is therefore documentation-driven: the name becomes part of the
+// MCP `memory_link` schema's `enum`, the wire-shape advertised to peers,
+// and the closed set surfaced in CLI/API docs.
+//
+// Semantics of each relation (directionality reads left-to-right, source → target):
+//   * `related_to`   — symmetric association; no provenance claim.
+//   * `supersedes`   — winner → loser; the source replaces the target.
+//   * `contradicts`  — asserts the source contradicts the target.
+//   * `derived_from` — clone/summary (source) → original (target). `derived_from`
+//                      is written by `memory_consolidate` (consolidated → each
+//                      source) and `memory_promote --to-namespace` (clone →
+//                      source). The arrow points FROM the derived memory TO
+//                      the original.
+//   * `reflects_on`  — v0.7.0 Task 3/8 (recursive learning). reflection
+//                      memory (source) → source memory it reflects on
+//                      (target). Mirrors the `derived_from` convention: the
+//                      newer/derived row is the link's `source_id`; the
+//                      thing it points back to is the `target_id`. The
+//                      reflection memory is the one with `reflection_depth
+//                      > 0` (see Memory.reflection_depth, Task 1/8). Task
+//                      4/8 (`memory_reflect` MCP tool) will write these
+//                      links from a reflection memory to each source it
+//                      reflects on. `reflects_on` participates in
+//                      `find_paths` traversal naturally because that BFS
+//                      walks `memory_links` without filtering by relation
+//                      label — operators tracing reflection chains see them
+//                      surface alongside the other relations.
+const VALID_RELATIONS: &[&str] = &[
+    "related_to",
+    "supersedes",
+    "contradicts",
+    "derived_from",
+    "reflects_on",
+    // v0.7.0 WT-1-A — atomisation-provenance edge (atom -> parent). The
+    // typed, signable, federation-safe expression of the structural
+    // `memories.atom_of` FK. Distinct from `derived_from` (consolidation
+    // provenance). Mirrors `crate::models::MemoryLinkRelation::DerivesFrom`.
+    "derives_from",
+];
 
 fn is_valid_rfc3339(s: &str) -> bool {
     chrono::DateTime::parse_from_rfc3339(s).is_ok()
@@ -401,9 +442,24 @@ pub fn validate_relation(relation: &str) -> Result<()> {
     if relation.len() > MAX_RELATION_LEN {
         bail!("relation exceeds max length of {MAX_RELATION_LEN} bytes");
     }
-    if !VALID_RELATIONS.contains(&relation) {
+    // v0.7.0 Wave-3 Continuation 5 — accept the canonical set above
+    // PLUS any caller-supplied lowercase identifier (a-z + 0-9 +
+    // underscore) so cert harnesses + downstream tooling can use
+    // arbitrary relation labels like `next`, `mentions`, `parent_of`.
+    // Mirrors the AGE Cypher convention where edge labels are
+    // user-defined identifiers; the same posture lights up here for
+    // wire-shape uniformity. Rejects whitespace / control chars /
+    // shell metacharacters defensively.
+    if VALID_RELATIONS.contains(&relation) {
+        return Ok(());
+    }
+    let ok = !relation.is_empty()
+        && relation
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !ok {
         bail!(
-            "invalid relation '{}' — must be one of: {}",
+            "invalid relation '{}' — must match [a-z0-9_]+ or be one of: {}",
             relation,
             VALID_RELATIONS.join(", ")
         );
@@ -428,6 +484,184 @@ pub fn validate_priority(priority: i32) -> Result<()> {
     Ok(())
 }
 
+/// v0.7.0 Form 4 (issue #757) — maximum citations per memory. Keeps
+/// the JSON-encoded column bounded; an operator authoring legitimate
+/// fact-grain provenance rarely needs more than a handful of citations
+/// on a single memory, and the cap protects the substrate from
+/// pathological payloads.
+const MAX_CITATIONS_PER_MEMORY: usize = 64;
+/// v0.7.0 Form 4 — maximum byte length of a URI form. HTTP URLs are
+/// commonly bounded at 2 KiB; we set a slightly larger headroom for
+/// `doc:` / `file:` payloads while still bounding the column size.
+const MAX_SOURCE_URI_LEN: usize = 4_096;
+/// v0.7.0 Form 4 — accepted URI form schemes.
+const VALID_SOURCE_URI_SCHEMES: &[&str] = &["uri:", "doc:", "file:"];
+
+/// v0.7.0 Form 4 (issue #757) — validate a [`Citation`] envelope.
+///
+/// Required invariants:
+/// * `uri` is non-empty after trim and starts with one of the typed
+///   schemes accepted by [`validate_source_uri`] (mirror semantics —
+///   citation URIs and source URIs share the same form).
+/// * `accessed_at` parses as RFC3339.
+/// * `hash` (when present) is exactly 64 lowercase hex characters
+///   (SHA-256 digest).
+/// * `span` (when present) satisfies [`validate_source_span`].
+///
+/// # Errors
+///
+/// Returns the first invariant failure encountered.
+pub fn validate_citation(c: &Citation) -> Result<()> {
+    validate_source_uri(&c.uri)?;
+    if !is_valid_rfc3339(&c.accessed_at) {
+        bail!(
+            "citation.accessed_at is not valid RFC3339: '{}'",
+            c.accessed_at
+        );
+    }
+    if let Some(ref h) = c.hash {
+        if h.len() != 64 || !h.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            bail!("citation.hash must be 64 hex characters (SHA-256 digest)");
+        }
+    }
+    if let Some(ref span) = c.span {
+        validate_source_span(span)?;
+    }
+    Ok(())
+}
+
+/// v0.7.0 Form 4 — validate the full citations vector.
+///
+/// Caps the count at [`MAX_CITATIONS_PER_MEMORY`] and delegates each
+/// entry to [`validate_citation`].
+///
+/// # Errors
+///
+/// Returns the first failure encountered.
+pub fn validate_citations(citations: &[Citation]) -> Result<()> {
+    if citations.len() > MAX_CITATIONS_PER_MEMORY {
+        bail!(
+            "too many citations: {} exceeds cap of {MAX_CITATIONS_PER_MEMORY}",
+            citations.len()
+        );
+    }
+    for c in citations {
+        validate_citation(c)?;
+    }
+    Ok(())
+}
+
+/// v0.7.0 Form 4 (issue #757) — validate a URI-form source pointer.
+///
+/// Accepts three schemes:
+/// * `uri:<...>` — HTTP(S) URL or other absolute URI.
+/// * `doc:<...>` — substrate document id (caller-supplied opaque).
+/// * `file:<...>` — filesystem path.
+///
+/// In every case the payload after the scheme must be non-empty (the
+/// validator strips the scheme prefix and re-checks). Bare strings
+/// without a scheme are rejected so a caller does not accidentally
+/// stuff a role label into the URI column.
+///
+/// # Errors
+///
+/// Returns when the input is empty, exceeds [`MAX_SOURCE_URI_LEN`],
+/// uses an unrecognised scheme, or carries an empty payload.
+pub fn validate_source_uri(s: &str) -> Result<()> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        bail!("source URI cannot be empty");
+    }
+    if trimmed.len() > MAX_SOURCE_URI_LEN {
+        bail!("source URI exceeds max length of {MAX_SOURCE_URI_LEN} bytes");
+    }
+    if !is_clean_string(trimmed) {
+        bail!("source URI contains invalid control characters");
+    }
+    let matched = VALID_SOURCE_URI_SCHEMES
+        .iter()
+        .find(|prefix| trimmed.starts_with(*prefix));
+    match matched {
+        Some(prefix) => {
+            let payload = &trimmed[prefix.len()..];
+            if payload.trim().is_empty() {
+                bail!("source URI scheme '{prefix}' has empty payload");
+            }
+            Ok(())
+        }
+        None => bail!(
+            "source URI must start with one of: {}",
+            VALID_SOURCE_URI_SCHEMES.join(", ")
+        ),
+    }
+}
+
+/// v0.7.0 Form 4 (issue #757) — validate a [`SourceSpan`] byte-range.
+///
+/// Requires `start < end` and bounds both values within
+/// [`usize::MAX`]. The half-open convention `[start, end)` matches
+/// Rust slice semantics — `body[span.start..span.end]` is the cited
+/// slice.
+///
+/// # Errors
+///
+/// Returns when `start >= end`.
+pub fn validate_source_span(span: &SourceSpan) -> Result<()> {
+    if span.start >= span.end {
+        bail!(
+            "source_span requires start < end (got start={}, end={})",
+            span.start,
+            span.end
+        );
+    }
+    Ok(())
+}
+
+/// v0.7.0 Form 4 / Cluster-A — body-aware [`SourceSpan`] validation.
+///
+/// Stricter superset of [`validate_source_span`]: in addition to the
+/// `start < end` invariant, this also requires:
+///
+/// 1. `span.end <= body.len()` — the half-open interval `[start, end)`
+///    must lie entirely within the body, so `body[span.start..span.end]`
+///    cannot panic on out-of-bounds.
+/// 2. Both `span.start` and `span.end` fall on UTF-8 char boundaries
+///    in `body`. Slicing on a non-boundary panics, which would break
+///    every downstream consumer (forensic export, CLI display, etc.).
+///
+/// Call this from validators that have the source body in hand (e.g.
+/// the atomisation writer, the citation validator on a known parent).
+/// Validators that only have the span (the bare-bones
+/// `validate_source_span` above) keep their lighter contract.
+///
+/// # Errors
+///
+/// Returns when `start >= end`, when `end > body.len()`, or when either
+/// endpoint lands mid-codepoint.
+pub fn validate_source_span_for_body(span: &SourceSpan, body: &str) -> Result<()> {
+    validate_source_span(span)?;
+    if span.end > body.len() {
+        bail!(
+            "source_span end={} exceeds body length {}",
+            span.end,
+            body.len()
+        );
+    }
+    if !body.is_char_boundary(span.start) {
+        bail!(
+            "source_span start={} is not a UTF-8 char boundary in body",
+            span.start
+        );
+    }
+    if !body.is_char_boundary(span.end) {
+        bail!(
+            "source_span end={} is not a UTF-8 char boundary in body",
+            span.end
+        );
+    }
+    Ok(())
+}
+
 /// Validate a full `CreateMemory` before insert.
 pub fn validate_create(mem: &CreateMemory) -> Result<()> {
     validate_title(&mem.title)?;
@@ -440,6 +674,15 @@ pub fn validate_create(mem: &CreateMemory) -> Result<()> {
     validate_expires_at(mem.expires_at.as_deref())?;
     validate_ttl_secs(mem.ttl_secs)?;
     validate_metadata(&mem.metadata)?;
+    // v0.7.0 Form 4 — fact-provenance fields are optional but when
+    // supplied must satisfy the per-field invariants.
+    validate_citations(&mem.citations)?;
+    if let Some(ref uri) = mem.source_uri {
+        validate_source_uri(uri)?;
+    }
+    if let Some(ref span) = mem.source_span {
+        validate_source_span(span)?;
+    }
     Ok(())
 }
 
@@ -474,6 +717,14 @@ pub fn validate_memory(mem: &Memory) -> Result<()> {
         bail!("expires_at is not valid RFC3339");
     }
     validate_metadata(&mem.metadata)?;
+    // v0.7.0 Form 4 — fact-provenance fields on a full Memory import.
+    validate_citations(&mem.citations)?;
+    if let Some(ref uri) = mem.source_uri {
+        validate_source_uri(uri)?;
+    }
+    if let Some(ref span) = mem.source_span {
+        validate_source_span(span)?;
+    }
     Ok(())
 }
 
@@ -745,6 +996,21 @@ mod tests {
             delete: GovernanceLevel::Owner,
             approver: ApproverType::Consensus(0),
             inherit: true,
+            max_reflection_depth: None,
+            auto_export_reflections_to_filesystem: None,
+            auto_atomise: None,
+            auto_atomise_threshold_cl100k: None,
+            auto_atomise_max_atom_tokens: None,
+            auto_atomise_max_retries: None,
+            auto_persona_trigger_every_n_memories: None,
+            auto_export_personas_to_filesystem: None,
+            auto_atomise_mode: None,
+            legacy_per_pair_classifier: None,
+            auto_classify_kind: None,
+            synthesis_failure_mode: None,
+            synthesis_max_deletes_per_call: None,
+            synthesis_max_candidate_chars: None,
+            multistep_max_content_chars: None,
         };
         assert!(validate_governance_policy(&p).is_err());
     }
@@ -758,6 +1024,21 @@ mod tests {
             delete: GovernanceLevel::Owner,
             approver: ApproverType::Agent("has space".to_string()),
             inherit: true,
+            max_reflection_depth: None,
+            auto_export_reflections_to_filesystem: None,
+            auto_atomise: None,
+            auto_atomise_threshold_cl100k: None,
+            auto_atomise_max_atom_tokens: None,
+            auto_atomise_max_retries: None,
+            auto_persona_trigger_every_n_memories: None,
+            auto_export_personas_to_filesystem: None,
+            auto_atomise_mode: None,
+            legacy_per_pair_classifier: None,
+            auto_classify_kind: None,
+            synthesis_failure_mode: None,
+            synthesis_max_deletes_per_call: None,
+            synthesis_max_candidate_chars: None,
+            multistep_max_content_chars: None,
         };
         assert!(validate_governance_policy(&bad).is_err());
 
@@ -767,6 +1048,21 @@ mod tests {
             delete: GovernanceLevel::Owner,
             approver: ApproverType::Agent("alice".to_string()),
             inherit: true,
+            max_reflection_depth: None,
+            auto_export_reflections_to_filesystem: None,
+            auto_atomise: None,
+            auto_atomise_threshold_cl100k: None,
+            auto_atomise_max_atom_tokens: None,
+            auto_atomise_max_retries: None,
+            auto_persona_trigger_every_n_memories: None,
+            auto_export_personas_to_filesystem: None,
+            auto_atomise_mode: None,
+            legacy_per_pair_classifier: None,
+            auto_classify_kind: None,
+            synthesis_failure_mode: None,
+            synthesis_max_deletes_per_call: None,
+            synthesis_max_candidate_chars: None,
+            multistep_max_content_chars: None,
         };
         assert!(validate_governance_policy(&good).is_ok());
     }
@@ -839,10 +1135,48 @@ mod tests {
 
     #[test]
     fn test_valid_relation() {
+        // v0.7.0 Wave-3 Cont 5 (commit cb92998): `validate_relation`
+        // accepts any `[a-z0-9_]+` identifier in addition to the
+        // canonical `VALID_RELATIONS` set so S82/S65 chain markers and
+        // arbitrary AGE-style edge labels round-trip through the wire.
+        // The pre-cb92998 expectation that "invented_relation" must be
+        // rejected is therefore obsolete — do not re-introduce it
+        // unless production validation is tightened back to a
+        // closed-set check. Coverage here splits into:
+        //
+        //   * canonical names — must always pass
+        //   * caller-supplied lowercase identifiers — must pass
+        //     post-cb92998
+        //   * structurally malformed input — must still fail
+        //     (uppercase, whitespace, slashes, empty)
+        //
+        // The malformed cases below are the surviving "negative"
+        // coverage the dropped `invented_relation` assertion used to
+        // anchor.
+
+        // Canonical relation names — accepted via the VALID_RELATIONS
+        // fast path.
         assert!(validate_relation("related_to").is_ok());
+        assert!(validate_relation("derived_from").is_ok());
+        assert!(validate_relation("contradicts").is_ok());
         assert!(validate_relation("supersedes").is_ok());
+        // v0.7.0 Task 3/8 (recursive learning) — `reflects_on` joins the
+        // canonical set as the relation a reflection memory writes back
+        // to each source it reflects on. See VALID_RELATIONS docstring.
+        assert!(validate_relation("reflects_on").is_ok());
+
+        // Caller-supplied lowercase identifier — accepted by the
+        // post-cb92998 permissive arm. Previously rejected.
+        assert!(validate_relation("s82_chain_marker").is_ok());
+        assert!(validate_relation("invented_relation").is_ok());
+        assert!(validate_relation("mentions").is_ok());
+
+        // Structurally malformed input — still rejected.
         assert!(validate_relation("").is_err());
-        assert!(validate_relation("invented_relation").is_err());
+        assert!(validate_relation("BAD").is_err());
+        assert!(validate_relation("bad relation").is_err());
+        assert!(validate_relation("bad/relation").is_err());
+        assert!(validate_relation("bad-relation").is_err());
     }
 
     #[test]
@@ -1019,9 +1353,18 @@ mod tests {
         #[test]
         fn prop_validate_link_rejects_self_link_for_every_relation(
             id in r"[a-z][a-zA-Z0-9_-]{0,32}",
-            rel_idx in 0usize..4,
+            rel_idx in 0usize..5,
         ) {
-            let relations = ["related_to", "supersedes", "contradicts", "derived_from"];
+            // v0.7.0 Task 3/8 (recursive learning) — `reflects_on` joins the
+            // canonical relation set; the self-link rejection invariant
+            // applies to it too.
+            let relations = [
+                "related_to",
+                "supersedes",
+                "contradicts",
+                "derived_from",
+                "reflects_on",
+            ];
             let rel = relations[rel_idx];
             let result = validate_link(&id, &id, rel);
             prop_assert!(result.is_err(), "self-link must reject for relation {rel}, id {:?}", id);
@@ -1058,5 +1401,680 @@ mod tests {
         // returns false (it's a format char, not control). Document actual
         // behavior: titles containing BOM are accepted.
         assert!(validate_title("foo\u{FEFF}bar").is_ok());
+    }
+
+    // -----------------------------------------------------------------
+    // L0.7-2 Tier A — long-tail error path coverage
+    // (lines 109, 207, 290, 357/358/361, 383, 438, validate_create /
+    // _memory / _update / _consolidate body branches)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn content_with_control_chars_rejected() {
+        // Line 109: content with control char (not \n or \t)
+        let err = validate_content("has\x07bell").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("invalid characters"), "got: {msg}");
+    }
+
+    #[test]
+    fn content_with_null_byte_rejected() {
+        let err = validate_content("has\0null").unwrap_err();
+        assert!(format!("{err}").contains("invalid characters"));
+    }
+
+    #[test]
+    fn source_oversized_rejected() {
+        // Line 207: source longer than MAX_SOURCE_LEN (64)
+        let big = "x".repeat(65);
+        let err = validate_source(&big).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("max length"), "got: {msg}");
+    }
+
+    #[test]
+    fn governance_approve_with_consensus_zero_rejected() {
+        // Line 290: uses_approve && Consensus(0) — must error in the
+        // post-approver-block sweep. We force consensus(0) into a policy
+        // that also uses Approve at the write level.
+        use crate::models::{ApproverType, GovernanceLevel, GovernancePolicy};
+        // Build with Human first so the approver block doesn't itself trip,
+        // then swap to Consensus(0) directly. The Consensus(0) branch in
+        // the approver block (line 276) ALREADY rejects this — the line
+        // 290 branch is the second guard. The two branches are
+        // semantically redundant for `Consensus(0)`; line 290 is reachable
+        // only if approver block were ever loosened. Document the line
+        // as defensive coverage; the existing
+        // test_validate_governance_consensus_zero_rejected hits the
+        // approver-block branch directly.
+        let p = GovernancePolicy {
+            write: GovernanceLevel::Approve,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Consensus(0),
+            inherit: true,
+            max_reflection_depth: None,
+            auto_export_reflections_to_filesystem: None,
+            auto_atomise: None,
+            auto_atomise_threshold_cl100k: None,
+            auto_atomise_max_atom_tokens: None,
+            auto_atomise_max_retries: None,
+            auto_persona_trigger_every_n_memories: None,
+            auto_export_personas_to_filesystem: None,
+            auto_atomise_mode: None,
+            legacy_per_pair_classifier: None,
+            auto_classify_kind: None,
+            synthesis_failure_mode: None,
+            synthesis_max_deletes_per_call: None,
+            synthesis_max_candidate_chars: None,
+            multistep_max_content_chars: None,
+        };
+        assert!(validate_governance_policy(&p).is_err());
+    }
+
+    #[test]
+    fn tag_oversized_rejected_with_preview() {
+        // Lines 357-358: tag length > MAX_TAG_LEN (128), error message
+        // embeds first 20 chars of trimmed tag as preview.
+        let big = "x".repeat(129);
+        let tags = vec![big];
+        let err = validate_tags(&tags).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("max length"), "got: {msg}");
+        assert!(msg.contains("xxxxxxxxxxxxxxxxxxxx"), "got: {msg}");
+    }
+
+    #[test]
+    fn tag_with_control_chars_rejected() {
+        // Line 361: tag fails is_clean_string
+        let tags = vec!["has\x07bell".to_string()];
+        let err = validate_tags(&tags).unwrap_err();
+        assert!(format!("{err}").contains("invalid characters"));
+    }
+
+    #[test]
+    fn expires_at_malformed_rfc3339_rejected() {
+        // Line 383: expires_at not valid RFC3339
+        let err = validate_expires_at(Some("not-a-date")).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("RFC3339"), "got: {msg}");
+        assert!(msg.contains("not-a-date"), "got: {msg}");
+    }
+
+    #[test]
+    fn expires_at_none_is_ok() {
+        // Branch: None arm of validate_expires_at
+        assert!(validate_expires_at(None).is_ok());
+    }
+
+    #[test]
+    fn expires_at_future_is_ok() {
+        // Far-future date — valid format, not in the past
+        let future = "2099-01-01T00:00:00Z";
+        assert!(validate_expires_at(Some(future)).is_ok());
+    }
+
+    #[test]
+    fn expires_at_past_rejected() {
+        // Branch: parsed RFC3339, but earlier than Utc::now()
+        let past = "2000-01-01T00:00:00Z";
+        let err = validate_expires_at(Some(past)).unwrap_err();
+        assert!(format!("{err}").contains("past"));
+    }
+
+    #[test]
+    fn relation_oversized_rejected() {
+        // Line 438: relation longer than MAX_RELATION_LEN (64)
+        let big = "x".repeat(65);
+        let err = validate_relation(&big).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("max length"), "got: {msg}");
+    }
+
+    // -----------------------------------------------------------------
+    // L0.7-2 Tier A — validate_create / validate_memory full body
+    // (lines 486-602: every per-field error branch)
+    // -----------------------------------------------------------------
+
+    fn cm_valid() -> crate::models::CreateMemory {
+        // Construct a valid CreateMemory via serde defaults — deserialise
+        // from minimal JSON so we don't depend on private struct shape.
+        serde_json::from_value(serde_json::json!({
+            "title": "ok title",
+            "content": "ok content body",
+            "namespace": "validate-test",
+            "tags": ["one", "two"],
+            "priority": 5,
+            "confidence": 0.9,
+            "source": "api",
+            "metadata": {"k": "v"},
+        }))
+        .expect("fixture deserialises")
+    }
+
+    #[test]
+    fn validate_create_happy_path() {
+        let m = cm_valid();
+        assert!(validate_create(&m).is_ok());
+    }
+
+    #[test]
+    fn validate_create_propagates_title_error() {
+        let mut m = cm_valid();
+        m.title = String::new();
+        assert!(validate_create(&m).is_err());
+    }
+
+    #[test]
+    fn validate_create_propagates_content_error() {
+        let mut m = cm_valid();
+        m.content = String::new();
+        assert!(validate_create(&m).is_err());
+    }
+
+    #[test]
+    fn validate_create_propagates_namespace_error() {
+        let mut m = cm_valid();
+        m.namespace = "has space".to_string();
+        assert!(validate_create(&m).is_err());
+    }
+
+    #[test]
+    fn validate_create_propagates_source_error() {
+        let mut m = cm_valid();
+        m.source = "bogus".to_string();
+        assert!(validate_create(&m).is_err());
+    }
+
+    #[test]
+    fn validate_create_propagates_tags_error() {
+        let mut m = cm_valid();
+        m.tags = vec![String::new()];
+        assert!(validate_create(&m).is_err());
+    }
+
+    #[test]
+    fn validate_create_propagates_priority_error() {
+        let mut m = cm_valid();
+        m.priority = 11;
+        assert!(validate_create(&m).is_err());
+    }
+
+    #[test]
+    fn validate_create_propagates_confidence_error() {
+        let mut m = cm_valid();
+        m.confidence = 1.5;
+        assert!(validate_create(&m).is_err());
+    }
+
+    #[test]
+    fn validate_create_propagates_expires_at_error() {
+        let mut m = cm_valid();
+        m.expires_at = Some("not-a-date".to_string());
+        assert!(validate_create(&m).is_err());
+    }
+
+    #[test]
+    fn validate_create_propagates_ttl_error() {
+        let mut m = cm_valid();
+        m.ttl_secs = Some(-1);
+        assert!(validate_create(&m).is_err());
+    }
+
+    #[test]
+    fn validate_create_propagates_metadata_error() {
+        let mut m = cm_valid();
+        m.metadata = serde_json::json!("not-an-object");
+        assert!(validate_create(&m).is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // validate_memory body branches (lines 498-528)
+    // -----------------------------------------------------------------
+
+    fn mem_valid() -> crate::models::Memory {
+        crate::models::Memory {
+            id: "mem-1".to_string(),
+            title: "ok title".to_string(),
+            content: "ok content".to_string(),
+            namespace: "validate-test".to_string(),
+            source: "api".to_string(),
+            tags: vec!["one".to_string()],
+            priority: 5,
+            confidence: 1.0,
+            access_count: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_memory_happy_path() {
+        let m = mem_valid();
+        assert!(validate_memory(&m).is_ok());
+    }
+
+    #[test]
+    fn validate_memory_rejects_empty_id() {
+        let mut m = mem_valid();
+        m.id = String::new();
+        assert!(validate_memory(&m).is_err());
+    }
+
+    #[test]
+    fn validate_memory_rejects_negative_access_count() {
+        let mut m = mem_valid();
+        m.access_count = -1;
+        let err = validate_memory(&m).unwrap_err();
+        assert!(format!("{err}").contains("access_count"));
+    }
+
+    #[test]
+    fn validate_memory_rejects_malformed_created_at() {
+        let mut m = mem_valid();
+        m.created_at = "not-a-date".to_string();
+        let err = validate_memory(&m).unwrap_err();
+        assert!(format!("{err}").contains("created_at"));
+    }
+
+    #[test]
+    fn validate_memory_rejects_malformed_updated_at() {
+        let mut m = mem_valid();
+        m.updated_at = "not-a-date".to_string();
+        let err = validate_memory(&m).unwrap_err();
+        assert!(format!("{err}").contains("updated_at"));
+    }
+
+    #[test]
+    fn validate_memory_rejects_malformed_last_accessed_at() {
+        let mut m = mem_valid();
+        m.last_accessed_at = Some("not-a-date".to_string());
+        let err = validate_memory(&m).unwrap_err();
+        assert!(format!("{err}").contains("last_accessed_at"));
+    }
+
+    #[test]
+    fn validate_memory_accepts_valid_last_accessed_at() {
+        let mut m = mem_valid();
+        m.last_accessed_at = Some("2026-01-01T00:00:00Z".to_string());
+        assert!(validate_memory(&m).is_ok());
+    }
+
+    #[test]
+    fn validate_memory_rejects_malformed_expires_at() {
+        let mut m = mem_valid();
+        m.expires_at = Some("not-a-date".to_string());
+        let err = validate_memory(&m).unwrap_err();
+        assert!(format!("{err}").contains("expires_at"));
+    }
+
+    #[test]
+    fn validate_memory_accepts_past_expires_at_for_import() {
+        // Importers must be able to bring in historically expired rows.
+        let mut m = mem_valid();
+        m.expires_at = Some("2000-01-01T00:00:00Z".to_string());
+        assert!(validate_memory(&m).is_ok());
+    }
+
+    // -----------------------------------------------------------------
+    // validate_update body branches (lines 534-559)
+    // -----------------------------------------------------------------
+
+    fn upd() -> crate::models::UpdateMemory {
+        serde_json::from_value(serde_json::json!({})).expect("empty UpdateMemory deserialises")
+    }
+
+    #[test]
+    fn validate_update_empty_is_ok() {
+        assert!(validate_update(&upd()).is_ok());
+    }
+
+    #[test]
+    fn validate_update_propagates_title_error() {
+        let mut u = upd();
+        u.title = Some(String::new());
+        assert!(validate_update(&u).is_err());
+    }
+
+    #[test]
+    fn validate_update_propagates_content_error() {
+        let mut u = upd();
+        u.content = Some(String::new());
+        assert!(validate_update(&u).is_err());
+    }
+
+    #[test]
+    fn validate_update_propagates_namespace_error() {
+        let mut u = upd();
+        u.namespace = Some("has space".to_string());
+        assert!(validate_update(&u).is_err());
+    }
+
+    #[test]
+    fn validate_update_propagates_tags_error() {
+        let mut u = upd();
+        u.tags = Some(vec![String::new()]);
+        assert!(validate_update(&u).is_err());
+    }
+
+    #[test]
+    fn validate_update_propagates_priority_error() {
+        let mut u = upd();
+        u.priority = Some(11);
+        assert!(validate_update(&u).is_err());
+    }
+
+    #[test]
+    fn validate_update_propagates_confidence_error() {
+        let mut u = upd();
+        u.confidence = Some(2.0);
+        assert!(validate_update(&u).is_err());
+    }
+
+    #[test]
+    fn validate_update_propagates_expires_at_format_error() {
+        let mut u = upd();
+        u.expires_at = Some("not-a-date".to_string());
+        assert!(validate_update(&u).is_err());
+    }
+
+    #[test]
+    fn validate_update_allows_past_expires_at() {
+        // Per the docstring: update path validates format only, not chronology.
+        let mut u = upd();
+        u.expires_at = Some("2000-01-01T00:00:00Z".to_string());
+        assert!(validate_update(&u).is_ok());
+    }
+
+    #[test]
+    fn validate_update_propagates_metadata_error() {
+        let mut u = upd();
+        u.metadata = Some(serde_json::json!("not-an-object"));
+        assert!(validate_update(&u).is_err());
+    }
+
+    #[test]
+    fn validate_expires_at_format_accepts_past_date() {
+        // Direct coverage of the format-only helper.
+        assert!(validate_expires_at_format("2000-01-01T00:00:00Z").is_ok());
+        assert!(validate_expires_at_format("not-a-date").is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // validate_consolidate body branches (lines 588-604)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn consolidate_too_few_ids_rejected() {
+        let err = validate_consolidate(&["only-one".to_string()], "title", "summary content", "ns")
+            .unwrap_err();
+        assert!(format!("{err}").contains("at least 2"));
+    }
+
+    #[test]
+    fn consolidate_too_many_ids_rejected() {
+        let ids: Vec<String> = (0..101).map(|i| format!("id-{i}")).collect();
+        let err = validate_consolidate(&ids, "title", "summary content", "ns").unwrap_err();
+        assert!(format!("{err}").contains("100"));
+    }
+
+    #[test]
+    fn consolidate_duplicate_ids_rejected() {
+        let ids = vec!["a".to_string(), "a".to_string()];
+        let err = validate_consolidate(&ids, "title", "summary content", "ns").unwrap_err();
+        assert!(format!("{err}").contains("duplicate"));
+    }
+
+    #[test]
+    fn consolidate_invalid_id_rejected() {
+        let ids = vec!["valid".to_string(), String::new()];
+        // Empty id fails validate_id
+        let err = validate_consolidate(&ids, "title", "summary content", "ns").unwrap_err();
+        assert!(format!("{err}").contains("id"));
+    }
+
+    #[test]
+    fn consolidate_invalid_title_rejected() {
+        let ids = vec!["a".to_string(), "b".to_string()];
+        assert!(validate_consolidate(&ids, "", "summary content", "ns").is_err());
+    }
+
+    #[test]
+    fn consolidate_invalid_summary_rejected() {
+        let ids = vec!["a".to_string(), "b".to_string()];
+        assert!(validate_consolidate(&ids, "title", "", "ns").is_err());
+    }
+
+    #[test]
+    fn consolidate_invalid_namespace_rejected() {
+        let ids = vec!["a".to_string(), "b".to_string()];
+        assert!(validate_consolidate(&ids, "title", "summary content", "has space").is_err());
+    }
+
+    #[test]
+    fn consolidate_happy_path() {
+        let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert!(validate_consolidate(&ids, "title", "summary content", "ns").is_ok());
+    }
+
+    // -----------------------------------------------------------------
+    // validate_capabilities — wrapper around validate_tags
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn capabilities_delegates_to_tags() {
+        assert!(validate_capabilities(&["read".to_string(), "write".to_string()]).is_ok());
+        assert!(validate_capabilities(&[String::new()]).is_err());
+    }
+
+    #[test]
+    fn id_oversized_rejected() {
+        let big = "a".repeat(129);
+        let err = validate_id(&big).unwrap_err();
+        assert!(format!("{err}").contains("max length"));
+    }
+
+    #[test]
+    fn id_with_control_chars_rejected() {
+        let err = validate_id("has\0null").unwrap_err();
+        assert!(format!("{err}").contains("invalid characters"));
+    }
+
+    // -----------------------------------------------------------------
+    // v0.7-polish coverage recovery (issue #767) — Form 4 validator
+    // reject paths for validate_citation / validate_source_uri /
+    // validate_source_span / validate_source_span_for_body /
+    // validate_citations.
+    // -----------------------------------------------------------------
+
+    fn good_citation() -> crate::models::Citation {
+        crate::models::Citation {
+            uri: "doc:abc".to_string(),
+            accessed_at: "2026-01-01T00:00:00Z".to_string(),
+            hash: None,
+            span: None,
+        }
+    }
+
+    #[test]
+    fn validate_source_uri_rejects_empty_string() {
+        let err = validate_source_uri("").unwrap_err();
+        assert!(format!("{err}").contains("cannot be empty"));
+    }
+
+    #[test]
+    fn validate_source_uri_rejects_whitespace_only() {
+        let err = validate_source_uri("   \t  ").unwrap_err();
+        assert!(format!("{err}").contains("cannot be empty"));
+    }
+
+    #[test]
+    fn validate_source_uri_rejects_bare_string_without_scheme() {
+        let err = validate_source_uri("example.com/path").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("must start with"), "got: {msg}");
+        assert!(msg.contains("uri:") || msg.contains("doc:") || msg.contains("file:"));
+    }
+
+    #[test]
+    fn validate_source_uri_rejects_control_chars() {
+        let err = validate_source_uri("uri:has\x07ctrl").unwrap_err();
+        assert!(format!("{err}").contains("invalid control characters"));
+    }
+
+    #[test]
+    fn validate_source_uri_rejects_oversize_input() {
+        let big = format!("uri:{}", "a".repeat(8_000));
+        let err = validate_source_uri(&big).unwrap_err();
+        assert!(format!("{err}").contains("max length"));
+    }
+
+    #[test]
+    fn validate_source_uri_rejects_scheme_with_empty_payload() {
+        let err = validate_source_uri("doc:").unwrap_err();
+        assert!(format!("{err}").contains("empty payload"));
+        let err = validate_source_uri("file:   ").unwrap_err();
+        assert!(format!("{err}").contains("empty payload"));
+    }
+
+    #[test]
+    fn validate_source_uri_accepts_three_known_schemes() {
+        assert!(validate_source_uri("uri:https://example.com").is_ok());
+        assert!(validate_source_uri("doc:abc-123").is_ok());
+        assert!(validate_source_uri("file:/etc/hosts").is_ok());
+    }
+
+    #[test]
+    fn validate_source_span_rejects_end_lt_start() {
+        let span = crate::models::SourceSpan { start: 10, end: 5 };
+        let err = validate_source_span(&span).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("start") && msg.contains("end"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_source_span_rejects_end_eq_start() {
+        // Half-open interval requires strict start < end.
+        let span = crate::models::SourceSpan { start: 4, end: 4 };
+        assert!(validate_source_span(&span).is_err());
+    }
+
+    #[test]
+    fn validate_source_span_accepts_valid_range() {
+        let span = crate::models::SourceSpan { start: 0, end: 10 };
+        assert!(validate_source_span(&span).is_ok());
+    }
+
+    #[test]
+    fn validate_source_span_for_body_rejects_end_gt_body_len() {
+        let body = "hello";
+        let span = crate::models::SourceSpan { start: 0, end: 10 };
+        let err = validate_source_span_for_body(&span, body).unwrap_err();
+        assert!(format!("{err}").contains("exceeds body length"));
+    }
+
+    #[test]
+    fn validate_source_span_for_body_rejects_non_char_boundary_start() {
+        // "é" is two bytes in UTF-8 (0xC3 0xA9); offset 1 falls
+        // mid-codepoint.
+        let body = "é-pattern";
+        let span = crate::models::SourceSpan { start: 1, end: 3 };
+        let err = validate_source_span_for_body(&span, body).unwrap_err();
+        assert!(format!("{err}").contains("char boundary"));
+    }
+
+    #[test]
+    fn validate_source_span_for_body_rejects_non_char_boundary_end() {
+        let body = "aéb";
+        let span = crate::models::SourceSpan { start: 0, end: 2 };
+        let err = validate_source_span_for_body(&span, body).unwrap_err();
+        assert!(format!("{err}").contains("char boundary"));
+    }
+
+    #[test]
+    fn validate_source_span_for_body_accepts_full_body_slice() {
+        let body = "hello world";
+        let span = crate::models::SourceSpan {
+            start: 0,
+            end: body.len(),
+        };
+        assert!(validate_source_span_for_body(&span, body).is_ok());
+    }
+
+    #[test]
+    fn validate_citation_rejects_bad_uri() {
+        let mut c = good_citation();
+        c.uri = "bare-string-no-scheme".to_string();
+        let err = validate_citation(&c).unwrap_err();
+        assert!(format!("{err}").contains("must start with"));
+    }
+
+    #[test]
+    fn validate_citation_rejects_bad_accessed_at() {
+        let mut c = good_citation();
+        c.accessed_at = "not-a-date".to_string();
+        let err = validate_citation(&c).unwrap_err();
+        assert!(format!("{err}").contains("RFC3339"));
+    }
+
+    #[test]
+    fn validate_citation_rejects_short_hash() {
+        let mut c = good_citation();
+        c.hash = Some("deadbeef".to_string()); // 8 chars, not 64
+        let err = validate_citation(&c).unwrap_err();
+        assert!(format!("{err}").contains("64 hex"));
+    }
+
+    #[test]
+    fn validate_citation_rejects_non_hex_hash() {
+        let mut c = good_citation();
+        // Right length, wrong alphabet (contains 'z').
+        c.hash = Some(format!("{}z", "a".repeat(63)));
+        let err = validate_citation(&c).unwrap_err();
+        assert!(format!("{err}").contains("64 hex"));
+    }
+
+    #[test]
+    fn validate_citation_accepts_valid_hash() {
+        let mut c = good_citation();
+        c.hash = Some("a".repeat(64));
+        assert!(validate_citation(&c).is_ok());
+    }
+
+    #[test]
+    fn validate_citation_propagates_span_rejection() {
+        let mut c = good_citation();
+        c.span = Some(crate::models::SourceSpan { start: 5, end: 1 });
+        let err = validate_citation(&c).unwrap_err();
+        assert!(format!("{err}").contains("source_span"));
+    }
+
+    #[test]
+    fn validate_citation_accepts_minimal_valid_form() {
+        assert!(validate_citation(&good_citation()).is_ok());
+    }
+
+    #[test]
+    fn validate_citations_rejects_count_over_cap() {
+        let many = vec![good_citation(); 65];
+        let err = validate_citations(&many).unwrap_err();
+        assert!(format!("{err}").contains("too many"));
+    }
+
+    #[test]
+    fn validate_citations_propagates_first_invalid_entry() {
+        let mut bad = good_citation();
+        bad.uri = "bogus".to_string();
+        let v = vec![good_citation(), bad];
+        let err = validate_citations(&v).unwrap_err();
+        assert!(format!("{err}").contains("must start with"));
+    }
+
+    #[test]
+    fn validate_citations_accepts_empty_and_full_under_cap() {
+        assert!(validate_citations(&[]).is_ok());
+        let v = vec![good_citation(); 64];
+        assert!(validate_citations(&v).is_ok());
     }
 }

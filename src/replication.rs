@@ -260,6 +260,18 @@ impl AckTracker {
     pub fn id_drift_count(&self) -> usize {
         self.id_drifts.len()
     }
+
+    /// H9 (v0.7.0 round-2) — opaque view onto the set of peer ids
+    /// that have positively acknowledged this quorum write. Exposed
+    /// so `broadcast_store_quorum` (and its delete/archive siblings)
+    /// can compute `missing = configured_peers - acked_peers` and
+    /// surface that set in a `tracing::warn!` when quorum is met but
+    /// some peers did not ack — operators need to see the gap in
+    /// logs before a follow-up sync cycle catches the peer up.
+    #[must_use]
+    pub fn acked_peer_ids(&self) -> &HashSet<String> {
+        &self.acks
+    }
 }
 
 #[cfg(test)]

@@ -161,6 +161,57 @@ pub enum HookEvent {
     ///
     /// Wires here at `src/mcp.rs:1543` (top of `pub fn handle_recall`).
     PreRecallExpand,
+    /// v0.7.0 recursive-learning Task 6/8 — fires BEFORE the
+    /// depth-cap check inside `db::reflect`. **Decision-class** hook:
+    /// handlers may VETO the reflection by returning `Deny`, which
+    /// propagates an error up to the caller distinct from a cap
+    /// refusal (caller-policy refusals like "this agent is
+    /// rate-limited" vs the substrate cap refusal Task 5 audits).
+    /// Payload: [`ReflectDelta`] (writable — handlers may rewrite the
+    /// proposed reflection's tier / tags / priority / metadata before
+    /// the cap check evaluates). Classified as
+    /// [`crate::hooks::EventClass::Write`].
+    ///
+    /// Wires here at `src/db.rs:reflect` step 4 (after source-load /
+    /// depth computation, BEFORE step 5 cap check).
+    PreReflect,
+    /// v0.7.0 recursive-learning Task 6/8 — fires AFTER the
+    /// reflection transaction commits. **Notify-class** hook:
+    /// handlers cannot veto; their return value is ignored beyond
+    /// logging. Payload: [`ReflectResult`] (read-only — the
+    /// post-commit envelope mirrors the `memory_reflect` MCP
+    /// response). Classified as [`crate::hooks::EventClass::Write`].
+    ///
+    /// Wires here at `src/db.rs:reflect` step 7 (after COMMIT
+    /// succeeds, before returning `ReflectOutcome` to the caller).
+    /// Layers on top of the existing `memory_store` webhook event the
+    /// MCP handler dispatches — both fire on a successful reflect.
+    PostReflect,
+    /// v0.7.0 L1-7 compaction pipeline — fires BEFORE a compaction
+    /// pass (consolidation, reflection, …) processes a cluster.
+    /// **Decision-class** hook: handlers may Allow (default), Modify
+    /// (rewrite the cluster's candidate id list), Deny (abort the
+    /// cluster — no summarise, no persist, no verify), or AskUser.
+    /// Payload: [`CompactionDelta`] (writable — the candidate id list
+    /// and the pass name).  Classified as
+    /// [`crate::hooks::EventClass::Write`].
+    ///
+    /// Wires here at `src/curator/compaction.rs` (before
+    /// `ConsolidationPass::summarize` is called for each cluster).
+    PreCompaction,
+    /// v0.7.0 L1-7 compaction pipeline — fires when the verify step
+    /// of a compaction pass fails.  **Notify-class** hook: handlers
+    /// cannot veto; their return value is ignored beyond logging.
+    /// Payload: [`CompactionRollbackEvent`] (read-only — names the
+    /// summary id and pass that failed).
+    ///
+    /// NOTE: actual rollback (re-inserting source rows, invalidating
+    /// the summary) is deferred to v0.8.0 Pillar 2.5 (issue #664).
+    /// This hook fires NOW so integrations can detect and report
+    /// verify failures; the rollback mechanics ship later.
+    ///
+    /// Classified as [`crate::hooks::EventClass::Write`].
+    OnCompactionRollback,
 }
 
 // ---------------------------------------------------------------------------
@@ -493,6 +544,90 @@ fn rfc3339_now() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Pre/Post-reflect payloads (v0.7.0 recursive-learning Task 6/8)
+// ---------------------------------------------------------------------------
+
+/// Writable delta a `pre_reflect` hook may mutate before `db::reflect`
+/// evaluates the depth-cap. Mirrors the user-controllable fields of
+/// `crate::db::ReflectInput` — but as a JSON-friendly bag with every
+/// field optional so a hook may return a partial diff (e.g. just
+/// rewriting `tags` or `priority`) without echoing the whole input
+/// back over stdio. Fields a `pre_reflect` hook may not safely
+/// override (`source_ids`, `agent_id`) are intentionally absent here —
+/// rewriting either would silently change the audit provenance of a
+/// downstream refusal, which is the wrong shape for a hook contract.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReflectDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier: Option<Tier>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
+}
+
+/// Read-only result returned to a `post_reflect` hook. Mirrors the
+/// `crate::db::ReflectOutcome` wire shape (id, reflection_depth,
+/// reflects_on, namespace) so the post-hook can correlate the new
+/// reflection memory with the sources it was derived from. The new
+/// memory is already durable at hook-fire time — the hook may read it
+/// back via the same connection without racing the writer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReflectResult {
+    pub id: String,
+    pub reflection_depth: i32,
+    pub reflects_on: Vec<String>,
+    pub namespace: String,
+}
+
+// ---------------------------------------------------------------------------
+// Compaction payloads (v0.7.0 L1-7)
+// ---------------------------------------------------------------------------
+
+/// Writable delta for [`HookEvent::PreCompaction`]. Names the compaction
+/// pass and the candidate memory ids it is about to operate on.  A hook
+/// may shrink (or veto via `HookDecision::Deny`) the candidate set before
+/// the pass summarises.
+///
+/// `pass_name` matches [`crate::curator::pipeline::CompactionPass::name`]
+/// so a hook can filter by strategy (`"consolidation"`, `"reflection"`, …).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionDelta {
+    /// Name of the compaction pass (e.g. `"consolidation"`).
+    pub pass_name: String,
+    /// Memory ids in the cluster about to be compacted.  A hook may
+    /// return a `Modify` delta with a shorter list to reduce the cluster.
+    pub candidate_ids: Vec<String>,
+    /// Namespace all candidates share.
+    pub namespace: String,
+}
+
+/// Read-only payload for [`HookEvent::OnCompactionRollback`]. Carries
+/// enough context for an observability hook to log, page, or re-index
+/// without re-querying the database.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionRollbackEvent {
+    /// Name of the compaction pass that failed the verify step.
+    pub pass_name: String,
+    /// Id of the summary memory whose verify step failed.
+    pub summary_id: String,
+    /// Namespace the cluster belonged to.
+    pub namespace: String,
+    /// Human-readable description of the verify failure.
+    pub reason: String,
+}
+
+// ---------------------------------------------------------------------------
 // Transcript payloads (I-track interop)
 // ---------------------------------------------------------------------------
 
@@ -589,15 +724,26 @@ mod tests {
             (HookEvent::PreTranscriptStore, "\"pre_transcript_store\""),
             (HookEvent::PostTranscriptStore, "\"post_transcript_store\""),
             (HookEvent::PreRecallExpand, "\"pre_recall_expand\""),
+            (HookEvent::PreReflect, "\"pre_reflect\""),
+            (HookEvent::PostReflect, "\"post_reflect\""),
+            // v0.7.0 L1-7: compaction pipeline events (24th + 25th).
+            (HookEvent::PreCompaction, "\"pre_compaction\""),
+            (
+                HookEvent::OnCompactionRollback,
+                "\"on_compaction_rollback\"",
+            ),
         ];
 
-        // Pin the count at the type boundary so adding a 22nd
+        // Pin the count at the type boundary so adding a 26th
         // variant without updating the table fails this test. G2
-        // shipped 20; G10 added the 21st (`pre_recall_expand`).
+        // shipped 20; G10 added the 21st (`pre_recall_expand`);
+        // v0.7.0 recursive-learning Task 6/8 added the 22nd +
+        // 23rd (`pre_reflect`, `post_reflect`); L1-7 adds the
+        // 24th + 25th (`pre_compaction`, `on_compaction_rollback`).
         assert_eq!(
             table.len(),
-            21,
-            "G10 raises the count from 20 to 21 (adds pre_recall_expand)"
+            25,
+            "L1-7 raises the count from 23 to 25 (adds pre_compaction + on_compaction_rollback)"
         );
 
         for (variant, expected_json) in table {
@@ -750,7 +896,7 @@ mod tests {
         let post = Link {
             source_id: "src".into(),
             target_id: "tgt".into(),
-            relation: "related_to".into(),
+            relation: crate::models::MemoryLinkRelation::RelatedTo,
             created_at: "2026-05-05T00:00:00Z".into(),
             signature: None,
             observed_by: None,
@@ -871,6 +1017,50 @@ mod tests {
             "expected trailing Z, got {:?}",
             ev.evicted_at
         );
+    }
+
+    #[test]
+    fn reflect_delta_partial_serialization_omits_none_fields() {
+        // v0.7.0 Task 6/8 — ReflectDelta wire shape sanity. Only
+        // hook-touched fields should surface on the wire.
+        let delta = ReflectDelta {
+            tags: Some(vec!["rate-limited".into(), "policy".into()]),
+            priority: Some(2),
+            ..Default::default()
+        };
+        let v: Value = serde_json::to_value(&delta).expect("encode");
+        assert_eq!(v["tags"], serde_json::json!(["rate-limited", "policy"]));
+        assert_eq!(v["priority"], serde_json::json!(2));
+        assert!(v.get("title").is_none());
+        assert!(v.get("content").is_none());
+        assert!(v.get("metadata").is_none());
+
+        let back: ReflectDelta = serde_json::from_value(v).expect("decode");
+        assert_eq!(back.priority, Some(2));
+        assert_eq!(
+            back.tags.as_deref(),
+            Some(&["rate-limited".to_string(), "policy".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn reflect_result_round_trips() {
+        // v0.7.0 Task 6/8 — ReflectResult is the post-commit envelope
+        // a post_reflect hook receives. Mirrors db::ReflectOutcome
+        // (id, reflection_depth, reflects_on, namespace) field-for-
+        // field so a hook author doesn't have to learn a second shape.
+        let r = ReflectResult {
+            id: "01HZX0R5GZ8R3KJYV1Y3M9YW2T".into(),
+            reflection_depth: 2,
+            reflects_on: vec!["src-a".into(), "src-b".into()],
+            namespace: "team/ops".into(),
+        };
+        let json = serde_json::to_string(&r).expect("encode");
+        let back: ReflectResult = serde_json::from_str(&json).expect("decode");
+        assert_eq!(back.id, r.id);
+        assert_eq!(back.reflection_depth, 2);
+        assert_eq!(back.reflects_on, vec!["src-a".to_string(), "src-b".into()]);
+        assert_eq!(back.namespace, "team/ops");
     }
 
     #[test]

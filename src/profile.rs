@@ -152,10 +152,12 @@ impl Family {
             | "memory_namespace_clear_standard"
             | "memory_subscribe"
             | "memory_unsubscribe" => Some(Self::Governance),
-            // power (9 — v0.7 K7 added the subscription-reliability pair:
+            // power (10 — v0.7 K7 added the subscription-reliability pair:
             // `memory_subscription_replay` + `memory_subscription_dlq_list`;
             // v0.7 K8 added `memory_quota_status` for the per-agent quota
-            // substrate. All operator/governance, not data-plane.)
+            // substrate; v0.7.0 Task 4/8 added `memory_reflect` — the
+            // substrate-native recursive-learning primitive. All
+            // operator/governance, not data-plane.)
             "memory_consolidate"
             | "memory_detect_contradiction"
             | "memory_check_duplicate"
@@ -164,7 +166,55 @@ impl Family {
             | "memory_inbox"
             | "memory_subscription_replay"
             | "memory_subscription_dlq_list"
-            | "memory_quota_status" => Some(Self::Power),
+            | "memory_quota_status"
+            | "memory_reflect"
+            | "memory_reflection_origin"
+            // v0.7.0 QW-1 — file-backed reflection chain export.
+            // Operator-facing; substrate returns rendered content,
+            // agent harness owns the disk write.
+            | "memory_export_reflection"
+            // v0.7.0 QW-2 — Persona-as-artifact. The read-only
+            // `memory_persona` lookup and the write-side
+            // `memory_persona_generate` regeneration both sit under
+            // Power. Tier-gating in the MCP dispatcher refuses the
+            // write-side surface unless smart+autonomous is enabled.
+            | "memory_persona"
+            | "memory_persona_generate"
+            // v0.7.0 Form 5 (issue #758) — calibration sweep over the
+            // shadow-mode observation table. Operator-callable
+            // equivalent of `ai-memory calibrate confidence
+            // --from-shadow`. Lives in Power alongside the other
+            // operator-facing observability tools.
+            | "memory_calibrate_confidence"
+            // v0.7.0 L2-3 (issue #668) — read-side surface for the
+            // reflection invalidation propagation walker. Operator-
+            // facing inspector for the per-reflection dependent set
+            // that gets notified on Reflection→Reflection supersedes.
+            | "memory_dependents_of_invalidated"
+            // v0.7.0 (issue #691) — substrate-level agent-action rules
+            // engine. Both tools live in Family::Power (governance /
+            // operator-facing, not data-plane). Mutation tools are
+            // explicitly NOT registered over MCP per design revision
+            // 2026-05-13 — operator uses CLI / HTTP with signed key.
+            | "memory_check_agent_action"
+            | "memory_rule_list"
+            // v0.7.0 QW-3 follow-up — context-offload substrate primitive.
+            // The pair lives in Family::Power so the `power` (and `full`)
+            // profile surfaces them while keeping the keyword-tier
+            // `core` surface unchanged (semantic-tier+ exposure per the
+            // QW-3 brief).
+            | "memory_offload"
+            | "memory_deref"
+            // v0.7.0 WT-1-C — curator-pass atomisation tool. Lives in
+            // the same family/profile group as memory_consolidate and
+            // memory_reflect (semantic+ tier; the keyword tier short-
+            // circuits with a tier-locked advisory envelope).
+            | "memory_atomise"
+            // v0.7.0 Form 3 (issue #756) — multi-step ingest
+            // orchestrator. Lives at Family::Power alongside the other
+            // LLM-driven write-side tools; tier-gated to smart+ with
+            // the standard tier-locked advisory on keyword.
+            | "memory_ingest_multistep" => Some(Self::Power),
             // meta (5)
             "memory_capabilities"
             | "memory_agent_register"
@@ -176,8 +226,18 @@ impl Family {
             | "memory_archive_purge"
             | "memory_archive_restore"
             | "memory_archive_stats" => Some(Self::Archive),
-            // other (2)
-            "memory_list_subscriptions" | "memory_notify" => Some(Self::Other),
+            // other (9 — 2 baseline + v0.7.0 L1-5 5 skill tools +
+            // v0.7.0 L2-6 memory_skill_promote_from_reflection (#671) +
+            // v0.7.0 L2-7 memory_skill_compositional_context (#672))
+            "memory_list_subscriptions"
+            | "memory_notify"
+            | "memory_skill_register"
+            | "memory_skill_list"
+            | "memory_skill_get"
+            | "memory_skill_resource"
+            | "memory_skill_export"
+            | "memory_skill_promote_from_reflection"
+            | "memory_skill_compositional_context" => Some(Self::Other),
             _ => None,
         }
     }
@@ -226,10 +286,34 @@ impl Family {
             // memory_find_paths (v0.7 J7) = 11.
             Self::Graph => 11,
             Self::Governance => 8,
-            // Power: 6 baseline + 2 (v0.7 K7) + 1 (v0.7 K8 quota_status) = 9.
-            Self::Power => 9,
+            // Power: 6 baseline + 2 (v0.7 K7) + 1 (v0.7 K8 quota_status) +
+            // 1 (v0.7.0 Task 4/8 — memory_reflect substrate primitive) +
+            // 1 (v0.7.0 L2-2 / S6-M1 — memory_reflection_origin) +
+            // 1 (v0.7.0 L2-3 / #668 — memory_dependents_of_invalidated) +
+            // 2 (v0.7.0 issue #691 — memory_check_agent_action +
+            // memory_rule_list, substrate-level agent-action rules) +
+            // 1 (v0.7.0 QW-1 — memory_export_reflection, file-backed
+            // reflection chain export) +
+            // 2 (v0.7.0 QW-3 follow-up — memory_offload + memory_deref,
+            // context-offload substrate primitive surfaced at the
+            // semantic-tier+ Power family) +
+            // 1 (v0.7.0 WT-1-C — memory_atomise, curator-pass
+            // decomposition into 2-10 atomic propositions) +
+            // 2 (v0.7.0 QW-2 — memory_persona + memory_persona_generate,
+            // Persona-as-artifact substrate primitive) +
+            // 1 (v0.7.0 Form 3 / #756 — memory_ingest_multistep,
+            // multi-step ingest orchestrator with deterministic
+            // helpers + prompt-cache reuse) +
+            // 1 (v0.7.0 Form 5 / issue #758 — memory_calibrate_confidence,
+            // shadow-mode-driven per-source baseline sweep) = 22.
+            Self::Power => 22,
             Self::Archive => 4,
-            Self::Other => 2,
+            // v0.7.0 L1-5 — 5 skill tools added to the Other family.
+            // v0.7.0 L2-6 (issue #671) — memory_skill_promote_from_reflection
+            // closes the recursive-learning loop → 8.
+            // v0.7.0 L2-7 (issue #672) — memory_skill_compositional_context
+            // composition declaration → 9.
+            Self::Other => 9,
         }
     }
 
@@ -316,6 +400,54 @@ impl Family {
                 // bytes, links/day). Operator-facing inspector for the K8
                 // rate-limit substrate.
                 "memory_quota_status",
+                // v0.7.0 Task 4/8 (recursive learning, issue #655) —
+                // substrate-native reflection primitive. Inserts a
+                // reflection memory plus N `reflects_on` provenance
+                // links in a single atomic transaction.
+                "memory_reflect",
+                // v0.7.0 L2-2 (S6-M1) — cross-peer reflection origin
+                // inspector. Returns peer_origin / signing_agent /
+                // original_depth / local_depth_at_arrival for a row.
+                "memory_reflection_origin",
+                // v0.7.0 L2-3 (issue #668) — invalidation propagation
+                // read-side inspector. Lists dependents flagged by
+                // the walker on Reflection→Reflection supersedes.
+                "memory_dependents_of_invalidated",
+                // v0.7.0 (issue #691) — substrate-level agent-action
+                // rules engine. Read-side surface; mutation tools are
+                // NOT registered over MCP (operator uses CLI / HTTP).
+                "memory_check_agent_action",
+                "memory_rule_list",
+                // v0.7.0 QW-1 — file-backed reflection chain export
+                // companion. Renders the markdown / JSON envelope;
+                // does NOT write to disk (agent harness owns disk I/O).
+                "memory_export_reflection",
+                // v0.7.0 QW-3 follow-up — context-offload substrate
+                // primitive (offload + deref). Power-family registration
+                // gives semantic-tier+ exposure per the QW-3 brief; the
+                // handlers themselves live at src/mcp/tools/offload.rs.
+                "memory_offload",
+                "memory_deref",
+                // v0.7.0 WT-1-C — curator-pass atomisation tool.
+                // Decomposes a coarse memory into 2-10 atomic
+                // propositions; archives the source. Lives in Power
+                // alongside memory_consolidate / memory_reflect.
+                "memory_atomise",
+                // v0.7.0 QW-2 — Persona-as-artifact. Read-only lookup
+                // + smart+ regeneration. Substrate writes the SQL row
+                // (and optionally the filesystem export via namespace
+                // policy); the agent never holds the keypair.
+                "memory_persona",
+                "memory_persona_generate",
+                // v0.7.0 Form 3 (issue #756) — multi-step ingest
+                // orchestrator. Deterministic helpers + LLM stages
+                // with explicit-trust slots and prompt-cache reuse.
+                "memory_ingest_multistep",
+                // v0.7.0 Form 5 (issue #758) — calibration sweep over
+                // the shadow-mode observation table. Operator surface
+                // for tuning per-(namespace, source) confidence
+                // baselines.
+                "memory_calibrate_confidence",
             ],
             Self::Meta => &[
                 "memory_capabilities",
@@ -330,7 +462,20 @@ impl Family {
                 "memory_archive_restore",
                 "memory_archive_stats",
             ],
-            Self::Other => &["memory_list_subscriptions", "memory_notify"],
+            Self::Other => &[
+                "memory_list_subscriptions",
+                "memory_notify",
+                // v0.7.0 L1-5 — Agent Skills ingestion substrate (Pillar 1.5).
+                "memory_skill_register",
+                "memory_skill_list",
+                "memory_skill_get",
+                "memory_skill_resource",
+                "memory_skill_export",
+                // v0.7.0 L2-6 (issue #671) — closing the recursive-learning loop.
+                "memory_skill_promote_from_reflection",
+                // v0.7.0 L2-7 (issue #672) — reflection-skill composition.
+                "memory_skill_compositional_context",
+            ],
         }
     }
 }
@@ -602,13 +747,26 @@ mod tests {
     fn family_expected_tool_counts_sum_to_51() {
         let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
         assert_eq!(
-            total, 51,
+            total, 71,
             "v0.6.3.1 baseline (43) + v0.7.0 I4 `memory_replay` + v0.7 H4 \
              `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 B2 \
              `memory_smart_load` + v0.7 K7 `memory_subscription_replay` \
              + `memory_subscription_dlq_list` + v0.7 J7 `memory_find_paths` \
-             + v0.7 K8 `memory_quota_status` = 51. If this drifts, update \
-             Family::expected_tool_count and the family map docs together."
+             + v0.7 K8 `memory_quota_status` + v0.7.0 Task 4/8 \
+             `memory_reflect` + v0.7.0 L2-2 `memory_reflection_origin` + \
+             v0.7.0 L2-3 `memory_dependents_of_invalidated` + \
+             v0.7.0 issue #691 `memory_check_agent_action` + \
+             `memory_rule_list` + v0.7.0 L1-5 5×skill tools + \
+             v0.7.0 L2-6 `memory_skill_promote_from_reflection` + \
+             v0.7.0 L2-7 `memory_skill_compositional_context` + \
+             v0.7.0 QW-1 `memory_export_reflection` + \
+             v0.7.0 QW-3 follow-up `memory_offload` + `memory_deref` + \
+             v0.7.0 WT-1-C `memory_atomise` + \
+             v0.7.0 QW-2 `memory_persona` + `memory_persona_generate` + \
+             v0.7.0 Form 3 `memory_ingest_multistep` + \
+             v0.7.0 Form 5 `memory_calibrate_confidence` = 71. \
+             If this drifts, update Family::expected_tool_count and the \
+             family map docs together."
         );
     }
 
@@ -685,21 +843,49 @@ mod tests {
         // v0.7 B1 + v0.7 B2 — Core now ships 7 tools (was 5).
         // v0.7 K7 — Power got the subscription-reliability pair (+2 → 8).
         // v0.7 K8 — Power got memory_quota_status (+1 → 9).
-        assert_eq!(p.expected_tool_count(), 7 + 9);
+        // v0.7.0 Task 4/8 — Power got memory_reflect (+1 → 10).
+        // v0.7.0 L2-2 — Power got memory_reflection_origin (+1 → 11).
+        // v0.7.0 L2-3 — Power got memory_dependents_of_invalidated (+1 → 12).
+        // v0.7.0 issue #691 — Power got memory_check_agent_action +
+        // memory_rule_list (+2 → 14).
+        // v0.7.0 QW-1 — Power got memory_export_reflection (+1 → 15).
+        // v0.7.0 QW-3 follow-up — Power got memory_offload + memory_deref
+        // (context-offload substrate primitive, +2 → 17).
+        // v0.7.0 WT-1-C — Power got memory_atomise (+1 → 18).
+        // v0.7.0 QW-2 — Power got memory_persona + memory_persona_generate
+        // (Persona-as-artifact substrate primitive, +2 → 20).
+        // v0.7.0 Form 3 (#756) — Power got memory_ingest_multistep
+        // (multi-step ingest orchestrator with deterministic helpers
+        // + prompt-cache reuse, +1 → 21).
+        // v0.7.0 Form 5 — Power got memory_calibrate_confidence
+        // (shadow-mode-driven per-source baseline sweep, +1 → 22).
+        assert_eq!(p.expected_tool_count(), 7 + 22);
     }
 
     #[test]
     fn profile_full_has_fifty_one_tools() {
         let p = Profile::full();
-        // v0.7 K8 (post-B2/J7) — full surface = 43 baseline + memory_replay (I4) +
-        // memory_verify (H4) + memory_load_family (B1) + memory_smart_load (B2) +
-        // memory_subscription_replay (K7) + memory_subscription_dlq_list (K7) +
-        // memory_find_paths (J7) + memory_quota_status (K8) = 51.
-        assert_eq!(p.expected_tool_count(), 51);
+        // v0.7.0 L2 cascade (L2-3 + L2-6 + L2-7) — full surface = 43 baseline +
+        // memory_replay (I4) + memory_verify (H4) + memory_load_family (B1)
+        // + memory_smart_load (B2) + memory_subscription_replay (K7) +
+        // memory_subscription_dlq_list (K7) + memory_find_paths (J7) +
+        // memory_quota_status (K8) + memory_reflect (Task 4/8) +
+        // memory_reflection_origin (L2-2) + memory_dependents_of_invalidated
+        // (L2-3) + memory_check_agent_action + memory_rule_list (#691) +
+        // 5×memory_skill_* (L1-5) + memory_skill_promote_from_reflection
+        // (L2-6, #671) + memory_skill_compositional_context (L2-7, #672) +
+        // memory_export_reflection (QW-1) +
+        // memory_offload + memory_deref (QW-3 follow-up, Family::Power) +
+        // memory_atomise (WT-1-C, Family::Power) +
+        // memory_persona + memory_persona_generate (QW-2, Family::Power) +
+        // memory_ingest_multistep (Form 3 / #756, Family::Power) +
+        // memory_calibrate_confidence (Form 5, Family::Power) = 71.
+        assert_eq!(p.expected_tool_count(), 71);
 
-        // The K7+K8 additions live in Family::Power (operator/governance),
-        // so the `power` profile picks them up too.
-        assert_eq!(Profile::power().expected_tool_count(), 7 + 9);
+        // The K7+K8 + Task 4/8 + L2-2 + L2-3 + #691 + QW-1 + QW-3 follow-up
+        // + WT-1-C + QW-2 + Form 3 + Form 5 additions live in Family::Power
+        // (operator/governance), so the `power` profile picks them up too.
+        assert_eq!(Profile::power().expected_tool_count(), 7 + 22);
     }
 
     // ---------- Profile::parse ----------
@@ -866,6 +1052,8 @@ mod tests {
             "memory_subscription_dlq_list",
             // power (v0.7 K8 addition — per-agent quota status)
             "memory_quota_status",
+            // power (v0.7.0 Task 4/8 — substrate-native reflection primitive)
+            "memory_reflect",
             // meta
             "memory_capabilities",
             "memory_agent_register",
@@ -880,15 +1068,46 @@ mod tests {
             // other
             "memory_list_subscriptions",
             "memory_notify",
+            // other (v0.7.0 L1-5 — Agent Skills substrate)
+            "memory_skill_register",
+            "memory_skill_list",
+            "memory_skill_get",
+            "memory_skill_resource",
+            "memory_skill_export",
+            // other (v0.7.0 L2-6 — issue #671: reflections become skills)
+            "memory_skill_promote_from_reflection",
+            // v0.7.0 L2-7 (issue #672) — reflection-skill composition.
+            "memory_skill_compositional_context",
+            // v0.7.0 QW-1 — file-backed reflection chain export (Family::Power).
+            "memory_export_reflection",
+            // v0.7.0 QW-3 follow-up — context-offload substrate (Family::Power).
+            "memory_offload",
+            "memory_deref",
+            // v0.7.0 WT-1-C (curator-pass atomisation) — Family::Power.
+            "memory_atomise",
+            // v0.7.0 Form 3 (#756) — multi-step ingest orchestrator.
+            "memory_ingest_multistep",
+            // v0.7.0 Form 5 (issue #758) — calibration sweep over the
+            // shadow-mode observation table (Family::Power).
+            "memory_calibrate_confidence",
         ];
         assert_eq!(
             baseline.len(),
-            51,
+            65,
             "baseline list = 43 (v0.6.3.1) + 1 (v0.7.0 I4 memory_replay) + \
              1 (v0.7 H4 memory_verify) + 1 (v0.7 B1 memory_load_family) + \
              1 (v0.7 B2 memory_smart_load) + \
              2 (v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list) + \
-             1 (v0.7 J7 memory_find_paths) + 1 (v0.7 K8 memory_quota_status) = 51"
+             1 (v0.7 J7 memory_find_paths) + 1 (v0.7 K8 memory_quota_status) + \
+             1 (v0.7.0 Task 4/8 memory_reflect) + \
+             5 (v0.7.0 L1-5 skill tools) + \
+             1 (v0.7.0 L2-6 memory_skill_promote_from_reflection) + \
+             1 (v0.7.0 L2-7 memory_skill_compositional_context) + \
+             1 (v0.7.0 QW-1 memory_export_reflection) + \
+             2 (v0.7.0 QW-3 follow-up memory_offload + memory_deref) + \
+             1 (v0.7.0 WT-1-C memory_atomise) + \
+             1 (v0.7.0 Form 3 memory_ingest_multistep) + \
+             1 (v0.7.0 Form 5 memory_calibrate_confidence) = 65"
         );
         for name in baseline {
             assert!(

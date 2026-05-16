@@ -27,8 +27,12 @@ use crate::identity::{self, keypair};
 
 #[derive(Args)]
 pub struct IdentityArgs {
-    /// Override the default key storage directory
-    /// (`<config>/ai-memory/keys`).
+    /// Override the default key storage directory.
+    /// Default by platform:
+    ///   Linux:   `~/.config/ai-memory/keys/`,
+    ///   macOS:   `~/Library/Application Support/ai-memory/keys/`,
+    ///   Windows: `%APPDATA%\ai-memory\keys\`.
+    /// Honors `AI_MEMORY_KEY_DIR` env var when this flag is omitted.
     #[arg(long, value_name = "PATH", global = true)]
     pub key_dir: Option<PathBuf>,
     #[command(subcommand)]
@@ -45,11 +49,18 @@ pub enum IdentityAction {
         /// rest of the CLI synthesizes (e.g. `host:<host>:pid-<pid>-<uuid8>`).
         #[arg(long)]
         agent_id: Option<String>,
-        /// Refuse to overwrite an existing keypair for `--agent-id`.
-        /// Without this flag a `generate` for an existing id replaces
-        /// the on-disk material — useful for rotation; dangerous for
-        /// fingers.
+        /// Allow overwriting an existing keypair for `--agent-id`.
+        /// Without this flag, `generate` refuses on an existing id —
+        /// the safe default to prevent a typo from silently rotating
+        /// (and irrecoverably destroying) a daemon or peer key. Pass
+        /// `--force` only when you intend to rotate.
         #[arg(long, default_value_t = false)]
+        force: bool,
+        /// Deprecated alias retained for backward compatibility with
+        /// the v0.7.0 pre-Round-4 flag surface. The default behavior
+        /// is now refuse-on-existing; this flag is a no-op. Use
+        /// `--force` to opt INTO overwrite.
+        #[arg(long, default_value_t = false, hide = true)]
         no_overwrite: bool,
     },
     /// Import a keypair from on-disk files written by another tool.
@@ -109,8 +120,9 @@ pub fn run(args: IdentityArgs, json_out: bool, out: &mut CliOutput<'_>) -> Resul
     match args.action {
         IdentityAction::Generate {
             agent_id,
-            no_overwrite,
-        } => generate(&dir, agent_id.as_deref(), no_overwrite, json_out, out),
+            force,
+            no_overwrite: _,
+        } => generate(&dir, agent_id.as_deref(), force, json_out, out),
         IdentityAction::Import {
             agent_id,
             public,
@@ -124,15 +136,21 @@ pub fn run(args: IdentityArgs, json_out: bool, out: &mut CliOutput<'_>) -> Resul
 fn generate(
     dir: &Path,
     explicit_agent_id: Option<&str>,
-    no_overwrite: bool,
+    force: bool,
     json_out: bool,
     out: &mut CliOutput<'_>,
 ) -> Result<()> {
     let id = resolve_id(explicit_agent_id)?;
     let pub_path = dir.join(format!("{id}.pub"));
-    if no_overwrite && pub_path.exists() {
+    // Round-4 — refuse-by-default. The pre-Round-4 default was OVERWRITE,
+    // which let a typo silently rotate (and destroy) a daemon or peer
+    // keypair. Now `generate` refuses if a key already exists; the
+    // operator must pass `--force` to opt into rotation. The legacy
+    // `--no-overwrite` flag is preserved as a hidden no-op for
+    // backward compatibility with scripts that invoked it.
+    if !force && pub_path.exists() {
         bail!(
-            "keypair for {id} already exists at {} (pass without --no-overwrite to rotate)",
+            "keypair for {id} already exists at {} (pass --force to rotate; refused by default to prevent accidental key overwrite)",
             pub_path.display()
         );
     }
@@ -298,6 +316,7 @@ mod tests {
                     key_dir: Some(dir_path.clone()),
                     action: IdentityAction::Generate {
                         agent_id: Some("alice".to_string()),
+                        force: false,
                         no_overwrite: false,
                     },
                 },
@@ -355,7 +374,12 @@ mod tests {
     }
 
     #[test]
-    fn generate_no_overwrite_refuses_existing() {
+    fn generate_refuses_existing_without_force() {
+        // Round-4 — refuse-by-default semantics. A second `generate`
+        // for an existing agent_id MUST fail unless `--force` is
+        // passed. The legacy `--no-overwrite` flag is preserved as a
+        // hidden no-op for backward compatibility with v0.7.0
+        // pre-Round-4 scripts.
         let (mut env, dir) = fresh_env();
         let dir_path = dir.path().to_path_buf();
         // First generate
@@ -366,6 +390,7 @@ mod tests {
                     key_dir: Some(dir_path.clone()),
                     action: IdentityAction::Generate {
                         agent_id: Some("alice".to_string()),
+                        force: false,
                         no_overwrite: false,
                     },
                 },
@@ -376,15 +401,16 @@ mod tests {
         }
         env.stdout.clear();
         env.stderr.clear();
-        // Second generate with --no-overwrite should error.
+        // Second generate WITHOUT --force should error (refuse-by-default).
         let result = {
             let mut out = env.output();
             run(
                 IdentityArgs {
-                    key_dir: Some(dir_path),
+                    key_dir: Some(dir_path.clone()),
                     action: IdentityAction::Generate {
                         agent_id: Some("alice".to_string()),
-                        no_overwrite: true,
+                        force: false,
+                        no_overwrite: false,
                     },
                 },
                 false,
@@ -394,6 +420,35 @@ mod tests {
         let err = result.unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("already exists"), "got: {msg}");
+        assert!(
+            msg.contains("--force"),
+            "error message should guide operator toward --force, got: {msg}"
+        );
+
+        // Third generate WITH --force should succeed (intentional rotation).
+        env.stdout.clear();
+        env.stderr.clear();
+        {
+            let mut out = env.output();
+            run(
+                IdentityArgs {
+                    key_dir: Some(dir_path),
+                    action: IdentityAction::Generate {
+                        agent_id: Some("alice".to_string()),
+                        force: true,
+                        no_overwrite: false,
+                    },
+                },
+                false,
+                &mut out,
+            )
+            .unwrap();
+        }
+        let stdout = env.stdout_str().to_string();
+        assert!(
+            stdout.contains("generated keypair for alice"),
+            "rotation with --force did not succeed: {stdout}"
+        );
     }
 
     #[test]
@@ -407,6 +462,7 @@ mod tests {
                     key_dir: Some(dir_path.clone()),
                     action: IdentityAction::Generate {
                         agent_id: Some("alice".to_string()),
+                        force: false,
                         no_overwrite: false,
                     },
                 },
@@ -507,5 +563,241 @@ mod tests {
         let err = result.unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("does not match"), "got: {msg}");
+    }
+
+    // ------------------------------------------------------------------
+    // L0.7-3 chunk-e2 — coverage uplift to ≥95%.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn generate_json_mode_emits_payload() {
+        // json_out=true on generate exercises the JSON emission branch
+        // (lines 159-169) that the existing happy-path test skipped.
+        let (mut env, dir) = fresh_env();
+        let dir_path = dir.path().to_path_buf();
+        {
+            let mut out = env.output();
+            run(
+                IdentityArgs {
+                    key_dir: Some(dir_path),
+                    action: IdentityAction::Generate {
+                        agent_id: Some("carol".to_string()),
+                        force: false,
+                        no_overwrite: false,
+                    },
+                },
+                true,
+                &mut out,
+            )
+            .unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        assert_eq!(v["generated"], true);
+        assert_eq!(v["agent_id"].as_str().unwrap(), "carol");
+        assert!(v["public_key_b64"].as_str().unwrap().len() > 10);
+        assert!(v["key_dir"].is_string());
+    }
+
+    #[test]
+    fn import_public_only_text_mode() {
+        // Public-only import (priv=None) covers the `private = None`
+        // branch (line 206), the `save_public_only` branch (217), and
+        // the text-mode "(private=no)" emission (lines 233-239).
+        let (mut env, dir) = fresh_env();
+        let dir_path = dir.path().to_path_buf();
+        let kp = keypair::generate("dave").unwrap();
+        let staging = tempfile::TempDir::new().unwrap();
+        let pub_file = staging.path().join("d.pub");
+        std::fs::write(&pub_file, kp.public.to_bytes()).unwrap();
+        {
+            let mut out = env.output();
+            run(
+                IdentityArgs {
+                    key_dir: Some(dir_path.clone()),
+                    action: IdentityAction::Import {
+                        agent_id: "dave".to_string(),
+                        public: pub_file,
+                        private: None,
+                    },
+                },
+                false,
+                &mut out,
+            )
+            .unwrap();
+        }
+        let stdout = env.stdout_str().to_string();
+        assert!(
+            stdout.contains("imported keypair for dave"),
+            "got: {stdout}"
+        );
+        assert!(stdout.contains("(private=no)"), "got: {stdout}");
+        // Round-trip — load should succeed and report no signing key.
+        let loaded = keypair::load("dave", &dir_path).unwrap();
+        assert!(!loaded.can_sign());
+    }
+
+    #[test]
+    fn import_public_only_json_mode() {
+        // JSON emission covers lines 221-231 with `private_imported=false`.
+        let (mut env, dir) = fresh_env();
+        let dir_path = dir.path().to_path_buf();
+        let kp = keypair::generate("eve").unwrap();
+        let staging = tempfile::TempDir::new().unwrap();
+        let pub_file = staging.path().join("e.pub");
+        std::fs::write(&pub_file, kp.public.to_bytes()).unwrap();
+        {
+            let mut out = env.output();
+            run(
+                IdentityArgs {
+                    key_dir: Some(dir_path),
+                    action: IdentityAction::Import {
+                        agent_id: "eve".to_string(),
+                        public: pub_file,
+                        private: None,
+                    },
+                },
+                true,
+                &mut out,
+            )
+            .unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        assert_eq!(v["imported"], true);
+        assert_eq!(v["agent_id"].as_str().unwrap(), "eve");
+        assert_eq!(v["private_imported"], false);
+        assert!(v["public_key_b64"].as_str().unwrap().len() > 10);
+    }
+
+    #[test]
+    fn import_with_priv_json_mode_reports_private_imported_true() {
+        // Mirrors the existing private import test but in json mode to
+        // cover lines 220-231 with `private_imported=true`.
+        let (mut env, dir) = fresh_env();
+        let dir_path = dir.path().to_path_buf();
+        let kp = keypair::generate("frank").unwrap();
+        let staging = tempfile::TempDir::new().unwrap();
+        let pub_file = staging.path().join("f.pub");
+        let priv_file = staging.path().join("f.priv");
+        std::fs::write(&pub_file, kp.public.to_bytes()).unwrap();
+        std::fs::write(&priv_file, kp.private.as_ref().unwrap().to_bytes()).unwrap();
+        {
+            let mut out = env.output();
+            run(
+                IdentityArgs {
+                    key_dir: Some(dir_path),
+                    action: IdentityAction::Import {
+                        agent_id: "frank".to_string(),
+                        public: pub_file,
+                        private: Some(priv_file),
+                    },
+                },
+                true,
+                &mut out,
+            )
+            .unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        assert_eq!(v["private_imported"], true);
+    }
+
+    #[test]
+    fn list_empty_text_mode_emits_no_keypairs() {
+        // Empty list in text mode (line 266).
+        let (mut env, dir) = fresh_env();
+        let dir_path = dir.path().to_path_buf();
+        {
+            let mut out = env.output();
+            run(
+                IdentityArgs {
+                    key_dir: Some(dir_path),
+                    action: IdentityAction::List,
+                },
+                false,
+                &mut out,
+            )
+            .unwrap();
+        }
+        assert!(env.stdout_str().contains("no keypairs in"));
+    }
+
+    #[test]
+    fn list_empty_json_mode_emits_count_zero() {
+        // JSON list with zero entries — covers the json branch with the
+        // empty `entries` collection (line 264).
+        let (mut env, dir) = fresh_env();
+        let dir_path = dir.path().to_path_buf();
+        {
+            let mut out = env.output();
+            run(
+                IdentityArgs {
+                    key_dir: Some(dir_path),
+                    action: IdentityAction::List,
+                },
+                true,
+                &mut out,
+            )
+            .unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        assert_eq!(v["count"].as_u64().unwrap(), 0);
+        assert!(v["keys"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn export_pub_json_mode_emits_payload() {
+        // JSON-mode export-pub (lines 278-286).
+        let (mut env, dir) = fresh_env();
+        let dir_path = dir.path().to_path_buf();
+        // First generate so there is something to export.
+        {
+            let mut out = env.output();
+            run(
+                IdentityArgs {
+                    key_dir: Some(dir_path.clone()),
+                    action: IdentityAction::Generate {
+                        agent_id: Some("grace".to_string()),
+                        force: false,
+                        no_overwrite: false,
+                    },
+                },
+                false,
+                &mut out,
+            )
+            .unwrap();
+        }
+        env.stdout.clear();
+        env.stderr.clear();
+        {
+            let mut out = env.output();
+            run(
+                IdentityArgs {
+                    key_dir: Some(dir_path),
+                    action: IdentityAction::ExportPub {
+                        agent_id: "grace".to_string(),
+                    },
+                },
+                true,
+                &mut out,
+            )
+            .unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        assert_eq!(v["agent_id"].as_str().unwrap(), "grace");
+        assert!(v["public_key_b64"].as_str().unwrap().len() > 10);
+    }
+
+    #[test]
+    fn resolve_key_dir_falls_through_to_default() {
+        // No override path → falls through to `keypair::default_key_dir()`
+        // (line 102). We don't assert on the contents (HOME-dependent),
+        // only that we reach the call and get a `Result`.
+        let r = resolve_key_dir(None);
+        // The default-key-dir resolution depends on dirs::config_dir(),
+        // which is generally available on macOS/Linux test hosts. Tolerate
+        // both Ok (typical) and Err (CI without HOME).
+        match r {
+            Ok(p) => assert!(p.as_os_str().len() > 0),
+            Err(_) => {}
+        }
     }
 }

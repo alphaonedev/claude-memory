@@ -32,6 +32,7 @@
 //! gate through a single `Mutex` so the suite runs serially even
 //! when `cargo test` parallelises across test fns.
 
+use ai_memory::models::ConfidenceSource;
 use std::sync::Mutex;
 
 use ai_memory::db;
@@ -107,6 +108,16 @@ fn seed(conn: &rusqlite::Connection, title: &str) -> String {
         last_accessed_at: None,
         expires_at: None,
         metadata: models::default_metadata(),
+        reflection_depth: 0,
+        memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &mem).expect("db::insert")
 }
@@ -315,7 +326,7 @@ fn peer_attested_link_verifies_and_reports_peer_attested() {
     let inbound = MemoryLink {
         source_id: f.src_id.clone(),
         target_id: f.dst_id.clone(),
-        relation: "related_to".to_string(),
+        relation: ai_memory::models::MemoryLinkRelation::RelatedTo,
         created_at: Utc::now().to_rfc3339(),
         signature: Some(sig),
         observed_by: Some("bob".to_string()),

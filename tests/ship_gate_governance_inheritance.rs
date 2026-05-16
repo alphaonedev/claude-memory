@@ -25,6 +25,7 @@ use ai_memory::config::{
     PermissionsMode, lock_permissions_mode_for_test, override_active_permissions_mode_for_test,
 };
 use ai_memory::db;
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{
     ApproverType, GovernanceDecision, GovernanceLevel, GovernancePolicy, GovernedAction, Memory,
     Tier, default_metadata,
@@ -78,6 +79,16 @@ fn seed_policy(
         last_accessed_at: None,
         expires_at: None,
         metadata,
+        reflection_depth: 0,
+        memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let standard_id = db::insert(conn, &standard).unwrap();
     db::set_namespace_standard(conn, namespace, &standard_id, None).unwrap();
@@ -90,6 +101,21 @@ fn approve_write_policy() -> GovernancePolicy {
         delete: GovernanceLevel::Owner,
         approver: ApproverType::Human,
         inherit: true,
+        max_reflection_depth: None,
+        auto_export_reflections_to_filesystem: None,
+        auto_atomise: None,
+        auto_atomise_threshold_cl100k: None,
+        auto_atomise_max_atom_tokens: None,
+        auto_atomise_max_retries: None,
+        auto_persona_trigger_every_n_memories: None,
+        auto_export_personas_to_filesystem: None,
+        auto_atomise_mode: None,
+        legacy_per_pair_classifier: None,
+        auto_classify_kind: None,
+        synthesis_failure_mode: None,
+        synthesis_max_deletes_per_call: None,
+        synthesis_max_candidate_chars: None,
+        multistep_max_content_chars: None,
     }
 }
 
@@ -100,6 +126,21 @@ fn any_policy_no_inherit() -> GovernancePolicy {
         delete: GovernanceLevel::Owner,
         approver: ApproverType::Human,
         inherit: false,
+        max_reflection_depth: None,
+        auto_export_reflections_to_filesystem: None,
+        auto_atomise: None,
+        auto_atomise_threshold_cl100k: None,
+        auto_atomise_max_atom_tokens: None,
+        auto_atomise_max_retries: None,
+        auto_persona_trigger_every_n_memories: None,
+        auto_export_personas_to_filesystem: None,
+        auto_atomise_mode: None,
+        legacy_per_pair_classifier: None,
+        auto_classify_kind: None,
+        synthesis_failure_mode: None,
+        synthesis_max_deletes_per_call: None,
+        synthesis_max_candidate_chars: None,
+        multistep_max_content_chars: None,
     }
 }
 

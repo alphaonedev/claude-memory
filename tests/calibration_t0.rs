@@ -74,11 +74,48 @@ fn t0_describe_to_user_core_profile_canonical_phrasing() {
     // `memory_subscription_replay` + `memory_subscription_dlq_list`;
     // to 49 in v0.7 J7 — Family::Graph gained `memory_find_paths`;
     // to 50 in v0.7 B2 — Family::Core gained `memory_smart_load`;
-    // to 51 in v0.7 K8 — Family::Power gained `memory_quota_status`.
+    // to 51 in v0.7 K8 — Family::Power gained `memory_quota_status`;
+    // to 52 in v0.7.0 Task 4/8 (#655) — Family::Power gained `memory_reflect`;
+    // to 56 in v0.7.0 L1-5 — Family::Other gained 5 memory_skill_* tools.
     // Loaded under core bumped from 5 to 6 with B1 then to 7 with B2,
     // so the preview now overflows the 5-name cap (ends in ", ...").
+    // memory_reflect lives in Family::Power, so it grows the "more"
+    // bucket from 43 to 44 without changing the loaded count of 7.
+    // v0.7.0 L2-2 (S6-M1) — Family::Power gained
+    // `memory_reflection_origin` (53 total). Not loaded under core, so
+    // the "more" bucket grows from 44 to 45.
+    // v0.7.0 (issue #691) — Family::Power gained
+    // `memory_check_agent_action` + `memory_rule_list` (not loaded
+    // under core), so the "more" count grows from 45 to 47.
+    // v0.7.0 L1-5 — Family::Other gained 5 memory_skill_* tools (not
+    // loaded under core), so the "more" count grows from 47 to 52.
+    // v0.7.0 L2-3 (issue #668) — Family::Power gained
+    // `memory_dependents_of_invalidated` (not loaded under core), so
+    // the "more" count grows from 52 to 53.
+    // v0.7.0 L2-6 (issue #671) — Family::Other gained
+    // `memory_skill_promote_from_reflection` (not loaded under core),
+    // so the "more" count grows from 53 to 54.
+    // v0.7.0 L2-7 (issue #672) — Family::Other gained
+    // `memory_skill_compositional_context` (not loaded under core),
+    // so the "more" count grows from 54 to 55.
+    // v0.7.0 QW-1 — Family::Power gained `memory_export_reflection`
+    // (not loaded under core), so the "more" count grows 55 → 56.
+    // v0.7.0 QW-3 follow-up — Family::Power gained `memory_offload` +
+    // `memory_deref` (not loaded under core), so the "more" count grows
+    // from 56 to 58.
+    // v0.7.0 WT-1-C — Family::Power gained `memory_atomise` (not
+    // loaded under core), so the "more" count grows 58 → 59.
+    // v0.7.0 QW-2 — Family::Power gained `memory_persona` +
+    // `memory_persona_generate` (not loaded under core), so the
+    // "more" count grows 59 → 61.
+    // v0.7.0 Form 3 (#756) — Family::Power gained
+    // `memory_ingest_multistep` (not loaded under core), so the "more"
+    // count grows 61 → 62.
+    // v0.7.0 Form 5 (#758) — Family::Power gained
+    // `memory_calibrate_confidence` (not loaded under core), so the
+    // "more" count grows 62 → 63.
     let expected = "I can directly use 7 memory tools right now \
-                    (store, recall, list, get, search, ...). 43 more \
+                    (store, recall, list, get, search, ...). 63 more \
                     (update, delete, forget, gc, etc.) are available on demand — \
                     I can load them if you ask for something that needs them, \
                     or you can restart the server with a different profile.";
@@ -94,7 +131,7 @@ fn t0_describe_to_user_core_profile_canonical_phrasing() {
 // ---------------------------------------------------------------------------
 // T0-A2-FULL — `to_describe_to_user` on `--profile full` uses the
 // "nothing more to load" closing form (excludes the always-on bootstrap
-// from the user-facing 50 count). Bumped from 42 to 43 in v0.7.0 I4 —
+// from the user-facing count). Bumped from 42 to 43 in v0.7.0 I4 —
 // Family::Graph gained `memory_replay`; to 44 in v0.7 H4 —
 // Family::Graph gained `memory_verify`; to 45 in v0.7 B1 —
 // Family::Core gained `memory_load_family`; to 47 in v0.7 K7 —
@@ -102,7 +139,9 @@ fn t0_describe_to_user_core_profile_canonical_phrasing() {
 // `memory_subscription_dlq_list`; to 48 in v0.7 J7 —
 // Family::Graph gained `memory_find_paths`; to 49 in v0.7 B2 —
 // Family::Core gained `memory_smart_load`; to 50 in v0.7 K8 —
-// Family::Power gained `memory_quota_status`.
+// Family::Power gained `memory_quota_status`; to 51 in v0.7.0
+// Task 4/8 (#655) — Family::Power gained `memory_reflect`; to 56
+// in v0.7.0 L1-5 — Family::Other gained 5 memory_skill_* tools.
 // ---------------------------------------------------------------------------
 #[test]
 fn t0_describe_to_user_full_profile_canonical_phrasing() {
@@ -111,7 +150,44 @@ fn t0_describe_to_user_full_profile_canonical_phrasing() {
         .as_str()
         .expect("describe present");
 
-    let expected = "I can directly use all 50 memory tools right now \
+    // v0.7.0 L2-2 (S6-M1) — Family::Power gained
+    // `memory_reflection_origin` → 52 visible (the "all 52" form
+    // excludes the always-on `memory_capabilities` bootstrap from the
+    // 53-tool total).
+    // v0.7.0 (issue #691) — `memory_check_agent_action` +
+    // `memory_rule_list` added to Family::Power → 54 visible (the
+    // "all 54" form excludes the always-on `memory_capabilities`
+    // bootstrap from the 55-tool total).
+    // v0.7.0 L1-5 — 5 memory_skill_* tools added to Family::Other →
+    // 59 visible (the "all 59" form excludes the always-on
+    // `memory_capabilities` bootstrap from the 60-tool total).
+    // v0.7.0 L2-3 (issue #668) — Family::Power gained
+    // `memory_dependents_of_invalidated` → 60 visible (the "all 60"
+    // form excludes the always-on `memory_capabilities` bootstrap
+    // from the 61-tool total).
+    // v0.7.0 L2-6 (issue #671) — Family::Other gained
+    // `memory_skill_promote_from_reflection` → 61 visible.
+    // v0.7.0 L2-7 (issue #672) — Family::Other gained
+    // `memory_skill_compositional_context` → 62 visible.
+    // v0.7.0 QW-1 — Family::Power gained `memory_export_reflection`
+    // → 63 visible under full.
+    // v0.7.0 QW-3 follow-up — Family::Power gained `memory_offload` +
+    // `memory_deref` → 65 visible (out of the 66-tool total).
+    // v0.7.0 WT-1-C — Family::Power gained `memory_atomise`
+    // → 66 visible (out of the 67-tool total).
+    // v0.7.0 QW-2 — Family::Power gained `memory_persona` +
+    // `memory_persona_generate` → 68 visible under full (the "all 68"
+    // form excludes the always-on `memory_capabilities` bootstrap from
+    // the 69-tool total).
+    // v0.7.0 Form 3 (#756) — Family::Power gained
+    // `memory_ingest_multistep` → 69 visible under full (the "all 69"
+    // form excludes the always-on `memory_capabilities` bootstrap from
+    // the 70-tool total).
+    // v0.7.0 Form 5 (#758) — Family::Power gained
+    // `memory_calibrate_confidence` → 70 visible under full (the "all 70"
+    // form excludes the always-on `memory_capabilities` bootstrap from
+    // the 71-tool total).
+    let expected = "I can directly use all 70 memory tools right now \
                     (store, recall, list, get, search, ...). Nothing more to load — \
                     the full memory surface is already active.";
 
@@ -133,7 +209,11 @@ fn t0_describe_to_user_full_profile_canonical_phrasing() {
 // `memory_find_paths`; to 18 in v0.7 B2 — Family::Core gained
 // `memory_smart_load`. Total bumped to 51 in v0.7 K8 — Family::Power
 // gained `memory_quota_status` (not loaded under graph profile, so
-// `more` count grows from 31 to 32).
+// `more` count grew from 31 to 32). To 52 in v0.7.0 Task 4/8 (#655) —
+// Family::Power gained `memory_reflect` (also not loaded under graph,
+// so `more` count grows from 32 to 33). To 56 in v0.7.0 L1-5 —
+// Family::Other gained 5 memory_skill_* tools (not loaded under graph,
+// so `more` count grows from 33 to 38).
 // ---------------------------------------------------------------------------
 #[test]
 fn t0_describe_to_user_graph_profile_canonical_phrasing() {
@@ -142,8 +222,41 @@ fn t0_describe_to_user_graph_profile_canonical_phrasing() {
         .as_str()
         .expect("describe present");
 
+    // v0.7.0 L2-2 (S6-M1) — Family::Power gained
+    // `memory_reflection_origin` (not loaded under graph), so the
+    // "more" count grows from 33 to 34.
+    // v0.7.0 (issue #691) — `memory_check_agent_action` +
+    // `memory_rule_list` added to Family::Power (not loaded under
+    // graph), so the "more" count grows from 34 to 36.
+    // v0.7.0 L1-5 — 5 memory_skill_* tools added to Family::Other (not
+    // loaded under graph), so the "more" count grows from 36 to 41.
+    // v0.7.0 L2-3 (issue #668) — Family::Power gained
+    // `memory_dependents_of_invalidated` (not loaded under graph), so
+    // the "more" count grows from 41 to 42.
+    // v0.7.0 L2-6 (issue #671) — Family::Other gained
+    // `memory_skill_promote_from_reflection` (not loaded under graph),
+    // so the "more" count grows from 42 to 43.
+    // v0.7.0 L2-7 (issue #672) — Family::Other gained
+    // `memory_skill_compositional_context` (not loaded under graph),
+    // so the "more" count grows from 43 to 44.
+    // v0.7.0 QW-1 — Family::Power gained `memory_export_reflection`
+    // (not loaded under graph), so the "more" count grows 44 → 45.
+    // v0.7.0 QW-3 follow-up — Family::Power gained `memory_offload` +
+    // `memory_deref` (not loaded under graph), so the "more" count grows
+    // from 45 to 47.
+    // v0.7.0 WT-1-C — Family::Power gained `memory_atomise`
+    // (not loaded under graph), so the "more" count grows 47 → 48.
+    // v0.7.0 QW-2 — Family::Power gained `memory_persona` +
+    // `memory_persona_generate` (not loaded under graph), so the
+    // "more" count grows 48 → 50.
+    // v0.7.0 Form 3 (#756) — Family::Power gained
+    // `memory_ingest_multistep` (not loaded under graph), so the
+    // "more" count grows 50 → 51.
+    // v0.7.0 Form 5 (#758) — Family::Power gained
+    // `memory_calibrate_confidence` (not loaded under graph), so the
+    // "more" count grows 51 → 52.
     let expected = "I can directly use 18 memory tools right now \
-                    (store, recall, list, get, search, ...). 32 more \
+                    (store, recall, list, get, search, ...). 52 more \
                     (update, delete, forget, gc, etc.) are available on demand — \
                     I can load them if you ask for something that needs them, \
                     or you can restart the server with a different profile.";
