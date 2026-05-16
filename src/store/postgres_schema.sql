@@ -152,7 +152,21 @@ CREATE TABLE IF NOT EXISTS memories (
     -- carry these inline; existing schemas pick them up via migrate_v38().
     confidence_source     TEXT NOT NULL DEFAULT 'caller_provided',
     confidence_signals    TEXT,
-    confidence_decayed_at TEXT
+    confidence_decayed_at TEXT,
+    -- v0.7.0 polish PERF-8 (schema v41 postgres / v42 sqlite, issue
+    -- #781) — auto-persona indexed entity-id column. Carries the
+    -- canonical entity descriptor a memory MENTIONS (extracted at
+    -- write time from `metadata.entity_id` or a `[entity:X]` title
+    -- marker) so the SQLite-side auto-persona matcher resolves with
+    -- `WHERE mentioned_entity_id = ?` instead of the previous
+    -- full-table `content LIKE '%X%'` scan. Schema parity column on
+    -- Postgres — the auto-persona executor itself is SQLite-only.
+    -- Deliberately distinct from the QW-2 `entity_id` above (which is
+    -- reserved for Persona-row attribution): PERF-8 reads the OPPOSITE
+    -- direction (the entity a non-persona row mentions). Fresh
+    -- schemas carry this inline; existing schemas pick it up via
+    -- migrate_v41().
+    mentioned_entity_id   TEXT
 );
 
 -- v0.6.0 blocker #294 fix: upsert contract is `(title, namespace)`.
@@ -197,6 +211,14 @@ CREATE INDEX IF NOT EXISTS idx_memories_atomised_into
 -- observation/reflection-dominant workloads.
 CREATE INDEX IF NOT EXISTS idx_personas_by_entity
     ON memories(entity_id, namespace) WHERE memory_kind = 'persona';
+-- v0.7.0 polish PERF-8 (schema v41 postgres / v42 sqlite, issue #781)
+-- — partial index covering the auto-persona matcher's
+-- `WHERE memory_kind = 'reflection' AND mentioned_entity_id = ? AND
+-- namespace = ?` lookup. Partial predicate is the literal
+-- `memory_kind = 'reflection'` so the planner picks the partial index
+-- deterministically; non-reflection rows contribute zero index pages.
+CREATE INDEX IF NOT EXISTS idx_memories_mentioned_entity
+    ON memories(mentioned_entity_id, namespace) WHERE memory_kind = 'reflection';
 -- v0.7.0 Form 4 (schema v37 postgres / v38 sqlite) — partial index
 -- covering the `--source-uri-prefix` recall filter. Legacy rows
 -- have NULL `source_uri` so the partial predicate keeps the index

@@ -217,21 +217,32 @@ pub(crate) fn resolve_entity_id(
     Ok(None)
 }
 
-/// Count reflections about `entity_id` in `namespace`. Mirrors the
-/// `LIKE` heuristic used by [`crate::persona::load_reflections_for_entity`]
-/// so cadence accounting agrees with the generator's source pool.
+/// Count reflections about `entity_id` in `namespace`.
+///
+/// v0.7.0 polish PERF-8 (issue #781): previously this scanned every
+/// reflection in the namespace with `(title|content|metadata) LIKE
+/// '%<entity>%'` — O(N * avg_content_len) per post-reflect hook fire.
+/// The fix replaces the LIKE scan with an indexed equality lookup on
+/// the schema-v42 `mentioned_entity_id` column (populated at write
+/// time by [`crate::storage::extract_mentioned_entity_id`]; backfilled
+/// for legacy rows by the v42 migration). The partial index
+/// `idx_memories_mentioned_entity` covers the `(mentioned_entity_id,
+/// namespace)` predicate so the planner serves this query from the
+/// index, scanning only the matching rows.
+///
+/// Mirrors [`crate::persona::load_reflections_for_entity`] so cadence
+/// accounting agrees with the generator's source pool.
 fn count_entity_reflections(
     conn: &rusqlite::Connection,
     entity_id: &str,
     namespace: &str,
 ) -> anyhow::Result<i64> {
-    let like_pat = format!("%{entity_id}%");
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM memories
          WHERE namespace = ?1
            AND memory_kind = 'reflection'
-           AND (title LIKE ?2 OR content LIKE ?2 OR metadata LIKE ?2)",
-        rusqlite::params![namespace, like_pat],
+           AND mentioned_entity_id = ?2",
+        rusqlite::params![namespace, entity_id],
         |r| r.get(0),
     )?;
     Ok(count)
@@ -489,5 +500,144 @@ mod tests {
         let id = seed_reflection(&conn, "team/alpha", "plain title", "body", None);
         let resolved = resolve_entity_id(&conn, &id).unwrap();
         assert!(resolved.is_none());
+    }
+
+    /// v0.7.0 polish PERF-8 (issue #781) regression test — the
+    /// `count_entity_reflections` query must hit the
+    /// `idx_memories_mentioned_entity` partial index, NOT the previous
+    /// full-table `(title|content|metadata) LIKE '%X%'` scan.
+    ///
+    /// The assertion pins the SQLite query plan so a future rewrite
+    /// (e.g. dropping the indexed column predicate, or accidentally
+    /// regressing back to a LIKE pattern) is loud rather than silent.
+    /// EXPLAIN QUERY PLAN row 3 carries the human-readable plan text;
+    /// we assert the partial-index name appears in it.
+    #[test]
+    fn count_entity_reflections_uses_indexed_column() {
+        let (conn, _dir, _db_path) = fresh_db();
+        // Seed enough rows + ANALYZE so the SQLite planner's cost
+        // model picks the partial index over a full scan. Mirrors the
+        // shape used in
+        // `storage::tests::scope_index_used_for_direct_scope_filter`.
+        for i in 0..120 {
+            seed_reflection(
+                &conn,
+                "team/alpha",
+                &format!("obs-a-{i}"),
+                "body",
+                Some("alice"),
+            );
+        }
+        for i in 0..120 {
+            seed_reflection(
+                &conn,
+                "team/alpha",
+                &format!("obs-b-{i}"),
+                "body",
+                Some("bob"),
+            );
+        }
+        conn.execute("ANALYZE", []).unwrap();
+
+        // Functional check: the indexed lookup must agree with the
+        // ground-truth row count for the entity.
+        let count = count_entity_reflections(&conn, "alice", "team/alpha").unwrap();
+        assert_eq!(count, 120, "expected 120 reflections about alice");
+        let count_bob = count_entity_reflections(&conn, "bob", "team/alpha").unwrap();
+        assert_eq!(count_bob, 120, "expected 120 reflections about bob");
+
+        // Query-plan check: the SELECT must resolve via the partial
+        // index rather than a sequential scan over `memories`. The
+        // matcher's WHERE clause matches the partial index's literal
+        // `memory_kind = 'reflection'` predicate so the planner can
+        // pick the partial index deterministically.
+        let plan: Vec<String> = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM memories \
+                 WHERE namespace = ?1 \
+                   AND memory_kind = 'reflection' \
+                   AND mentioned_entity_id = ?2",
+            )
+            .unwrap()
+            .query_map(rusqlite::params!["team/alpha", "alice"], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let joined = plan.join("\n");
+        assert!(
+            joined.contains("idx_memories_mentioned_entity"),
+            "PERF-8: count_entity_reflections must hit the \
+             idx_memories_mentioned_entity partial index; got plan:\n{joined}"
+        );
+        assert!(
+            !joined.contains("SCAN memories"),
+            "PERF-8: count_entity_reflections must NOT fall back to a \
+             SCAN memories full-table scan; got plan:\n{joined}"
+        );
+    }
+
+    /// v0.7.0 polish PERF-8 (issue #781) — `mentioned_entity_id` must
+    /// be populated at insert time from `metadata.entity_id` so the
+    /// matcher's indexed lookup sees freshly-minted reflections without
+    /// waiting for a migration backfill.
+    #[test]
+    fn mentioned_entity_id_populated_from_metadata_on_insert() {
+        let (conn, _dir, _db_path) = fresh_db();
+        seed_reflection(
+            &conn,
+            "team/alpha",
+            "first obs",
+            "content body",
+            Some("carol"),
+        );
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT mentioned_entity_id FROM memories \
+                 WHERE namespace = 'team/alpha' AND memory_kind = 'reflection' \
+                 LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored.as_deref(),
+            Some("carol"),
+            "PERF-8: insert(...) must denormalise metadata.entity_id into \
+             the mentioned_entity_id column at write time"
+        );
+    }
+
+    /// v0.7.0 polish PERF-8 (issue #781) — title-marker fallback. When
+    /// no structured `metadata.entity_id` is present, the extractor
+    /// scans the title for `[entity:X]` and populates the indexed
+    /// column from that.
+    #[test]
+    fn mentioned_entity_id_populated_from_title_marker_on_insert() {
+        let (conn, _dir, _db_path) = fresh_db();
+        // No structured entity_id; title-marker fallback path.
+        seed_reflection(
+            &conn,
+            "team/alpha",
+            "Reflection on [entity:dave] notes",
+            "body",
+            None,
+        );
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT mentioned_entity_id FROM memories \
+                 WHERE namespace = 'team/alpha' AND memory_kind = 'reflection' \
+                 LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored.as_deref(),
+            Some("dave"),
+            "PERF-8: insert(...) must fall back to [entity:X] title-marker \
+             extraction when metadata.entity_id is absent"
+        );
     }
 }

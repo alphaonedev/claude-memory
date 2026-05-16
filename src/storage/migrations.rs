@@ -7,7 +7,7 @@
 //! constant, and the `migrate` function out of `src/db.rs` into
 //! this sub-module. Pure refactor — semantics unchanged. The
 //! `MAX_SUPPORTED_SCHEMA` constant in `cli::boot` must still bump
-//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 41).
+//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 42).
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
@@ -83,7 +83,22 @@ CREATE TABLE IF NOT EXISTS memories (
     -- computation (NULL on legacy rows and rows never touched by decay).
     confidence_source     TEXT NOT NULL DEFAULT 'caller_provided',
     confidence_signals    TEXT,
-    confidence_decayed_at TEXT
+    confidence_decayed_at TEXT,
+    -- v0.7.0 polish PERF-8 (schema v42, issue #781) — auto-persona
+    -- indexed entity-id column. Carries the canonical entity descriptor
+    -- a memory MENTIONS (extracted at write time from
+    -- `metadata.entity_id` or a `[entity:X]` title marker) so the
+    -- auto-persona matcher resolves with
+    -- `WHERE memory_kind = 'reflection' AND mentioned_entity_id = ?
+    -- AND namespace = ?` via the `idx_memories_mentioned_entity`
+    -- partial index instead of the previous full-table `content LIKE
+    -- '%X%'` scan. Deliberately distinct from the QW-2 `entity_id`
+    -- column above (which is reserved for Persona-row attribution):
+    -- PERF-8 reads the OPPOSITE direction (the entity an observation
+    -- / reflection mentions). Legacy rows default to NULL; the
+    -- migration ladder backfills from metadata+title at v42 apply
+    -- time.
+    mentioned_entity_id   TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_tier ON memories(tier);
@@ -147,6 +162,16 @@ CREATE INDEX IF NOT EXISTS idx_shadow_obs_memory
     ON confidence_shadow_observations(memory_id);
 CREATE INDEX IF NOT EXISTS idx_shadow_obs_namespace_source_observed
     ON confidence_shadow_observations(namespace, source, observed_at);
+-- v42 (PERF-8 #781) — partial index covering the auto-persona matcher's
+-- `WHERE memory_kind = 'reflection' AND mentioned_entity_id = ?
+-- AND namespace = ?` lookup. The partial predicate matches the literal
+-- `memory_kind = 'reflection'` constraint in the matcher SQL so the
+-- SQLite planner reliably picks this index over a sequential scan
+-- (the `mentioned_entity_id = ?` equality predicate prunes NULL rows
+-- from the result set; the partial predicate just keeps the index
+-- narrow). Non-reflection rows contribute zero index pages.
+CREATE INDEX IF NOT EXISTS idx_memories_mentioned_entity
+    ON memories(mentioned_entity_id, namespace) WHERE memory_kind = 'reflection';
 
 CREATE TABLE IF NOT EXISTS memory_links (
     source_id    TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
@@ -417,7 +442,22 @@ CREATE INDEX IF NOT EXISTS idx_signed_events_dlq_agent
 //       (Renumbered from v40 to v41 during rebase onto trunk: Cluster C
 //       SEC-3 closeout #770 landed first and claimed v40 for the
 //       `signed_events_dlq` table.)
-const CURRENT_SCHEMA_VERSION: i64 = 41;
+// v42 = v0.7.0 polish PERF-8 (issue #781) — auto-persona indexed
+//       entity-id column replacing the content `LIKE '%entity_X%'`
+//       full-table scan. Adds `memories.mentioned_entity_id TEXT` +
+//       partial index `WHERE memory_kind = 'reflection'`. The
+//       ALTER lives in Rust (SQLite has no `ADD COLUMN IF NOT EXISTS`);
+//       the SQL file 0036 holds the partial index. Backfill (extracting
+//       the entity descriptor from `metadata.entity_id` or a
+//       `[entity:X]` title marker on pre-existing reflection rows) also
+//       runs from Rust so the column-existence probe gates it. Pure
+//       additive — non-tagged legacy reflections stay at NULL (they
+//       were never matchable by the previous LIKE path either).
+//       Column-name deliberately distinct from the QW-2 `entity_id`
+//       column (which is reserved for Persona-row attribution); PERF-8
+//       reads the OPPOSITE direction (the entity an observation /
+//       reflection MENTIONS).
+const CURRENT_SCHEMA_VERSION: i64 = 42;
 
 const MIGRATION_V15_SQLITE: &str =
     include_str!("../../migrations/sqlite/0010_v063_hierarchy_kg.sql");
@@ -677,6 +717,13 @@ const MIGRATION_V40_SQLITE: &str =
 // rows) also runs from Rust so the column-existence probe gates it.
 const MIGRATION_V41_SQLITE: &str =
     include_str!("../../migrations/sqlite/0035_v07_shadow_retention.sql");
+// v0.7.0 polish PERF-8 (issue #781) — auto-persona indexed entity-id
+// column. ADD COLUMN is emitted from Rust (SQLite has no `ADD COLUMN
+// IF NOT EXISTS`); the SQL file holds the partial index. Backfill of
+// `mentioned_entity_id` from `metadata.entity_id` + `[entity:X]` title
+// markers also runs from Rust so the column-existence probe gates it.
+const MIGRATION_V42_SQLITE: &str =
+    include_str!("../../migrations/sqlite/0036_v07_auto_persona_entity_id.sql");
 
 // COVERAGE: per-version ALTER/CREATE branches inside this function
 // are guarded by `has_X` column-existence probes and `IF NOT EXISTS`
@@ -1654,6 +1701,68 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             conn.execute_batch(MIGRATION_V41_SQLITE)?;
         }
 
+        if version < 42 {
+            // v0.7.0 polish PERF-8 (issue #781) — auto-persona indexed
+            // entity-id column replacing the content `LIKE '%X%'`
+            // full-table scan. Probe `PRAGMA table_info(memories)` for
+            // `mentioned_entity_id` and ADD when absent. SQLite has no
+            // `ADD COLUMN IF NOT EXISTS`. Backfill from
+            // `metadata.entity_id` + `[entity:X]` title markers also
+            // lives here so the column-existence probe gates it.
+            let mut has_mentioned = false;
+            let mut stmt = conn.prepare("PRAGMA table_info(memories)")?;
+            let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            for col in cols {
+                if col?.as_str() == "mentioned_entity_id" {
+                    has_mentioned = true;
+                }
+            }
+            drop(stmt);
+            if !has_mentioned {
+                conn.execute(
+                    "ALTER TABLE memories ADD COLUMN mentioned_entity_id TEXT",
+                    [],
+                )?;
+                // Backfill: extract from metadata.entity_id first
+                // (structured tag), then from `[entity:X]` title
+                // markers (operator-supplied fallback). Restricted to
+                // memory_kind = 'reflection' because the matcher only
+                // scans reflections; non-reflection rows stay at NULL
+                // and contribute zero index pages.
+                //
+                // Step 1 — metadata.entity_id.
+                conn.execute(
+                    "UPDATE memories
+                     SET mentioned_entity_id = json_extract(metadata, '$.entity_id')
+                     WHERE memory_kind = 'reflection'
+                       AND mentioned_entity_id IS NULL
+                       AND json_valid(metadata) = 1
+                       AND json_extract(metadata, '$.entity_id') IS NOT NULL
+                       AND length(json_extract(metadata, '$.entity_id')) > 0",
+                    [],
+                )?;
+                // Step 2 — `[entity:X]` title marker. SQLite has no
+                // regex by default; use the substr/instr pair that
+                // mirrors the runtime extractor in
+                // `auto_persona::resolve_entity_id`. Skip rows where
+                // step 1 already populated the column.
+                conn.execute(
+                    "UPDATE memories
+                     SET mentioned_entity_id = trim(substr(
+                         title,
+                         instr(title, '[entity:') + length('[entity:'),
+                         instr(substr(title, instr(title, '[entity:') + length('[entity:')), ']') - 1
+                     ))
+                     WHERE memory_kind = 'reflection'
+                       AND mentioned_entity_id IS NULL
+                       AND instr(title, '[entity:') > 0
+                       AND instr(substr(title, instr(title, '[entity:') + length('[entity:')), ']') > 1",
+                    [],
+                )?;
+            }
+            conn.execute_batch(MIGRATION_V42_SQLITE)?;
+        }
+
         conn.execute("DELETE FROM schema_version", [])?;
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?1)",
@@ -1859,8 +1968,8 @@ mod tests {
         // other is a documented foot-gun. We pin the relationship
         // so a future bump is loud.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 41,
-            "module docstring advertises 41; bump the docstring when this number changes"
+            CURRENT_SCHEMA_VERSION, 42,
+            "module docstring advertises 42; bump the docstring when this number changes"
         );
     }
 

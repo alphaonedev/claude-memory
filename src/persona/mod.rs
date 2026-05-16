@@ -445,19 +445,28 @@ fn next_version(conn: &Connection, entity_id: &str, namespace: &str) -> Result<i
 }
 
 /// Load up to `limit` reflection-kind memories from `namespace` whose
-/// content / metadata references the entity.
+/// stored `mentioned_entity_id` matches.
 ///
-/// We do a substring match against title + content + metadata.agent_id
-/// so reflections about an entity surface even when the curator hasn't
-/// tagged them explicitly. The lookup is bounded by `limit` so a runaway
-/// namespace can't blow the prompt budget.
+/// v0.7.0 polish PERF-8 (issue #781): previously this matched candidate
+/// reflections with `(title|content|metadata) LIKE '%<entity>%'` — a
+/// full-table scan across three TEXT columns for every reflection in
+/// the namespace. The fix relies on the schema-v42
+/// `mentioned_entity_id` column (populated at write time by
+/// [`crate::storage::extract_mentioned_entity_id`]; backfilled for
+/// legacy rows by the v42 migration) so the source pool is loaded via
+/// an indexed equality lookup against
+/// `idx_memories_mentioned_entity`. The query plan changes from
+/// `SCAN memories` to `SEARCH memories USING INDEX
+/// idx_memories_mentioned_entity (mentioned_entity_id=? AND namespace=?)`.
+///
+/// The lookup is bounded by `limit` so a runaway namespace can't blow
+/// the prompt budget.
 fn load_reflections_for_entity(
     conn: &Connection,
     entity_id: &str,
     namespace: &str,
     limit: usize,
 ) -> Result<Vec<Memory>> {
-    let like_pat = format!("%{entity_id}%");
     let mut stmt = conn.prepare(
         "SELECT id, tier, namespace, title, content, tags, priority, confidence, source,
                 access_count, created_at, updated_at, last_accessed_at, expires_at,
@@ -466,14 +475,14 @@ fn load_reflections_for_entity(
          FROM memories
          WHERE namespace = ?1
            AND memory_kind = 'reflection'
-           AND (title LIKE ?2 OR content LIKE ?2 OR metadata LIKE ?2)
+           AND mentioned_entity_id = ?2
          ORDER BY priority DESC, created_at DESC
          LIMIT ?3",
     )?;
     let rows = stmt.query_map(
         rusqlite::params![
             namespace,
-            like_pat,
+            entity_id,
             i64::try_from(limit).unwrap_or(i64::MAX)
         ],
         crate::storage::row_to_memory,

@@ -157,6 +157,22 @@ const MIGRATION_V39_SIGNED_EVENTS_DLQ: &str =
 const MIGRATION_V40_SHADOW_RETENTION: &str =
     include_str!("../../migrations/postgres/0022_v07_shadow_retention.sql");
 
+/// v0.7.0 polish PERF-8 (issue #781) — auto-persona indexed entity-id
+/// column replacing the SQLite content-LIKE full-table scan in the
+/// auto-persona matcher. Mirrors SQLite schema v42. Adds
+/// `memories.mentioned_entity_id TEXT` + partial index. Backfill
+/// (extracting the entity descriptor from `metadata.entity_id` or a
+/// `[entity:X]` title marker on pre-existing reflection rows) is
+/// folded into the SQL batch. Pure additive ADD COLUMN IF NOT EXISTS
+/// + UPDATE + CREATE INDEX IF NOT EXISTS — idempotent.
+///
+/// The auto-persona executor itself is SQLite-only (it threads a
+/// `rusqlite::Connection`); the Postgres column lands here for schema
+/// parity so a future PG-native implementation can read the same
+/// indexed column without a second migration.
+const MIGRATION_V41_AUTO_PERSONA_ENTITY_ID: &str =
+    include_str!("../../migrations/postgres/0023_v07_auto_persona_entity_id.sql");
+
 /// Current schema version. Matches SQLite CURRENT_SCHEMA_VERSION (src/db.rs:233).
 /// Incremented on each migration step.
 ///
@@ -271,7 +287,17 @@ const MIGRATION_V40_SHADOW_RETENTION: &str =
 //       (Renumbered from v39 to v40 during rebase onto trunk: Cluster C
 //       SEC-3 closeout #770 landed first and claimed v39 for the
 //       `signed_events_dlq` table.)
-const CURRENT_SCHEMA_VERSION: i32 = 40;
+// v41 = v0.7.0 polish PERF-8 (issue #781) — auto-persona indexed
+//       entity-id column. Adds `memories.mentioned_entity_id TEXT` +
+//       partial index `WHERE mentioned_entity_id IS NOT NULL`. Mirrors
+//       SQLite schema v42. Postgres supports `ADD COLUMN IF NOT EXISTS`
+//       so the ALTER + backfill + index live in one idempotent SQL
+//       batch (`migrations/postgres/0023_v07_auto_persona_entity_id.sql`).
+//       Schema parity only — the auto-persona executor is SQLite-only.
+//       Column-name deliberately distinct from QW-2's `entity_id`
+//       (Persona-row attribution); PERF-8 reads the OPPOSITE direction
+//       (the entity an observation/reflection mentions).
+const CURRENT_SCHEMA_VERSION: i32 = 41;
 
 /// Default embedding column dimension used when the caller doesn't pass
 /// `--embedding-dim` to `ai-memory schema-init`. Matches the v0.7.0
@@ -726,6 +752,9 @@ impl PostgresStore {
         }
         if current_version < 40 {
             self.migrate_v40().await?;
+        }
+        if current_version < 41 {
+            self.migrate_v41().await?;
         }
 
         Ok(())
@@ -1239,6 +1268,45 @@ impl PostgresStore {
         tracing::info!(
             target = "store::postgres",
             "schema migration v40 applied (cluster-G shadow retention + denormalised source + compound index)"
+        );
+        Ok(())
+    }
+
+    /// v41 — polish PERF-8 (issue #781) auto-persona indexed entity-id
+    /// column replacing the SQLite content-LIKE full-table scan.
+    ///
+    /// Adds `memories.mentioned_entity_id TEXT` + partial index
+    /// `WHERE mentioned_entity_id IS NOT NULL`. Backfill (extracting
+    /// the entity descriptor from `metadata.entity_id` or a
+    /// `[entity:X]` title marker on pre-existing reflection rows) is
+    /// folded into the SQL batch. Pure additive ADD COLUMN IF NOT
+    /// EXISTS + UPDATE + CREATE INDEX IF NOT EXISTS — idempotent.
+    ///
+    /// Schema parity only — the auto-persona executor is SQLite-only
+    /// (`PersonaGenerator` + `hooks::post_reflect::auto_persona` thread
+    /// a `rusqlite::Connection`). A future PG-native implementation
+    /// reads from this same indexed column without a second migration.
+    async fn migrate_v41(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v41 tx", e))?;
+
+        sqlx::raw_sql(MIGRATION_V41_AUTO_PERSONA_ENTITY_ID)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("apply v41 auto_persona entity-id", e))?;
+
+        record_schema_version(&mut tx, 41).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v41 migration", e))?;
+
+        tracing::info!(
+            target = "store::postgres",
+            "schema migration v41 applied (PERF-8 auto_persona mentioned_entity_id + partial index)"
         );
         Ok(())
     }
@@ -9386,7 +9454,7 @@ mod tests {
         // future bump on either side without the corresponding port
         // re-trips this assertion before the migration runner gets a
         // chance to write a partial schema to disk.
-        assert_eq!(CURRENT_SCHEMA_VERSION, 40);
+        assert_eq!(CURRENT_SCHEMA_VERSION, 41);
     }
 
     #[tokio::test]

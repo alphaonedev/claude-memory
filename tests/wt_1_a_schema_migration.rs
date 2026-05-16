@@ -452,13 +452,17 @@ async fn test_capabilities_db_schema_version_reports_36() {
         .expect("WT-1-A: db_schema_version must be a JSON integer");
 
     assert_eq!(
-        v, 39,
-        "WT-1-A+QW-2+Form 4+Form 5: capabilities.db_schema_version must be \
-         39 after the atomisation-foundation bump (35→36), persona-as-\
-         artifact bump (36→37), Form 4 source-uri provenance bump (37→38), \
-         and Form 5 confidence calibration bump (38→39). Drift here means \
-         the migrate ladder skipped one of those steps or the SAL \
-         `schema_version()` lookup is reading the wrong source."
+        v, 42,
+        "WT-1-A+QW-2+Form 4+Form 5+Cluster-C+Cluster-G+PERF-8: \
+         capabilities.db_schema_version must be 42 after the \
+         atomisation-foundation bump (35→36), persona-as-artifact \
+         bump (36→37), Form 4 source-uri provenance bump (37→38), \
+         Form 5 confidence calibration bump (38→39), Cluster-C \
+         signed-events DLQ bump (39→40), Cluster-G shadow-retention \
+         denormalised source column bump (40→41), and polish PERF-8 \
+         auto_persona mentioned_entity_id bump (41→42). Drift here \
+         means the migrate ladder skipped one of those steps or the \
+         SAL `schema_version()` lookup is reading the wrong source."
     );
 
     shutdown.notify_one();

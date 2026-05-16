@@ -1,0 +1,100 @@
+-- Copyright 2026 AlphaOne LLC
+-- SPDX-License-Identifier: Apache-2.0
+--
+-- v0.7.0 polish PERF-8 (issue #781) — auto-persona indexed entity-id
+-- column replacing the content LIKE '%entity_X%' full-table scan
+-- (schema v42 sqlite).
+--
+-- # Why
+--
+-- The v0.7.0 QW-2 auto-persona hook fires from `post_reflect` on the
+-- per-(entity, namespace) reflection counter crossing a cadence
+-- multiple. Both the cadence counter
+-- (`hooks::post_reflect::auto_persona::count_entity_reflections`) and
+-- the source-pool loader (`persona::load_reflections_for_entity`)
+-- previously matched candidate rows with:
+--
+--   WHERE namespace = ?1
+--     AND memory_kind = 'reflection'
+--     AND (title LIKE '%<entity>%'
+--         OR content LIKE '%<entity>%'
+--         OR metadata LIKE '%<entity>%')
+--
+-- That predicate is a full-table scan against three TEXT columns for
+-- every reflection in the namespace — O(N * avg_content_len) per
+-- post-reflect hook fire. PERF-8 surfaced the latency once auto-persona
+-- workloads hit a thousand-reflection namespace.
+--
+-- # The fix
+--
+-- A dedicated `mentioned_entity_id TEXT` column carries the canonical
+-- entity descriptor extracted at write time, either from
+-- `metadata.entity_id` (the structured tag the curator + most operators
+-- supply) or from a `[entity:X]` marker scanned out of the title. A
+-- partial index lets the cadence counter and source-pool loader resolve
+-- via:
+--
+--   WHERE namespace = ?1
+--     AND memory_kind = 'reflection'
+--     AND mentioned_entity_id = ?2
+--
+-- which the planner serves from the index — O(matching_rows) instead of
+-- O(namespace_rows * content_bytes).
+--
+-- # Column-name disambiguation vs QW-2's `entity_id`
+--
+-- The v0.7.0 QW-2 substrate (schema v37) reserved `memories.entity_id`
+-- as a Persona-row attribution column (populated only when
+-- `memory_kind = 'persona'`). PERF-8 operates in the opposite direction
+-- — it extracts the entity an OBSERVATION/REFLECTION MENTIONS so the
+-- matcher can target candidate-source rows by their subject — so a
+-- collision on the column name would conflate two distinct semantics.
+-- `mentioned_entity_id` is the deliberately non-colliding name.
+--
+-- # Backfill
+--
+-- The Rust migrate ladder runs the column ADD (SQLite has no
+-- `ADD COLUMN IF NOT EXISTS`) gated on a `PRAGMA table_info` probe,
+-- then a single backfill UPDATE that re-runs the same metadata/title
+-- extractor against pre-existing reflection rows:
+--
+--   UPDATE memories
+--   SET mentioned_entity_id = COALESCE(
+--           json_extract(metadata, '$.entity_id'),
+--           extracted_from_title
+--       )
+--   WHERE memory_kind = 'reflection'
+--     AND mentioned_entity_id IS NULL
+--     AND (json_valid(metadata) = 1 OR title LIKE '%[entity:%]%')
+--
+-- The title-marker fallback is `[entity:X]` (matching the runtime
+-- extractor in `auto_persona::resolve_entity_id`). Rows whose
+-- reflection neither carried a structured tag nor a marker stay at
+-- NULL — they were never matchable by the previous LIKE path either
+-- (the curator-tagged ones surfaced; the un-tagged ones did not).
+--
+-- # Idempotency
+--
+-- The Rust ladder gates the ALTER + backfill on a column-existence
+-- probe so re-running is a no-op. The SQL file holds the partial
+-- index only — `CREATE INDEX IF NOT EXISTS` is safe to replay.
+--
+-- # Index footprint
+--
+-- The partial predicate `WHERE memory_kind = 'reflection'` keeps the
+-- index storage scoped to reflection rows (the only kind the matcher
+-- queries). Non-reflection rows (observations, personas, etc.) keep
+-- `mentioned_entity_id` at NULL and contribute zero index pages. The
+-- partial predicate is intentionally a literal-match on
+-- `memory_kind = 'reflection'` rather than `mentioned_entity_id IS
+-- NOT NULL`: SQLite's planner accepts a partial index ONLY when the
+-- query's WHERE clause is provably at-least-as-restrictive as the
+-- index's WHERE clause, and a literal match (`memory_kind =
+-- 'reflection'` in both) is the most reliable shape to ensure the
+-- planner picks the partial index. (The `mentioned_entity_id = ?`
+-- equality predicate already prunes NULL rows from the result set;
+-- the partial predicate just keeps the index narrow.)
+
+CREATE INDEX IF NOT EXISTS idx_memories_mentioned_entity
+    ON memories(mentioned_entity_id, namespace)
+    WHERE memory_kind = 'reflection';

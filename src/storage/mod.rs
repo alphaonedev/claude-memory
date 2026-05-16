@@ -28,8 +28,8 @@ pub fn truncate_to_microseconds(t: DateTime<Utc>) -> DateTime<Utc> {
 use crate::models::{
     AGENTS_NAMESPACE, AgentRegistration, Approval, ApproverType, ConfidenceSource, DuplicateCheck,
     DuplicateMatch, GovernanceDecision, GovernanceLevel, GovernancePolicy, GovernedAction,
-    MAX_NAMESPACE_DEPTH, Memory, MemoryLink, NamespaceCount, PROMOTION_THRESHOLD, PendingAction,
-    SourceSpan, Stats, Taxonomy, TaxonomyNode, Tier, TierCount, namespace_ancestors,
+    MAX_NAMESPACE_DEPTH, Memory, MemoryKind, MemoryLink, NamespaceCount, PROMOTION_THRESHOLD,
+    PendingAction, SourceSpan, Stats, Taxonomy, TaxonomyNode, Tier, TierCount, namespace_ancestors,
 };
 
 // ---------------------------------------------------------------------------
@@ -481,6 +481,63 @@ pub(crate) fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
     })
 }
 
+/// v0.7.0 polish PERF-8 (issue #781) — extract the canonical
+/// `mentioned_entity_id` from a memory at write time.
+///
+/// The auto-persona matcher (`hooks::post_reflect::auto_persona`) and
+/// the persona source-pool loader (`persona::load_reflections_for_entity`)
+/// previously scanned `(title|content|metadata) LIKE '%<entity>%'` to
+/// find candidate reflections — a full-table scan against three TEXT
+/// columns for every reflection in the namespace. PERF-8 denormalises
+/// the entity descriptor onto a dedicated indexed column so the matcher
+/// resolves with `WHERE mentioned_entity_id = ?` instead.
+///
+/// Resolution order mirrors the runtime extractor in
+/// `auto_persona::resolve_entity_id`:
+///
+/// 1. `metadata.entity_id` (the structured tag the curator + most
+///    operators supply when minting a reflection about a known entity).
+/// 2. `[entity:X]` marker in the title (operator-supplied fallback
+///    when no structured tag exists yet).
+///
+/// Returns `None` when neither yields a non-empty string — the row
+/// stays NULL on the column and contributes zero index pages (matches
+/// the partial index predicate `WHERE mentioned_entity_id IS NOT NULL`).
+///
+/// Restricted to `memory_kind = 'reflection'` rows: the matcher only
+/// scans reflections, so populating the column on observations would
+/// inflate the index footprint without speeding any query. (Persona
+/// rows already use the orthogonal QW-2 `entity_id` column for their
+/// own attribution.)
+pub(crate) fn extract_mentioned_entity_id(mem: &Memory) -> Option<String> {
+    if mem.memory_kind != MemoryKind::Reflection {
+        return None;
+    }
+    // Step 1: structured metadata.entity_id tag.
+    if let Some(eid) = mem
+        .metadata
+        .get("entity_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(eid.to_string());
+    }
+    // Step 2: `[entity:X]` title marker. Mirrors the runtime extractor
+    // in `auto_persona::resolve_entity_id` so cadence accounting and
+    // matcher selection agree on the same descriptor for a given row.
+    if let Some(start) = mem.title.find("[entity:") {
+        let rest = &mem.title[start + "[entity:".len()..];
+        if let Some(end) = rest.find(']') {
+            let extracted = rest[..end].trim();
+            if !extracted.is_empty() {
+                return Some(extracted.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Insert with upsert on title+namespace. Returns the ID (existing or new).
 ///
 /// Ultrareview #352: collapses the previous `INSERT`/`ON CONFLICT` +
@@ -515,9 +572,14 @@ pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
         Some(s) => Some(serde_json::to_string(s)?),
         None => None,
     };
+    // v0.7.0 polish PERF-8 (#781) — denormalised `mentioned_entity_id`
+    // column, populated at write time from `metadata.entity_id` (or a
+    // `[entity:X]` title-marker fallback) on reflection rows. See
+    // `extract_mentioned_entity_id` for the resolution order.
+    let mentioned_entity_id = extract_mentioned_entity_id(mem);
     let actual_id: String = conn.query_row(
-        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version, citations, source_uri, source_span, confidence_source, confidence_signals, confidence_decayed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
+        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version, citations, source_uri, source_span, confidence_source, confidence_signals, confidence_decayed_at, mentioned_entity_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
          ON CONFLICT(title, namespace) DO UPDATE SET
             content = excluded.content,
             tags = excluded.tags,
@@ -581,7 +643,13 @@ pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
                                      THEN excluded.confidence_source
                                      ELSE memories.confidence_source END,
             confidence_signals = COALESCE(excluded.confidence_signals, memories.confidence_signals),
-            confidence_decayed_at = COALESCE(excluded.confidence_decayed_at, memories.confidence_decayed_at)
+            confidence_decayed_at = COALESCE(excluded.confidence_decayed_at, memories.confidence_decayed_at),
+            -- v0.7.0 polish PERF-8 (#781) — denormalised mention tag.
+            -- COALESCE keeps any pre-existing tag (re-write that
+            -- omits the structured entity_id metadata should NOT
+            -- blank out the indexed column) while letting a fresh
+            -- extraction populate previously-NULL rows.
+            mentioned_entity_id = COALESCE(excluded.mentioned_entity_id, memories.mentioned_entity_id)
          RETURNING id",
         params![
             mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
@@ -591,6 +659,7 @@ pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
             mem.entity_id, mem.persona_version,
             citations_json, mem.source_uri, source_span_json,
             mem.confidence_source.as_str(), confidence_signals_json, mem.confidence_decayed_at,
+            mentioned_entity_id,
         ],
         |r| r.get(0),
     )?;
@@ -738,6 +807,12 @@ pub fn insert_with_conflict(conn: &Connection, mem: &Memory, mode: ConflictMode)
                 Some(s) => Some(serde_json::to_string(s)?),
                 None => None,
             };
+            // v0.7.0 polish PERF-8 (#781) — same denormalised mention
+            // tag wired here so the ConflictMode::Error path (used by
+            // `storage::reflect`) populates the indexed column on the
+            // first-write happy path; otherwise the auto-persona matcher
+            // would miss every reflection minted via reflect.
+            let mentioned_entity_id = extract_mentioned_entity_id(mem);
             // v0.7.0 L1-1 wave merge — include the `memory_kind` column.
             // This INSERT path was added by the fix-campaign R1-M3
             // (ConflictMode::Error refuses duplicates) and originally
@@ -748,8 +823,8 @@ pub fn insert_with_conflict(conn: &Connection, mem: &Memory, mode: ConflictMode)
             // its `MemoryKind::Reflection` typing and the stored row
             // falls back to the column DEFAULT 'observation'.
             let actual_id: String = conn.query_row(
-                "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version, citations, source_uri, source_span, confidence_source, confidence_signals, confidence_decayed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
+                "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version, citations, source_uri, source_span, confidence_source, confidence_signals, confidence_decayed_at, mentioned_entity_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
                  RETURNING id",
                 params![
                     mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
@@ -759,6 +834,7 @@ pub fn insert_with_conflict(conn: &Connection, mem: &Memory, mode: ConflictMode)
                     mem.entity_id, mem.persona_version,
                     citations_json, mem.source_uri, source_span_json,
                     mem.confidence_source.as_str(), confidence_signals_json, mem.confidence_decayed_at,
+                    mentioned_entity_id,
                 ],
                 |r| r.get(0),
             ).map_err(|e| {
@@ -4820,9 +4896,16 @@ pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
         Some(s) => Some(serde_json::to_string(s)?),
         None => None,
     };
+    // v0.7.0 polish PERF-8 (#781) — denormalised mention tag for the
+    // federation `insert_if_newer` merge path. The newer-wins CASE
+    // clause picks the winner's mentioned_entity_id when the incoming
+    // row wins the tiebreak; otherwise the local row's tag is preserved
+    // so a stale peer cannot blank out a value the matcher's index
+    // depends on.
+    let mentioned_entity_id = extract_mentioned_entity_id(mem);
     let actual_id: String = conn.query_row(
-        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version, citations, source_uri, source_span, confidence_source, confidence_signals, confidence_decayed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
+        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version, citations, source_uri, source_span, confidence_source, confidence_signals, confidence_decayed_at, mentioned_entity_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
          ON CONFLICT(title, namespace) DO UPDATE SET
             content = CASE WHEN excluded.updated_at > memories.updated_at
                              OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
@@ -4899,7 +4982,16 @@ pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
                                       THEN excluded.confidence_signals ELSE memories.confidence_signals END,
             confidence_decayed_at = CASE WHEN excluded.updated_at > memories.updated_at
                                               OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
-                                         THEN excluded.confidence_decayed_at ELSE memories.confidence_decayed_at END
+                                         THEN excluded.confidence_decayed_at ELSE memories.confidence_decayed_at END,
+            -- v0.7.0 polish PERF-8 (#781) — newer-wins on the mention
+            -- tag (the winning row's content is the one a future matcher
+            -- query expects to find); otherwise preserve the local tag
+            -- so a stale peer that lacks the structured entity_id
+            -- metadata cannot blank out a value the index serves.
+            mentioned_entity_id = CASE WHEN excluded.updated_at > memories.updated_at
+                                            OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
+                                       THEN COALESCE(excluded.mentioned_entity_id, memories.mentioned_entity_id)
+                                       ELSE memories.mentioned_entity_id END
          RETURNING id",
         params![
             mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
@@ -4909,6 +5001,7 @@ pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
             mem.entity_id, mem.persona_version,
             citations_json, mem.source_uri, source_span_json,
             mem.confidence_source.as_str(), confidence_signals_json, mem.confidence_decayed_at,
+            mentioned_entity_id,
         ],
         |r| r.get(0),
     )?;

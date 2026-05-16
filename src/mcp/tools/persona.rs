@@ -150,6 +150,17 @@ mod tests {
         (conn, dir)
     }
 
+    /// v0.7.0 polish PERF-8 (issue #781) — test seeder now tags
+    /// `metadata.entity_id = "alice"` so the indexed
+    /// `mentioned_entity_id` lookup matches. Pre-PERF-8 the matcher
+    /// scanned `(title|content|metadata) LIKE '%alice%'`, which
+    /// surfaced reflections whose content merely contained the entity
+    /// name without explicit tagging. The fix replaces that scan with
+    /// an indexed equality lookup; tests that previously relied on the
+    /// fuzzy fallback now seed the structured tag explicitly. The
+    /// `entity_id` Memory field stays None (that's the QW-2 Persona-
+    /// row attribution column; orthogonal to the matcher's
+    /// `mentioned_entity_id` denormalisation).
     fn seed_reflection(conn: &Connection, namespace: &str, title: &str, body: &str) -> String {
         let now = Utc::now().to_rfc3339();
         let mem = Memory {
@@ -167,7 +178,7 @@ mod tests {
             updated_at: now,
             last_accessed_at: None,
             expires_at: None,
-            metadata: serde_json::json!({"agent_id": "ai:test"}),
+            metadata: serde_json::json!({"agent_id": "ai:test", "entity_id": "alice"}),
             reflection_depth: 1,
             memory_kind: MemoryKind::Reflection,
             entity_id: None,

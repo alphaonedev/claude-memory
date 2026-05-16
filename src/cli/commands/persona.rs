@@ -153,6 +153,13 @@ mod tests {
         (conn, dir, path)
     }
 
+    /// v0.7.0 polish PERF-8 (issue #781) — test seeder now tags
+    /// `metadata.entity_id = "alice"` so the indexed
+    /// `mentioned_entity_id` lookup matches. See the analogous comment
+    /// in `mcp::tools::persona::tests::seed_reflection` for the
+    /// rationale: the fuzzy content-LIKE matcher is gone; tests must
+    /// supply the structured entity tag (or a `[entity:X]` title
+    /// marker) explicitly.
     fn seed_reflection(conn: &Connection, namespace: &str, body: &str) -> String {
         let now = Utc::now().to_rfc3339();
         let mem = Memory {
@@ -170,7 +177,7 @@ mod tests {
             updated_at: now,
             last_accessed_at: None,
             expires_at: None,
-            metadata: serde_json::json!({"agent_id": "ai:test"}),
+            metadata: serde_json::json!({"agent_id": "ai:test", "entity_id": "alice"}),
             reflection_depth: 1,
             memory_kind: MemoryKind::Reflection,
             entity_id: None,
