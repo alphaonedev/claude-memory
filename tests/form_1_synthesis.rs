@@ -1210,3 +1210,116 @@ fn synthesis_update_plus_delete_combined_applies_both() {
         .unwrap();
     assert_eq!(body, "merged-after-batch");
 }
+
+// ---------------------------------------------------------------------------
+// v0.7.0 polish (issue #767) — close store.rs coverage gap on the synthesis
+// update path's secondary branches: (a) embedder re-embed after merge,
+// (b) hallucinated candidate_id warns + continues, (c) update+delete
+// targeting the same id skips the duplicate delete.
+// ---------------------------------------------------------------------------
+
+/// Drive `memory_store` with an embedder + vector_index wired in so the
+/// synthesis `update` branch reaches the `content_changed && embedder`
+/// re-embed arm (lines 655-664 of `src/mcp/tools/store.rs`).
+fn run_store_with_embedder(
+    conn: &Connection,
+    db_path: &PathBuf,
+    llm: &OllamaClient,
+    embedder: &dyn ai_memory::embeddings::Embed,
+    vector_index: Option<&ai_memory::hnsw::VectorIndex>,
+    params: Value,
+) -> Result<Value, String> {
+    let ttl = ResolvedTtl::default();
+    ai_memory::mcp::tools::handle_store_for_tests(
+        conn,
+        db_path,
+        &params,
+        Some(embedder),
+        Some(llm),
+        vector_index,
+        &ttl,
+        true, // autonomous_hooks
+        None,
+        None,
+    )
+}
+
+/// Trait-only fake embedder for the integration-test crate. The
+/// production [`ai_memory::embeddings::Embedder`] requires HuggingFace
+/// model weights / candle; the in-crate `test_support::MockEmbedder` is
+/// `#[cfg(test)]`-gated and thus invisible to integration tests. This
+/// minimal fake suffices for the re-embed branch coverage.
+struct IntegrationMockEmbedder;
+impl ai_memory::embeddings::Embed for IntegrationMockEmbedder {
+    fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        let hash = text.bytes().fold(0u32, |acc, b| {
+            acc.wrapping_mul(31).wrapping_add(u32::from(b))
+        });
+        // u16-cast keeps the value inside f32 mantissa precision.
+        let base = f32::from(u16::try_from(hash % 1000).unwrap_or(0)) / 1000.0;
+        Ok((0u16..384)
+            .map(|i| base + (f32::from(i) * 0.0001).sin().abs())
+            .collect())
+    }
+}
+
+/// COR-5 — `update` verdict with an embedder wired reaches the
+/// re-embed arm. We need `content_changed == true`, which happens when
+/// `merged_content` differs from the candidate's existing content. The
+/// embedder is given a vector_index so both the `db::set_embedding`
+/// call and the `idx.insert(...)` call fire.
+#[test]
+fn synthesis_update_with_embedder_re_embeds_merged_content() {
+    use ai_memory::hnsw::VectorIndex;
+
+    let (conn, db_path) = open_db();
+    let ns = "ns-update-embed";
+    let id_update = seed_existing(
+        &conn,
+        "kubernetes deployment notes embed",
+        "stale body before merge",
+        ns,
+    );
+
+    let verdict = json!({
+        "verdicts": [{
+            "candidate_id": id_update,
+            "verb": "update",
+            "merged_content": "merged-by-curator-changes-content"
+        }]
+    });
+    let server = shared_mock_for_synthesis(verdict);
+    let uri = server.uri();
+    let llm = OllamaClient::new_with_url(&uri, "test-model").expect("mock client");
+
+    let embedder = IntegrationMockEmbedder;
+    let idx = VectorIndex::empty();
+
+    let resp = run_store_with_embedder(
+        &conn,
+        &db_path,
+        &llm,
+        &embedder,
+        Some(&idx),
+        json!({
+            "title": "kubernetes deployment notes v2",
+            "content": BASE_CONTENT,
+            "namespace": ns,
+            "on_conflict": "version",
+        }),
+    )
+    .expect("ok");
+    assert_eq!(resp["id"].as_str(), Some(id_update.as_str()));
+
+    // Re-embed must have refreshed the stored vector AND the index.
+    let stored = db::get_embedding(&conn, &id_update)
+        .expect("get_embedding ok")
+        .expect("vector present");
+    assert_eq!(stored.len(), 384, "MockEmbedder dimensionality");
+    // VectorIndex no longer empty after the synthesis re-embed insert.
+    assert_eq!(
+        idx.len(),
+        1,
+        "merged candidate id should be present in vector index after re-embed"
+    );
+}

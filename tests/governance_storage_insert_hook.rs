@@ -512,3 +512,63 @@ fn refusal_maps_to_http_403() {
     let _ = std::fs::remove_file(format!("{}-wal", db_path.display()));
     let _ = std::fs::remove_file(format!("{}-shm", db_path.display()));
 }
+
+// ---------------------------------------------------------------------------
+// Test 6: MCP `handle_store` surfaces `GOVERNANCE_REFUSED:` prefix on
+// substrate-hook refusal — v0.7-polish #767 store.rs coverage close.
+//
+// Drives `src/mcp/tools/store.rs` lines 807-834: the
+// `match db::insert(conn, &mem) { Err(e) => ... }` arm, the
+// `quotas::refund_op` call, and the `GovernanceRefusal` downcast
+// branch that prefixes the operator-authored reason with
+// `GOVERNANCE_REFUSED:`. Without this test those lines are
+// structurally unreachable from in-process unit tests (the daemon
+// boot path is the only producer of the hook closure).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mcp_store_surfaces_governance_refused_prefix_on_substrate_hook_refusal() {
+    let _g = test_serial().lock().unwrap();
+    ensure_hook_installed();
+    set_mode(HookMode::Refuse(
+        "substrate operator rule: writes blocked".to_string(),
+    ));
+
+    let conn = fresh_conn();
+    let db_path = std::path::PathBuf::from(":memory:");
+    let ttl = ai_memory::config::ResolvedTtl::default();
+    let params = serde_json::json!({
+        "title": "blocked-by-substrate-hook",
+        "content": "body that the substrate pre-write hook will refuse",
+        "namespace": "test-substrate-refuse",
+        "tier": "mid",
+        "agent_id": "ai:alice",
+    });
+
+    let err = ai_memory::mcp::tools::handle_store_for_tests(
+        &conn, &db_path, &params, None, None, None, &ttl, false, None, None,
+    )
+    .expect_err("substrate refusal must surface as Err");
+
+    assert!(
+        err.starts_with("GOVERNANCE_REFUSED:"),
+        "MCP layer must prefix the substrate-hook reason with \
+         GOVERNANCE_REFUSED:, got: {err}"
+    );
+    assert!(
+        err.contains("substrate operator rule: writes blocked"),
+        "operator-authored reason must be preserved verbatim, got: {err}"
+    );
+
+    // Defence-in-depth: no row landed.
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE namespace = 'test-substrate-refuse'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0, "substrate refusal must not leave a row");
+
+    set_mode(HookMode::Allow);
+}

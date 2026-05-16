@@ -2731,4 +2731,279 @@ mod tests {
         .expect("re-store");
         assert_eq!(resp["duplicate"].as_bool(), Some(true));
     }
+
+    // -----------------------------------------------------------------
+    // v0.7-polish coverage gap close (issue #767) — testable arms that
+    // the prior agent's pass left unreachable for want of test infra
+    // (`FailingEmbedder`), missing quota-row seeding, or missing
+    // detect_contradiction Ok(false) / Err mock wiring.
+    // -----------------------------------------------------------------
+
+    /// Lines 890-891 (`Err(e) => tracing::warn!("failed to generate
+    /// embedding ...")`): when the embedder returns Err on the
+    /// post-insert embed pass, the store completes successfully but
+    /// emits a WARN and does NOT persist a vector. Requires the new
+    /// [`FailingEmbedder`] in `embeddings::test_support`.
+    #[test]
+    fn store_failing_embedder_warns_but_completes() {
+        use crate::embeddings::test_support::FailingEmbedder;
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let embedder = FailingEmbedder;
+        let resp = handle_store(
+            &conn,
+            &db_path,
+            &base_params("failembed"),
+            Some(&embedder as &dyn Embed),
+            None,
+            None,
+            &ttl,
+            false,
+            None,
+            None,
+        )
+        .expect("store still completes on embed failure");
+        let id = resp["id"].as_str().expect("id present");
+        // No embedding was stored (the embedder erred before set_embedding).
+        let v = db::get_embedding(&conn, id).expect("query ok");
+        assert!(
+            v.is_none(),
+            "FailingEmbedder must NOT yield a persisted vector"
+        );
+    }
+
+    /// Line 802 (`return Err(e.to_string())`): quota exhausted on the
+    /// pre-write `check_and_record`. Seed an agent-quota row with
+    /// `max_memories_per_day = 0` so the very first attempt fails.
+    #[test]
+    fn store_quota_exhausted_returns_quota_exceeded_error() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let now = chrono::Utc::now().to_rfc3339();
+        let day = now.get(..10).unwrap_or(&now);
+        // Seed quota row with zero daily memory budget for the agent
+        // used by base_params (ai:alice). Direct SQL is the most
+        // surgical way to drive the quota gate without standing up the
+        // full daemon `Quotas` config surface.
+        conn.execute(
+            "INSERT INTO agent_quotas
+             (agent_id, max_memories_per_day, max_storage_bytes, max_links_per_day,
+              current_memories_today, current_storage_bytes, current_links_today,
+              day_started_at, created_at, updated_at)
+             VALUES ('ai:alice', 0, 0, 0, 0, 0, 0, ?1, ?2, ?2)",
+            rusqlite::params![day, now],
+        )
+        .expect("seed zero quota row");
+
+        let err = handle_store(
+            &conn,
+            &db_path,
+            &base_params("over-quota"),
+            None,
+            None,
+            None,
+            &ttl,
+            false,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("QUOTA_EXCEEDED") || err.to_ascii_lowercase().contains("quota"),
+            "expected QUOTA_EXCEEDED prefix, got: {err}"
+        );
+    }
+
+    /// Line 201 (`validate::validate_source` map_err): invalid source
+    /// string. The default ("claude") and the params-set ones are
+    /// covered; an explicitly bad source value drives the map_err arm.
+    #[test]
+    fn store_invalid_source_propagates_validate_source_error() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let mut params = base_params("bad-src");
+        // Validate rejects sources with whitespace / oversized strings;
+        // pick a clearly invalid one.
+        params["source"] = json!("has whitespace and is too long for the validator anyway");
+        let err = handle_store(
+            &conn, &db_path, &params, None, None, None, &ttl, false, None, None,
+        )
+        .unwrap_err();
+        assert!(!err.is_empty(), "validate_source must surface an error");
+    }
+
+    /// Lines 941-948 (`Ok(false) => {}` and `Err(e) => warn!()` arms of
+    /// `detect_contradiction`): legacy per-pair classifier path with
+    /// the LLM returning "no" (false) and the LLM returning a 5xx
+    /// error. Symmetric to the existing `autonomy_hook_confirmed_
+    /// contradictions_reach_response` which only exercises Ok(true).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn legacy_classifier_handles_no_and_error_responses() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // --- Ok(false) ("no") variant ---
+        let server_no = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": []})))
+            .mount(&server_no)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"response": "alpha\nbeta"})),
+            )
+            .mount(&server_no)
+            .await;
+        // detect_contradiction → /api/chat → "no" → Ok(false)
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"message": {"content": "no"}, "done": true})),
+            )
+            .mount(&server_no)
+            .await;
+        let uri_no = server_no.uri();
+        let resp_no = tokio::task::spawn_blocking(move || {
+            let llm = crate::llm::OllamaClient::new_with_url(&uri_no, "test-model")
+                .expect("client constructs against mock");
+            let conn = fresh_conn();
+            let db_path = db_path();
+            let ttl = ResolvedTtl::default();
+            install_legacy_classifier_policy(&conn, "legacy-no-ns");
+            let seed_title = "legacy-no";
+            let _ = handle_store(
+                &conn,
+                &db_path,
+                &json!({
+                    "title": seed_title,
+                    "content": "Earlier body asserting one position with substantial words here.",
+                    "namespace": "legacy-no-ns",
+                    "on_conflict": "version",
+                    "agent_id": "ai:alice",
+                }),
+                None,
+                None,
+                None,
+                &ttl,
+                false,
+                None,
+                None,
+            )
+            .expect("seed");
+            handle_store(
+                &conn,
+                &db_path,
+                &json!({
+                    "title": seed_title,
+                    "content": "Alternate body for contradiction-no path with substantial words here.",
+                    "namespace": "legacy-no-ns",
+                    "on_conflict": "version",
+                    "agent_id": "ai:alice",
+                }),
+                None,
+                Some(&llm),
+                None,
+                &ttl,
+                true,
+                None,
+                None,
+            )
+        })
+        .await
+        .unwrap()
+        .expect("store ok on Ok(false)");
+        // "no" means no confirmed contradictions surface.
+        assert!(
+            resp_no.get("confirmed_contradictions").is_none()
+                || resp_no["confirmed_contradictions"]
+                    .as_array()
+                    .map_or(true, std::vec::Vec::is_empty),
+            "Ok(false) must NOT add the candidate to confirmed_contradictions, got: {resp_no}"
+        );
+
+        // --- Err variant ---
+        let server_err = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": []})))
+            .mount(&server_err)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"response": "gamma\ndelta"})),
+            )
+            .mount(&server_err)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server_err)
+            .await;
+        let uri_err = server_err.uri();
+        let resp_err = tokio::task::spawn_blocking(move || {
+            let llm = crate::llm::OllamaClient::new_with_url(&uri_err, "test-model")
+                .expect("client constructs against mock");
+            let conn = fresh_conn();
+            let db_path = db_path();
+            let ttl = ResolvedTtl::default();
+            install_legacy_classifier_policy(&conn, "legacy-err-ns");
+            let seed_title = "legacy-err";
+            let _ = handle_store(
+                &conn,
+                &db_path,
+                &json!({
+                    "title": seed_title,
+                    "content": "Earlier body asserting one position with substantial words here.",
+                    "namespace": "legacy-err-ns",
+                    "on_conflict": "version",
+                    "agent_id": "ai:alice",
+                }),
+                None,
+                None,
+                None,
+                &ttl,
+                false,
+                None,
+                None,
+            )
+            .expect("seed");
+            handle_store(
+                &conn,
+                &db_path,
+                &json!({
+                    "title": seed_title,
+                    "content": "Alternate body for contradiction-err path with substantial words here.",
+                    "namespace": "legacy-err-ns",
+                    "on_conflict": "version",
+                    "agent_id": "ai:alice",
+                }),
+                None,
+                Some(&llm),
+                None,
+                &ttl,
+                true,
+                None,
+                None,
+            )
+        })
+        .await
+        .unwrap()
+        .expect("store ok despite Err from detect_contradiction");
+        // Err means the warn fires but the store completes; no
+        // confirmed_contradictions emitted.
+        assert!(
+            resp_err.get("confirmed_contradictions").is_none()
+                || resp_err["confirmed_contradictions"]
+                    .as_array()
+                    .map_or(true, std::vec::Vec::is_empty),
+            "Err in detect_contradiction must NOT surface a confirmed_contradictions entry, got: {resp_err}"
+        );
+    }
 }
