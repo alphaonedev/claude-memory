@@ -143,14 +143,18 @@ fn test_migration_v36_applies_cleanly() {
             |r| r.get(0),
         )
         .expect("read schema_version");
-    // The migration ladder reaches v37 (QW-2 persona substrate); it
-    // passes through v36 (WT-1-A atomisation foundation) on its way
-    // there, so the v36 column + index probes above still exercise
-    // WT-1-A's migration step, but the final stamped version is v37.
+    // The migration ladder reaches v39 in current HEAD (Form 5 confidence
+    // calibration); it passes through v36 (WT-1-A atomisation foundation)
+    // on its way there, so the v36 column + index probes above still
+    // exercise WT-1-A's migration step. The final stamped version tracks
+    // `CURRENT_SCHEMA_VERSION` in src/storage/migrations.rs:
+    //   v37 (QW-2 persona substrate) → v38 (Form 4 source-uri provenance)
+    //   → v39 (Form 5 confidence calibration shadow table).
+    // When CURRENT_SCHEMA_VERSION bumps, update this assertion in lockstep.
     assert_eq!(
-        v, 37,
-        "v36→v37: schema_version must be stamped at 37 \
-         (migration ladder passes through v36 on its way to v37)"
+        v, 39,
+        "v36→v39: schema_version must be stamped at CURRENT_SCHEMA_VERSION \
+         (migration ladder passes through v36 on its way to v39)"
     );
 }
 
@@ -180,10 +184,11 @@ fn test_migration_v36_idempotent() {
         )
         .expect("read v2");
 
-    // The migration ladder reaches v37 (QW-2 persona substrate);
+    // The migration ladder reaches v39 (Form 5 confidence calibration);
     // pass-through v36 still exercises WT-1-A's atomisation migration.
-    assert_eq!(v1, 37);
-    assert_eq!(v1, v2, "v37: migrate is not idempotent — version drifted");
+    // Tracks `CURRENT_SCHEMA_VERSION` in src/storage/migrations.rs.
+    assert_eq!(v1, 39);
+    assert_eq!(v1, v2, "v39: migrate is not idempotent — version drifted");
 
     // Columns + indexes still present after replay.
     assert!(column_exists(&conn2, "memories", "atomised_into"));
@@ -447,12 +452,13 @@ async fn test_capabilities_db_schema_version_reports_36() {
         .expect("WT-1-A: db_schema_version must be a JSON integer");
 
     assert_eq!(
-        v, 37,
-        "WT-1-A+QW-2: capabilities.db_schema_version must be 37 after \
-         the atomisation-foundation bump (35→36) and the persona-as-\
-         artifact bump (36→37). Drift here means the migrate ladder \
-         skipped one of those steps or the SAL `schema_version()` \
-         lookup is reading the wrong source."
+        v, 39,
+        "WT-1-A+QW-2+Form 4+Form 5: capabilities.db_schema_version must be \
+         39 after the atomisation-foundation bump (35→36), persona-as-\
+         artifact bump (36→37), Form 4 source-uri provenance bump (37→38), \
+         and Form 5 confidence calibration bump (38→39). Drift here means \
+         the migrate ladder skipped one of those steps or the SAL \
+         `schema_version()` lookup is reading the wrong source."
     );
 
     shutdown.notify_one();
