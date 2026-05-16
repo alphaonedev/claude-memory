@@ -565,6 +565,14 @@ use list::handle_list;
 use pending::handle_pending_list;
 use pending::handle_subscription_dlq_list;
 use persona::{handle_persona, handle_persona_generate};
+// Issue #809 — re-export handle_persona_generate as a stable pub
+// symbol so the nhi-self-persona regression test
+// (tests/issue_809_nhi_self_persona_any_agent.rs) can drive the
+// persona generator directly without going through an MCP-stdio
+// JSON-RPC envelope. The wrapper name persona_generate_call mirrors
+// the pattern used by other v0.7.x integration tests that need
+// direct handler access.
+pub use persona::handle_persona_generate as persona_generate_call;
 use promote::handle_promote;
 use reflect::handle_reflect;
 use reflection_origin::handle_reflection_origin;
@@ -1148,6 +1156,7 @@ fn handle_request(
                     arguments,
                     llm.map(|c| c as &dyn crate::autonomy::AutonomyLlm),
                     tier_config.tier,
+                    active_keypair,
                 ),
                 // v0.7.0 Form 5 (issue #758) — calibration sweep over
                 // the shadow-mode observation table. Pure read-only;
@@ -1326,24 +1335,61 @@ fn handle_request(
 }
 
 /// v0.7 Track H — H2: best-effort load of the active Ed25519 keypair
-/// for the MCP daemon. Mirrors `daemon_runtime::load_active_keypair_for_serve`
-/// but logs to stderr (the MCP convention — stdout owns JSON-RPC).
-/// Missing keypair returns `None` and link writes go in unsigned;
-/// operator opts in by running `ai-memory identity generate`.
+/// for the MCP daemon. Logs to stderr (the MCP convention — stdout owns
+/// JSON-RPC). Missing keypair returns `None` and link writes go in
+/// unsigned; operator opts in by running `ai-memory identity generate`.
+///
+/// # Resolution order
+///
+/// 1. The keypair file matching the *resolved* `agent_id` for this
+///    process (lets an operator who explicitly enrolled a per-NHI key
+///    via `ai-memory identity generate <agent-id>` get that key picked
+///    up automatically).
+/// 2. Fallback to the substrate-managed `daemon` keypair (auto-generated
+///    on first `serve`/`mcp` start, persisted under `<keys>/daemon.priv`).
+///    This mirrors `daemon_runtime::ensure_and_load_daemon_keypair` so
+///    the HTTP and MCP transports converge on the same signing key when
+///    no NHI-specific key has been enrolled — closing the v0.7.0 #811
+///    regression where MCP saw `host:FROSTYi.local:pid-XXX` from
+///    `resolve_agent_id(None, None)`, failed the agent-keyed lookup, and
+///    silently fell back to unsigned writes despite the daemon key
+///    sitting on disk.
 fn load_active_keypair_for_mcp() -> Option<crate::identity::keypair::AgentKeypair> {
     let dir = crate::identity::keypair::default_key_dir().ok()?;
-    let agent_id = crate::identity::resolve_agent_id(None, None).ok()?;
     if !dir.exists() {
         return None;
     }
-    match crate::identity::keypair::load(&agent_id, &dir) {
+    let agent_id = crate::identity::resolve_agent_id(None, None).ok();
+    load_active_keypair_for_mcp_in(&dir, agent_id.as_deref())
+}
+
+/// Inner resolution used by [`load_active_keypair_for_mcp`]; split out so
+/// it can be unit-tested without touching the host's real keys dir.
+fn load_active_keypair_for_mcp_in(
+    dir: &std::path::Path,
+    agent_id: Option<&str>,
+) -> Option<crate::identity::keypair::AgentKeypair> {
+    if let Some(agent_id) = agent_id {
+        match crate::identity::keypair::load(agent_id, dir) {
+            Ok(kp) if kp.can_sign() => return Some(kp),
+            Ok(_) => {}
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if !(msg.contains("No such file") || msg.contains("not found")) {
+                    eprintln!("ai-memory: keypair load failed for {agent_id}: {msg}");
+                }
+            }
+        }
+    }
+    // Fallback: substrate-managed daemon keypair (created by the
+    // serve/mcp boot path; see daemon_runtime::ensure_and_load_daemon_keypair).
+    match crate::identity::keypair::load("daemon", dir) {
         Ok(kp) if kp.can_sign() => Some(kp),
         Ok(_) => None,
         Err(e) => {
-            // WARN on malformed key files; quiet on common file-not-found.
             let msg = format!("{e:#}");
             if !(msg.contains("No such file") || msg.contains("not found")) {
-                eprintln!("ai-memory: keypair load failed for {agent_id}: {msg}");
+                eprintln!("ai-memory: daemon keypair load failed: {msg}");
             }
             None
         }
@@ -1724,6 +1770,57 @@ mod tests {
     use super::*;
     use crate::models::{Memory, Tier};
     use serde_json::json;
+
+    // ----- issue #811 verification: load_active_keypair_for_mcp fallback -----
+
+    #[test]
+    fn issue_811_load_active_keypair_for_mcp_picks_agent_specific_when_present() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let kp = crate::identity::keypair::generate("ai:alice").unwrap();
+        crate::identity::keypair::save(&kp, dir.path()).unwrap();
+        let loaded = super::load_active_keypair_for_mcp_in(dir.path(), Some("ai:alice"))
+            .expect("agent-specific keypair should resolve when on disk");
+        assert!(loaded.can_sign(), "loaded agent-specific keypair must carry a private half");
+        assert_eq!(loaded.agent_id, "ai:alice");
+    }
+
+    #[test]
+    fn issue_811_load_active_keypair_for_mcp_falls_back_to_daemon_when_agent_specific_missing() {
+        // The regression: the live MCP resolved agent_id to a host-id
+        // (e.g. `host:host.local:pid-XYZ`) for which no keypair file
+        // ever exists; the substrate-managed `daemon` key sat on disk
+        // unused. This asserts the fallback so the persona pipeline
+        // signs end-to-end even without a per-NHI keypair enrolled.
+        let dir = tempfile::TempDir::new().unwrap();
+        let daemon_kp = crate::identity::keypair::generate("daemon").unwrap();
+        crate::identity::keypair::save(&daemon_kp, dir.path()).unwrap();
+        let loaded = super::load_active_keypair_for_mcp_in(
+            dir.path(),
+            Some("host:host.local:pid-12345"),
+        )
+        .expect("daemon fallback must engage when agent-specific key absent");
+        assert!(loaded.can_sign(), "daemon fallback keypair must carry a private half");
+        assert_eq!(loaded.agent_id, "daemon");
+    }
+
+    #[test]
+    fn issue_811_load_active_keypair_for_mcp_returns_none_when_neither_present() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let loaded = super::load_active_keypair_for_mcp_in(dir.path(), Some("ai:none"));
+        assert!(loaded.is_none(), "no key files → None (preserves v0.6.4 unsigned behaviour)");
+    }
+
+    #[test]
+    fn issue_811_load_active_keypair_for_mcp_falls_back_when_agent_id_unresolvable() {
+        // `agent_id = None` simulates `resolve_agent_id` failing entirely;
+        // daemon fallback must still engage.
+        let dir = tempfile::TempDir::new().unwrap();
+        let daemon_kp = crate::identity::keypair::generate("daemon").unwrap();
+        crate::identity::keypair::save(&daemon_kp, dir.path()).unwrap();
+        let loaded = super::load_active_keypair_for_mcp_in(dir.path(), None)
+            .expect("daemon fallback must engage when agent_id resolution fails");
+        assert_eq!(loaded.agent_id, "daemon");
+    }
 
     #[test]
     fn tool_definitions_returns_50_tools() {

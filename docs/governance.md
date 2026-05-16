@@ -15,6 +15,7 @@ docs below.
 
 | Topic | Doc |
 |---|---|
+| **Operator how-to: activate Batman Mode end-to-end** | [`docs/batman-active-mode.md`](batman-active-mode.md) |
 | Migration path v0.6.4 → v0.7.0 permissions | [`docs/MIGRATION_v0.7.md` §"Permissions migration"](MIGRATION_v0.7.md#permissions-migration) |
 | 7th-form policy engine (substrate-authoritative rules) | [`docs/policy-engine.md`](policy-engine.md) |
 | Agent-action rule catalogue | [`docs/governance/agent-action-rules.md`](governance/agent-action-rules.md) |

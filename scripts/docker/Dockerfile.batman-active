@@ -1,0 +1,60 @@
+# Dockerfile.batman-active — minimal multi-arch image for the
+# Batman-active stack defined in docker-compose.batman-active.yml.
+# Issue #800 Crack 6 + multi-OS support.
+#
+# Build:
+#   docker buildx build -f scripts/docker/Dockerfile.batman-active \
+#     --platform linux/amd64,linux/arm64 \
+#     --tag alphaonedev/ai-memory:0.7.0-batman \
+#     scripts/docker
+#
+# This image expects an external ai-memory binary mounted into /usr/local/bin
+# or downloaded via build-arg. For most operators, prefer the official
+# alphaonedev/ai-memory:0.7.0 image and use docker-compose.batman-active.yml
+# directly — this Dockerfile is here for the operator who needs to bake a
+# custom version into a container (e.g., distilled-model variant from #654).
+
+ARG BASE_IMAGE=debian:stable-slim
+FROM ${BASE_IMAGE}
+
+ARG AI_MEMORY_VERSION=0.7.0
+ARG TARGETARCH
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        sqlite3 \
+        curl \
+        python3-minimal \
+        bash \
+        jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Either copy a pre-built binary into the image OR download from a
+# release artifact. The simple path uses a release artifact; for a
+# custom build, replace the ADD with a COPY of your target/release/ai-memory.
+# ADD https://github.com/alphaonedev/ai-memory-mcp/releases/download/v${AI_MEMORY_VERSION}/ai-memory-${AI_MEMORY_VERSION}-${TARGETARCH}-linux /usr/local/bin/ai-memory
+# RUN chmod 0755 /usr/local/bin/ai-memory
+COPY ai-memory /usr/local/bin/ai-memory
+RUN chmod 0755 /usr/local/bin/ai-memory \
+    && useradd --uid 1000 --create-home --shell /bin/bash ai-memory \
+    && mkdir -p /data /keys \
+    && chown -R ai-memory:ai-memory /data /keys
+
+# Copy activation + acceptance scripts into the image so they're
+# reachable as `/opt/scripts/*.sh` from any container in the compose.
+COPY ../install-batman-active.sh \
+     ../batman-mode-acceptance.sh \
+     ../batman-warmup.sh \
+     ../batman-bench.sh \
+     /opt/scripts/
+RUN chmod 0755 /opt/scripts/*.sh
+
+USER ai-memory
+WORKDIR /home/ai-memory
+ENV AI_MEMORY_DB=/data/ai-memory.db \
+    AI_MEMORY_KEY_DIR=/keys \
+    AI_MEMORY_PROFILE=full
+
+# Default CMD is the curator daemon. Override in compose for the MCP
+# server or any other subcommand.
+CMD ["ai-memory", "--db", "/data/ai-memory.db", "curator", "--daemon", "--interval-secs", "300", "--max-ops", "100"]

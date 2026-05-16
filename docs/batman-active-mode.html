@@ -1,0 +1,469 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+  Batman Mode activation atlas — operator how-to for going from
+  Batman-capable to Batman-active on a single node.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-memory · Batman Mode — Activating full-spectrum write-time investment</title>
+<meta name="description" content="ai-memory v0.7.0 operator how-to: take a fresh install from Batman-capable to Batman-active. Operator key, signed seed rules, curator daemon, namespace policies, and per-OS persistence (launchd / systemd / Task Scheduler).">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/batman-active-mode.html">
+<style>
+:root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#6ee7ff;--bad:#ff6b9d;--warn:#ffd700;--gold:#ffd700;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1280px}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:5rem}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--text);text-decoration:none}a:hover{color:var(--p1)}
+code{font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);padding:.1em .35em;border-radius:4px}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+h1,h2,h3{font-weight:700;letter-spacing:-0.02em}h2{font-size:1.6rem;margin-bottom:.5rem;font-family:var(--font-mono)}h3{font-size:1.05rem}
+p{color:var(--text-muted)}
+.topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.topnav .inner{display:flex;justify-content:space-between;max-width:var(--max-w);margin:0 auto;padding:.9rem 1.5rem;font-size:.875rem}
+.topnav a{color:var(--text-muted);margin-right:1.25rem}.topnav a:hover{color:var(--text)}
+.topnav .home-link{color:var(--text);font-weight:600}
+.topnav .right{display:flex;gap:1.25rem}@media(max-width:800px){.topnav .right{display:none}}
+.hero{padding:4rem 1.5rem 2.5rem;text-align:center;background:radial-gradient(ellipse at center,rgba(255,215,0,0.08),transparent 60%);border-bottom:1px solid var(--border)}
+.hero h1{font-size:clamp(2rem,4.5vw,3.25rem);line-height:1.1;letter-spacing:-0.03em;margin-bottom:1rem}
+.hero .tagline{color:var(--text-muted);font-size:1.05rem;max-width:820px;margin:0 auto 1rem}
+.hero .pills{display:flex;justify-content:center;gap:.5rem;flex-wrap:wrap;margin-top:1.25rem}
+.hero .pill{padding:.4rem 1rem;border:1px solid var(--border-hl);border-radius:999px;font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted)}
+
+section{padding:3.5rem 0;border-bottom:1px solid var(--border)}
+.eyebrow{display:inline-block;font-size:.72rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:.5rem;padding:.2rem .6rem;border:1px solid var(--border-hl);border-radius:999px}
+.lede{color:var(--text-muted);font-size:.95rem;max-width:820px;margin-bottom:2rem}
+
+.matrix{width:100%;border-collapse:separate;border-spacing:0;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;overflow:hidden;font-size:.88rem}
+.matrix th{background:var(--bg-elev);padding:.85rem 1rem;text-align:left;font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid var(--border)}
+.matrix td{padding:.75rem 1rem;border-bottom:1px solid var(--border);vertical-align:top}
+.matrix tr:last-child td{border-bottom:none}
+.matrix .form-id{font-family:var(--font-mono);font-weight:700;color:var(--p3)}
+.matrix .verdict{font-family:var(--font-mono);font-size:.82rem}
+.matrix .verdict.allow,.matrix .verdict.active{color:var(--good)}
+.matrix .verdict.deny{color:var(--bad)}
+.matrix .verdict.pending,.matrix .verdict.opt-in{color:var(--warn)}
+
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:1rem;margin-bottom:2rem}
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.25rem;position:relative;overflow:hidden}
+.card::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;background:var(--p3)}
+.card.always::before{background:var(--good)}
+.card.optin::before{background:var(--warn)}
+.card.gov::before{background:var(--gold)}
+.card h3{font-family:var(--font-mono);font-size:1rem;margin-bottom:.5rem}
+.card .lbl{font-family:var(--font-mono);font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.4rem}
+.card p{color:var(--text-muted);font-size:.88rem}
+
+.snip{font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);margin-top:.85rem;padding:.85rem 1rem;background:var(--bg-code);border:1px solid var(--border);border-radius:8px;line-height:1.55;white-space:pre;overflow-x:auto}
+.snip .ok{color:var(--good)}
+.snip .err{color:var(--bad)}
+.snip .warn{color:var(--warn)}
+.snip .cm{color:var(--text-dim)}
+.snip .key{color:var(--p3)}
+.snip .val{color:var(--p2)}
+
+.step{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:1.25rem;position:relative}
+.step::before{content:"";position:absolute;top:0;left:0;bottom:0;width:3px;background:var(--gold);border-radius:12px 0 0 12px}
+.step .num{font-family:var(--font-mono);color:var(--gold);font-size:.78rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;margin-bottom:.4rem;display:block}
+.step h3{font-family:var(--font-mono);font-size:1.1rem;margin-bottom:.5rem;color:var(--text)}
+.step p{color:var(--text-muted);font-size:.92rem;margin-bottom:.6rem}
+
+.warn-box{background:rgba(255,215,0,0.05);border:1px solid var(--warn);border-radius:10px;padding:1rem 1.25rem;margin:1.5rem 0;color:var(--text-muted);font-size:.9rem}
+.warn-box strong{color:var(--warn);font-family:var(--font-mono);font-size:.82rem;letter-spacing:.04em;display:block;margin-bottom:.35rem}
+
+footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-dim);border-top:1px solid var(--border)}
+footer a{color:var(--text-muted)}
+
+.topnav .menu{position:relative;display:inline-block}
+.topnav .menu-btn{background:none;border:none;color:var(--text-muted);font-family:inherit;font-size:inherit;cursor:pointer;padding:.2rem 0;line-height:1;letter-spacing:0}
+.topnav .menu-btn:hover,.topnav .menu:focus-within .menu-btn{color:var(--text)}
+.topnav .menu-btn.active{color:var(--text)}
+.topnav .menu-btn .caret{opacity:.5;font-size:.7em;margin-left:.2em}
+.topnav .menu-pane{position:absolute;top:calc(100% + .55rem);right:0;background:var(--bg-card);border:1px solid var(--border-hl);border-radius:8px;padding:.4rem 0;min-width:240px;box-shadow:0 10px 28px rgba(0,0,0,0.5);z-index:60;visibility:hidden;opacity:0;transition:opacity .12s ease,visibility 0s .12s}
+.topnav .menu:focus-within .menu-pane,.topnav .menu:hover .menu-pane{visibility:visible;opacity:1;transition:opacity .12s ease}
+.topnav .menu-pane a{display:block;padding:.5rem 1rem;color:var(--text-muted);font-size:.85rem;margin-right:0;white-space:nowrap;text-decoration:none}
+.topnav .menu-pane a:hover{background:var(--bg-elev);color:var(--text)}
+.topnav .menu-pane a.current{color:var(--p1);background:var(--bg-elev)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Batman Mode</span></a>
+    <div class="right">
+      <a href="at-a-glance.html" style="color:#6ee7ff">Atlas</a>
+      <a href="whats-new-v07.html" style="color:#6ee7ff">v0.7.0</a>
+      <div class="menu">
+        <button class="menu-btn">Features<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="memory-tiers.html">Memory Tiers</a>
+          <a href="memory-rules.html">Memory Rules</a>
+          <a href="ttl-controls.html">TTL Controls</a>
+          <a href="archival.html">Archival</a>
+          <a href="encryption.html">Encryption</a>
+          <a href="hierarchies.html">Hierarchies</a>
+          <a href="knowledge-graph.html">Knowledge Graph</a>
+          <a href="autonomous.html">Autonomous</a>
+          <a href="a2a-messaging.html">A2A Messaging</a>
+          <a href="lifecycle.html">Lifecycle</a>
+          <a href="performance.html">Performance</a>
+          <a href="agent-identity.html">Agent Identity (NHI)</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Architectures<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="architectures.html">Overview</a>
+          <a href="architectures-t1.html">T1 — Single Agent</a>
+          <a href="architectures-t2.html">T2 — Many Agents</a>
+          <a href="architectures-t3.html">T3 — Multi-Node Cluster</a>
+          <a href="architectures-t4.html">T4 — Data-Center Swarm</a>
+          <a href="architectures-t5.html">T5 — Global Hive</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn active">Internals<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="schema.html">Schema</a>
+          <a href="types.html">Types</a>
+          <a href="validators.html">Validators</a>
+          <a href="governance.html">Governance</a>
+          <a href="batman-active-mode.html" class="current">Batman Mode</a>
+          <a href="tracing.html">Tracing</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Evidence<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="evidence.html">Frozen Claims</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A Gate</a>
+          <a href="performance.html">Performance budgets</a>
+        </div>
+      </div>
+      <a href="credits.html">Credits</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <h1>Going Batman-active.</h1>
+  <p class="tagline">v0.7.0 ships <strong style="color:var(--good)">6 of 6</strong> of Batman's write-time-investment forms <strong style="color:var(--good)">+ the 7th</strong> (substrate-authority at write). All <code>IMPLEMENTED</code>. None active by default. This page is the operator-facing recipe to take a fresh install from <strong style="color:var(--warn)">Batman-capable</strong> to <strong style="color:var(--good)">Batman-active</strong> — and make it survive reboot.</p>
+  <div class="pills">
+    <span class="pill">7-step recipe</span>
+    <span class="pill">launchd / systemd / Task Scheduler</span>
+    <span class="pill">issue #800</span>
+    <span class="pill">audit PR #753 — all 7 forms closed</span>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">The thesis</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Pay at write time, read for free.</h2>
+    <p class="lede"><strong>Batman</strong> is the published 6-form write-time-investment framework. Memory quality is set at WRITE time, not retrieval time. No amount of rerank fixes a substrate that ingested duplicates, un-atomized blobs, untyped facts, no provenance, no confidence, and no governance. ai-memory v0.7.0 implements all 6 + adds a 7th (substrate-authority over agent-EXTERNAL actions). On a default install the cognitive forms in the write path are on the moment you launch with <code>--tier autonomous</code>; the governance + namespace-policy forms are opt-in and need this recipe.</p>
+
+    <table class="matrix">
+      <thead>
+        <tr>
+          <th>Form</th><th>What it does</th><th>Default</th><th>Activation gate</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="form-id">Form 1</td>
+          <td>Online dedup-and-synthesis (one batch action-emitting LLM call BEFORE write — add/update/delete/no-op verb vocabulary)</td>
+          <td class="verdict active">ACTIVE</td>
+          <td>Autonomous tier; on by default in MCP write path</td>
+        </tr>
+        <tr>
+          <td class="form-id">Form 2</td>
+          <td>Synchronous atomise-before-embed (source decomposed into atoms BEFORE embedding)</td>
+          <td class="verdict active">ACTIVE</td>
+          <td>On by default in MCP write path</td>
+        </tr>
+        <tr>
+          <td class="form-id">Form 3</td>
+          <td>Multi-step ingest orchestrator (prompt-cache reuse + explicit-trust deterministic-then-LLM helpers)</td>
+          <td class="verdict active">ACTIVE</td>
+          <td>On by default in MCP write path</td>
+        </tr>
+        <tr>
+          <td class="form-id">Form 4</td>
+          <td>Fact-provenance: <code>citations</code> field + source-as-URI + atom-grain span</td>
+          <td class="verdict active">ACTIVE</td>
+          <td>Schema-level; always on at v0.7.0</td>
+        </tr>
+        <tr>
+          <td class="form-id">Form 5</td>
+          <td>Auto-confidence + shadow-mode calibration + freshness decay</td>
+          <td class="verdict opt-in">OPT-IN</td>
+          <td>Per-namespace <code>shadow_mode</code> policy + curator daemon</td>
+        </tr>
+        <tr>
+          <td class="form-id">Form 6</td>
+          <td>MemoryKind vocabulary (Concept / Entity / Claim / Relation / Event / Conversation / Decision / Observation / Reflection / Persona)</td>
+          <td class="verdict opt-in">OPT-IN</td>
+          <td>Per-namespace <code>auto_classify</code> policy + curator backfills</td>
+        </tr>
+        <tr>
+          <td class="form-id">7th</td>
+          <td>Substrate-authority at write — <code>check_agent_action</code> at Bash / Filesystem / Network / Spawn boundaries; refuses per signed operator rules</td>
+          <td class="verdict opt-in">OPT-IN</td>
+          <td>Operator key + R001–R004 signed + enabled</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p style="margin-top:1.5rem;font-size:.85rem">Form 7 at v0.7.0 wires substrate-internal write paths (any caller of <code>memory_store</code> / <code>memory_link</code> / <code>memory_delete</code> / <code>memory_archive</code> / <code>memory_consolidate</code> / <code>memory_replay</code>). Agent-EXTERNAL Layer-4 (Bash / FilesystemWrite outside substrate / NetworkRequest / ProcessSpawn) is <code>callable_now=false</code> until the v0.8.0 harness-boundary wiring lands (<a href="https://github.com/alphaonedev/ai-memory-mcp/issues/697">#697</a>). Operators can already enforce the same rules at the harness boundary themselves via a <code>PreToolUse</code> hook that shells out to <code>ai-memory rules check</code>.</p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Default state</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Capable, not active.</h2>
+    <p class="lede">A fresh v0.7.0 install with <code>--tier autonomous --profile full</code> running gives you Forms 1–4 the moment the MCP server boots. Everything else is dormant by design. The recipe below activates Forms 5, 6, 7 and makes the activation survive reboot.</p>
+    <div class="cards">
+      <div class="card always">
+        <div class="lbl">already on</div>
+        <h3 style="color:var(--good)">Forms 1–4</h3>
+        <p>Online dedup, synchronous atomise-before-embed, multi-step ingest, fact-provenance. Six cognitive transforms before a row hits SQL.</p>
+      </div>
+      <div class="card optin">
+        <div class="lbl">step 5 + 7</div>
+        <h3 style="color:var(--warn)">Forms 5 + 6</h3>
+        <p>Form 5 freshness decay + shadow-mode and Form 6 auto-classify are per-namespace policies + curator daemon. Default off so operators choose the LLM-call surface.</p>
+      </div>
+      <div class="card gov">
+        <div class="lbl">steps 1–4</div>
+        <h3 style="color:var(--gold)">7th-form</h3>
+        <p>Operator-signed seed rules R001–R004 ship in the table at <code>enabled=0, attest_level='unsigned'</code>. Until the operator signs + enables them, the governance gate is dormant.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">The recipe</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Seven steps to Batman-active.</h2>
+    <p class="lede">Set the DB path once and the rest of the commands inherit it:</p>
+    <div class="snip"><span class="cm"># pick your DB; the same path your MCP server uses</span>
+export AI_MEMORY_DB=~/.claude/ai-memory.db</div>
+
+    <div class="warn-box">
+      <strong>Known wart in v0.7.0</strong>
+      <code>ai-memory rules keygen</code> writes the operator key to <code>&lt;config-dir&gt;/operator.key</code>, but <code>ai-memory rules enable</code> looks in <code>&lt;config-dir&gt;/keys/operator.key</code>. Step 1 below includes the one-line workaround. Fix is tracked in the follow-up wart issue cross-linked at the bottom of this page.
+    </div>
+
+    <div class="step">
+      <span class="num">Step 1 — Operator keypair</span>
+      <h3>Generate the Ed25519 keypair that signs rule mutations.</h3>
+      <p>Without it, <code>rules enable / disable / remove / add</code> all refuse with <code>governance.no_operator_key</code>. Read-only verbs (<code>list</code>, <code>check</code>) work unsigned.</p>
+      <div class="snip">ai-memory rules keygen
+
+<span class="cm"># Workaround for the path-mismatch wart (macOS):</span>
+KEYDIR="$HOME/Library/Application Support/ai-memory/keys"
+mv "$(dirname "$KEYDIR")/operator.key"     "$KEYDIR/operator.key"
+mv "$(dirname "$KEYDIR")/operator.key.pub" "$KEYDIR/operator.key.pub"
+<span class="cm"># Linux: KEYDIR="$HOME/.config/ai-memory/keys" — same dance</span></div>
+    </div>
+
+    <div class="step">
+      <span class="num">Step 2 — Sign the seed rules</span>
+      <h3>Flip R001–R004 from unsigned → operator_signed.</h3>
+      <p>R001–R004 ship in the <code>governance_rules</code> table with <code>enabled=0</code> and <code>attest_level='unsigned'</code>. <code>sign-seed</code> populates <code>signature_b64</code> and lifts <code>attest_level</code> to <code>operator_signed</code>. It does not enable them.</p>
+      <div class="snip">ai-memory rules sign-seed
+<span class="cm"># →</span>
+{
+  <span class="key">"rules"</span>: [
+    { <span class="key">"id"</span>: <span class="val">"R001"</span>, <span class="key">"attest_level"</span>: <span class="val">"operator_signed"</span>, <span class="key">"signed_now"</span>: <span class="ok">true</span> },
+    { <span class="key">"id"</span>: <span class="val">"R002"</span>, <span class="key">"attest_level"</span>: <span class="val">"operator_signed"</span>, <span class="key">"signed_now"</span>: <span class="ok">true</span> },
+    { <span class="key">"id"</span>: <span class="val">"R003"</span>, <span class="key">"attest_level"</span>: <span class="val">"operator_signed"</span>, <span class="key">"signed_now"</span>: <span class="ok">true</span> },
+    { <span class="key">"id"</span>: <span class="val">"R004"</span>, <span class="key">"attest_level"</span>: <span class="val">"operator_signed"</span>, <span class="key">"signed_now"</span>: <span class="ok">true</span> }
+  ],
+  <span class="key">"signed_now"</span>: <span class="val">4</span>
+}</div>
+      <p style="margin-top:.75rem;font-size:.85rem">Seed rules: <strong>R001</strong> refuses <code>filesystem_write</code> under <code>/tmp/**</code>, <strong>R002</strong> under <code>/var/tmp/**</code>, <strong>R003</strong> under <code>/private/tmp/**</code> (macOS realpath), <strong>R004</strong> refuses <code>process_spawn</code> of <code>cargo</code> when free disk is under 20 GiB.</p>
+    </div>
+
+    <div class="step">
+      <span class="num">Step 3 — Enable each rule</span>
+      <h3>Flip <code>enabled=0 → 1</code> per rule.</h3>
+      <p><code>--sign</code> is mandatory for mutation verbs.</p>
+      <div class="snip">for r in R001 R002 R003 R004; do
+  ai-memory rules enable --id "$r" --sign
+done</div>
+    </div>
+
+    <div class="step">
+      <span class="num">Step 4 — Smoke-test enforcement</span>
+      <h3>Confirm Form 7 is live.</h3>
+      <div class="snip"><span class="cm"># refuse under R001</span>
+ai-memory rules check --kind filesystem_write \
+  --payload '{"path":"/tmp/foo.txt"}' --agent-id smoke
+<span class="cm"># → {"decision":"refuse","reason":"...no /tmp writes...","rule_id":"R001"}</span>
+
+<span class="cm"># allow (path outside refused set)</span>
+ai-memory rules check --kind filesystem_write \
+  --payload "{\"path\":\"$HOME/.local-runs/foo.txt\"}" --agent-id smoke
+<span class="cm"># → {"decision":"allow"}</span></div>
+    </div>
+
+    <div class="step">
+      <span class="num">Step 5 — Curator daemon</span>
+      <h3>Autonomous upkeep loop for Forms 1, 5, 6.</h3>
+      <p>The curator runs Form 1 background dedup sweeps on rows the in-process write-path already saw, Form 5 freshness-decay sweeps, Form 6 auto-classify backfills, and Rule-5 consolidation. <code>--max-ops</code> caps LLM-invoking operations per cycle.</p>
+      <div class="snip">mkdir -p ~/Library/Logs/ai-memory  <span class="cm"># macOS</span>
+
+ai-memory curator --daemon \
+  --interval-secs 300 \
+  --max-ops 100 \
+  &gt;&gt; ~/Library/Logs/ai-memory/curator.log 2&gt;&amp;1 &amp;</div>
+      <p style="margin-top:.5rem;font-size:.85rem">For permanence across reboot, skip this manual launch and use the OS service manager — see the next section.</p>
+    </div>
+
+    <div class="step">
+      <span class="num">Step 6 — (Optional) Reflection-pass curator</span>
+      <h3>Synthesise <code>Reflection</code> memories from co-recalled <code>Observation</code> clusters.</h3>
+      <div class="snip">ai-memory curator --reflect --all-namespaces \
+  --interval-secs 1800 \
+  --max-depth 3 \
+  &gt;&gt; ~/Library/Logs/ai-memory/curator-reflect.log 2&gt;&amp;1 &amp;</div>
+      <p style="margin-top:.5rem;font-size:.85rem">Per-namespace <code>max_reflection_depth</code> is enforced on top — <code>--max-depth</code> refuses to propose reflections that would exceed an operator-supplied cap so the curator never burns an LLM round-trip on a doomed write.</p>
+    </div>
+
+    <div class="step">
+      <span class="num">Step 7 — Per-namespace Form 5 + 6 policies</span>
+      <h3>Flip <code>shadow_mode</code>, <code>auto_classify</code>, <code>freshness_decay</code> per namespace.</h3>
+      <p>These are MCP-tool-set (<code>memory_namespace_set_standard</code>), not CLI-set. Three paths:</p>
+      <div class="snip"><span class="cm"># Option A — call memory_namespace_set_standard from any connected MCP agent:</span>
+{
+  <span class="key">"namespace"</span>: <span class="val">"main"</span>,
+  <span class="key">"shadow_mode_enabled"</span>: <span class="ok">true</span>,
+  <span class="key">"auto_classify_enabled"</span>: <span class="ok">true</span>,
+  <span class="key">"freshness_decay_enabled"</span>: <span class="ok">true</span>,
+  <span class="key">"max_reflection_depth"</span>: <span class="val">3</span>
+}
+
+<span class="cm"># Option B — POST to the HTTP daemon (ai-memory serve):</span>
+curl -X POST "http://localhost:9077/api/v1/namespaces/main/standard" \
+  -H 'Content-Type: application/json' \
+  -d '{"shadow_mode_enabled":true,"auto_classify_enabled":true,
+       "freshness_decay_enabled":true,"max_reflection_depth":3}'
+
+<span class="cm"># Option C — SQL direct (last resort, sidesteps validation):</span>
+sqlite3 "$AI_MEMORY_DB" &lt;&lt;'SQL'
+INSERT OR REPLACE INTO namespace_standards
+  (namespace, shadow_mode_enabled, auto_classify_enabled,
+   freshness_decay_enabled, max_reflection_depth, updated_at)
+VALUES ('main', 1, 1, 1, 3, strftime('%s','now'));
+SQL</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Verification</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Confirm Batman-active in one block.</h2>
+    <div class="snip"><span class="cm"># 1. Rules enabled + signed</span>
+ai-memory rules list --json | jq '[.result[] | {id, enabled, attest_level}]'
+<span class="cm"># Expect: all 4 enabled=true, attest_level="operator_signed"</span>
+
+<span class="cm"># 2. Curator processes alive</span>
+pgrep -fl ai-memory
+<span class="cm"># Expect: at least the curator --daemon line; reflection-pass if started</span>
+
+<span class="cm"># 3. Form 7 enforcement live</span>
+ai-memory rules check --kind filesystem_write \
+  --payload '{"path":"/tmp/x"}' --agent-id verify
+<span class="cm"># Expect: {"decision":"refuse","rule_id":"R001"}</span>
+
+<span class="cm"># 4. Namespace standards populated</span>
+sqlite3 "$AI_MEMORY_DB" "SELECT namespace, shadow_mode_enabled, \
+  auto_classify_enabled, freshness_decay_enabled FROM namespace_standards;"
+<span class="cm"># Expect: a row per Batman-active namespace, all flags = 1</span></div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Permanence</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Making it survive reboot.</h2>
+    <p class="lede">Operator key, signed/enabled rules, and namespace policies all live on disk or in SQLite and survive reboot. The curator daemon does not — it needs the OS service manager. The full plist / unit / scheduler XML lives in the <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/docs/batman-active-mode.md#making-it-permanent">markdown companion</a>; here is the shape:</p>
+    <div class="cards">
+      <div class="card always">
+        <div class="lbl">macOS</div>
+        <h3>launchd LaunchAgent</h3>
+        <p><code>~/Library/LaunchAgents/dev.alphaone.ai-memory.curator.plist</code> with <code>RunAtLoad=true</code>, <code>KeepAlive</code> on <code>Crashed=true</code>, <code>ProcessType=Background</code>, <code>Nice=5</code>. Load with <code>launchctl bootstrap gui/$(id -u) ...</code>.</p>
+      </div>
+      <div class="card always">
+        <div class="lbl">Linux</div>
+        <h3>systemd user unit</h3>
+        <p><code>~/.config/systemd/user/ai-memory-curator.service</code>, <code>Restart=on-failure</code>, <code>RestartSec=30s</code>, <code>Nice=5</code>. Pair with <code>loginctl enable-linger $USER</code> for headless hosts.</p>
+      </div>
+      <div class="card always">
+        <div class="lbl">Windows</div>
+        <h3>Task Scheduler</h3>
+        <p><code>New-ScheduledTask -Trigger AtLogOn</code> with <code>-RestartCount 3</code>, <code>-RestartInterval 1m</code>, <code>-StartWhenAvailable</code>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Rollback</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Going back to Batman-capable.</h2>
+    <div class="snip"><span class="cm"># Stop the daemons</span>
+launchctl bootout "gui/$(id -u)/dev.alphaone.ai-memory.curator" 2&gt;/dev/null
+<span class="cm"># Linux: systemctl --user disable --now ai-memory-curator.service</span>
+
+<span class="cm"># Disable rules (keeps signatures intact for fast re-enable)</span>
+for r in R001 R002 R003 R004; do
+  ai-memory rules disable --id "$r" --sign
+done
+
+<span class="cm"># (Optional) Flip namespace policies off</span>
+sqlite3 "$AI_MEMORY_DB" "UPDATE namespace_standards SET \
+  shadow_mode_enabled=0, auto_classify_enabled=0, freshness_decay_enabled=0;"</div>
+    <p style="margin-top:1rem;font-size:.9rem">The operator key on disk is left alone — keep it, rotate it via a fresh <code>ai-memory rules keygen</code> if you suspect compromise, or <code>rm</code> it if you genuinely want to retire the operator role on this node. Disabled rules remain in the database with signatures intact; <code>enable</code> flips them back on without re-signing.</p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Related</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Where to read more.</h2>
+    <ul style="color:var(--text-muted);font-size:.92rem;list-style:none;padding-left:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:.6rem">
+      <li>• <a href="governance.html" style="color:var(--text)">Governance atlas</a> — Allow / Deny / Pending decision tree</li>
+      <li>• <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/docs/policy-engine.md" style="color:var(--text)">policy-engine.md</a> — 7th-form deep-dive</li>
+      <li>• <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/docs/internal/batman-framework-audit.md" style="color:var(--text)">batman-framework-audit.md</a> — adversarial audit (PR #753)</li>
+      <li>• <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/docs/internal/v070-feature-inventory.md" style="color:var(--text)">v070-feature-inventory.md</a> — canonical post-wave feature inventory</li>
+      <li>• <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/docs/atomisation.md" style="color:var(--text)">atomisation.md</a> — Form 2 internals</li>
+      <li>• <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/docs/multistep-ingest.md" style="color:var(--text)">multistep-ingest.md</a> — Form 3 internals</li>
+      <li>• <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/docs/provenance.md" style="color:var(--text)">provenance.md</a> — Form 4 internals</li>
+      <li>• <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/docs/confidence-calibration.md" style="color:var(--text)">confidence-calibration.md</a> — Form 5 internals</li>
+      <li>• <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/docs/memory-kind-vocab.md" style="color:var(--text)">memory-kind-vocab.md</a> — Form 6 internals</li>
+      <li>• <a href="https://github.com/alphaonedev/ai-memory-mcp/issues/800" style="color:var(--text)">issue #800</a> — this guide's tracking issue</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p>ai-memory · <a href="https://github.com/alphaonedev/ai-memory-mcp">github.com/alphaonedev/ai-memory-mcp</a> · Apache-2.0</p>
+    <p style="margin-top:.5rem">Operator how-to per issue <a href="https://github.com/alphaonedev/ai-memory-mcp/issues/800">#800</a>. Audit trail: PR <a href="https://github.com/alphaonedev/ai-memory-mcp/pull/753">#753</a> (Batman-6-form), closeouts <a href="https://github.com/alphaonedev/ai-memory-mcp/pull/761">#761</a> · <a href="https://github.com/alphaonedev/ai-memory-mcp/pull/762">#762</a> · <a href="https://github.com/alphaonedev/ai-memory-mcp/pull/763">#763</a> · <a href="https://github.com/alphaonedev/ai-memory-mcp/pull/764">#764</a> · <a href="https://github.com/alphaonedev/ai-memory-mcp/pull/765">#765</a> · <a href="https://github.com/alphaonedev/ai-memory-mcp/pull/766">#766</a>.</p>
+  </div>
+</footer>
+
+</body>
+</html>

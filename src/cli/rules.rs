@@ -280,7 +280,17 @@ pub fn run(
                 signature: None,
                 attest_level: "unsigned".to_string(),
             };
-            let canonical = rules_store::canonical_bytes(&rule)?;
+            // v0.7.0 issue #800 / Form 7 critical fix: sign the
+            // canonical bytes that `verify_rule_signature` will read
+            // back. `canonical_bytes` (without `enabled`) and
+            // `canonical_bytes_for_signing` (with `enabled`) were
+            // out-of-sync between the signer and verifier — the
+            // signatures produced here never validated, the L1-6
+            // gate silently skipped every "operator_signed" rule,
+            // and Form 7 enforcement returned `allow` for every
+            // action. Use `canonical_bytes_for_signing` so the
+            // verifier accepts what we produce.
+            let canonical = rules_store::canonical_bytes_for_signing(&rule)?;
             let sig = signing_key.sign(&canonical);
             rule.signature = Some(sig.to_bytes().to_vec());
             rule.attest_level = OPERATOR_SIGNED_LEVEL.to_string();
@@ -314,7 +324,12 @@ pub fn run(
                 bail!("rules.enable: no rule with id={id}");
             };
             rule.enabled = true;
-            let canonical = rules_store::canonical_bytes(&rule)?;
+            // Issue #800 critical fix: signer must use the same
+            // canonical encoding as `verify_rule_signature`
+            // (otherwise the L1-6 enforcement gate skips every rule
+            // and Form 7 returns `allow` for every action). See the
+            // matching comment in the `Add` arm.
+            let canonical = rules_store::canonical_bytes_for_signing(&rule)?;
             let sig = signing_key.sign(&canonical);
             rules_store::set_enabled(&conn, &id, true)?;
             rules_store::update_signature(&conn, &id, &sig.to_bytes(), OPERATOR_SIGNED_LEVEL)?;
@@ -332,7 +347,9 @@ pub fn run(
                 bail!("rules.disable: no rule with id={id}");
             };
             rule.enabled = false;
-            let canonical = rules_store::canonical_bytes(&rule)?;
+            // Issue #800 critical fix: parity with the Enable arm —
+            // signer + verifier must use the same canonical bytes.
+            let canonical = rules_store::canonical_bytes_for_signing(&rule)?;
             let sig = signing_key.sign(&canonical);
             rules_store::set_enabled(&conn, &id, false)?;
             rules_store::update_signature(&conn, &id, &sig.to_bytes(), OPERATOR_SIGNED_LEVEL)?;
@@ -813,14 +830,75 @@ fn load_operator_signing_key_from_dir(
         }
         return Ok(signing);
     }
-    // Neither layout present — name both so the operator picks the
-    // right one to materialise.
+    // Layout 3 (#800 Gap #6 — keygen↔enable path-mismatch fallback) —
+    // `ai-memory rules keygen` writes the operator key to
+    // `<config-dir>/operator.key` (parent of the key_dir), per
+    // `resolve_operator_key_path`'s "singleton, not enumerable list"
+    // rationale documented in
+    // `migrations/sqlite/0024_v07_governance_rules.sql`. The L1-6
+    // verify path (`rules_store::resolve_operator_pubkey`) reads from
+    // the parent dir for the same reason. Before this fallback, the
+    // `enable/disable/add --sign` verbs refused with
+    // `governance.no_operator_key` even when a fresh keygen had just
+    // run. The install-batman-active.sh script worked around it by
+    // mirroring the key into both locations. This in-process fallback
+    // closes the wart so a fresh keygen + immediate enable just works.
+    if let Some(parent) = key_dir.parent() {
+        let parent_priv = parent.join("operator.key");
+        let parent_pub = parent.join("operator.key.pub");
+        if parent_priv.exists() {
+            let signing = load_operator_signing_key(&parent_priv).with_context(|| {
+                format!(
+                    "governance.no_operator_key: failed loading {}",
+                    parent_priv.display()
+                )
+            })?;
+            if parent_pub.exists() {
+                use base64::Engine;
+                let encoded = std::fs::read_to_string(&parent_pub).with_context(|| {
+                    format!(
+                        "governance.no_operator_key: read {}",
+                        parent_pub.display()
+                    )
+                })?;
+                let trimmed = encoded.trim();
+                let pub_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(trimmed)
+                    .with_context(|| {
+                        format!(
+                            "governance.no_operator_key: decode base64url public key at {}",
+                            parent_pub.display()
+                        )
+                    })?;
+                if pub_bytes.len() != ED25519_PUBLIC_LEN {
+                    bail!(
+                        "governance.no_operator_key: public key {} decoded to {} bytes (expected {ED25519_PUBLIC_LEN})",
+                        parent_pub.display(),
+                        pub_bytes.len(),
+                    );
+                }
+                if signing.verifying_key().to_bytes().as_slice() != pub_bytes.as_slice() {
+                    bail!(
+                        "governance.no_operator_key: private key {} does not match public key {}",
+                        parent_priv.display(),
+                        parent_pub.display(),
+                    );
+                }
+            }
+            return Ok(signing);
+        }
+    }
+
+    // Neither layout present — name all three so the operator picks
+    // the right one to materialise.
     bail!(
-        "governance.no_operator_key: no operator key found at {dir}. \
+        "governance.no_operator_key: no operator key found at {dir} \
+         (also checked parent dir for the keygen layout). \
          Expected either `operator.priv` + `operator.pub` (raw 32-byte pair, \
          as produced by per-agent `keypair` generation) OR \
          `operator.key` + `operator.key.pub` (raw 32-byte seed + base64url \
-         verifier, as produced by `ai-memory rules keygen`)",
+         verifier, as produced by `ai-memory rules keygen` — searched both \
+         `{dir}/` and `{dir}/../`)",
         dir = key_dir.display(),
     )
 }

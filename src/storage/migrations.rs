@@ -7,7 +7,7 @@
 //! constant, and the `migrate` function out of `src/db.rs` into
 //! this sub-module. Pure refactor — semantics unchanged. The
 //! `MAX_SUPPORTED_SCHEMA` constant in `cli::boot` must still bump
-//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 42).
+//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 43).
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
@@ -435,7 +435,7 @@ CREATE INDEX IF NOT EXISTS idx_signed_events_dlq_agent
 //       column (which is reserved for Persona-row attribution); PERF-8
 //       reads the OPPOSITE direction (the entity an observation /
 //       reflection MENTIONS).
-const CURRENT_SCHEMA_VERSION: i64 = 42;
+const CURRENT_SCHEMA_VERSION: i64 = 43;
 
 const MIGRATION_V15_SQLITE: &str =
     include_str!("../../migrations/sqlite/0010_v063_hierarchy_kg.sql");
@@ -702,6 +702,16 @@ const MIGRATION_V41_SQLITE: &str =
 // markers also runs from Rust so the column-existence probe gates it.
 const MIGRATION_V42_SQLITE: &str =
     include_str!("../../migrations/sqlite/0036_v07_auto_persona_entity_id.sql");
+// v0.7.0 issue #810 / #813 — schema v43 sqlite. Atomic
+// `(attest_level, signature)` invariant on `memory_links`: a phantom
+// row that claims `self_signed` or `peer_attested` without a
+// 64-byte signature blob is refused at the substrate layer by a
+// pair of BEFORE INSERT/UPDATE triggers. The migration also
+// backfills any pre-existing phantom row back to `unsigned`. See
+// the migration file's docstring + the upstream issue for the full
+// motivation.
+const MIGRATION_V43_SQLITE: &str =
+    include_str!("../../migrations/sqlite/0037_v07_persona_signing_atomicity.sql");
 
 // COVERAGE: per-version ALTER/CREATE branches inside this function
 // are guarded by `has_X` column-existence probes and `IF NOT EXISTS`
@@ -1741,6 +1751,20 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             conn.execute_batch(MIGRATION_V42_SQLITE)?;
         }
 
+        if version < 43 {
+            // v0.7.0 issue #810 / #813 — atomic `(attest_level,
+            // signature)` invariant on `memory_links`. The migration
+            // file is a single idempotent batch: a backfill UPDATE
+            // flipping any legacy phantom row to `unsigned`, then a
+            // BEFORE INSERT/UPDATE trigger pair refusing future
+            // writes that assert `self_signed` / `peer_attested`
+            // without a 64-byte signature blob. SQLite has no
+            // ADD COLUMN-style trigger-existence probe, so the SQL
+            // uses `DROP TRIGGER IF EXISTS` followed by `CREATE
+            // TRIGGER` — fully replay-safe.
+            conn.execute_batch(MIGRATION_V43_SQLITE)?;
+        }
+
         conn.execute("DELETE FROM schema_version", [])?;
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?1)",
@@ -1946,8 +1970,8 @@ mod tests {
         // other is a documented foot-gun. We pin the relationship
         // so a future bump is loud.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 42,
-            "module docstring advertises 42; bump the docstring when this number changes"
+            CURRENT_SCHEMA_VERSION, 43,
+            "module docstring advertises 43; bump the docstring when this number changes"
         );
     }
 

@@ -43,6 +43,7 @@ use rusqlite::OptionalExtension;
 
 use crate::autonomy::AutonomyLlm;
 use crate::db;
+use crate::identity::keypair::AgentKeypair;
 use crate::persona::{PersonaConfig, PersonaGenerator, render_persona_md};
 use crate::storage::reflect::{ReflectHooks, ReflectOutcome};
 
@@ -83,25 +84,40 @@ impl Default for AutoPersonaConfig {
 /// daemon-runtime owns the `OllamaClient` and clones an `Arc` of it
 /// into the closure). Tests pass a `StubLlm`. The worker thread opens
 /// its own SQLite connection because rusqlite handles aren't `Send`.
+/// v0.7.0 issue #811 / #813 — `keypair` carries the daemon signing
+/// keypair so the spawned worker forwards it into
+/// [`PersonaGenerator::new`]. When `None` the worker stays on the
+/// pre-#811 unsigned path; when `Some` every link + the persona
+/// artifact get signed end-to-end (BUG-B + BUG-C fix in one place).
 #[must_use]
 pub fn build_post_reflect_hook<L>(
     db_path: PathBuf,
     config: AutoPersonaConfig,
     llm: Arc<L>,
+    keypair: Option<Arc<AgentKeypair>>,
 ) -> ReflectHooks<'static>
 where
     L: AutonomyLlm + Send + Sync + 'static,
 {
     let cfg = Arc::new(config);
     let dbp = Arc::new(db_path);
+    let kp = keypair;
     let cb: Box<dyn Fn(&ReflectOutcome) + Send + Sync + 'static> = Box::new(move |outcome| {
         let cfg = cfg.clone();
         let dbp = dbp.clone();
         let llm = llm.clone();
+        let kp = kp.clone();
         let outcome_id = outcome.id.clone();
         let namespace = outcome.namespace.clone();
         std::thread::spawn(move || {
-            if let Err(e) = run_auto_persona(&dbp, &outcome_id, &namespace, &cfg, llm.as_ref()) {
+            if let Err(e) = run_auto_persona(
+                &dbp,
+                &outcome_id,
+                &namespace,
+                &cfg,
+                llm.as_ref(),
+                kp.as_deref(),
+            ) {
                 tracing::warn!(
                     target: "post_reflect.auto_persona",
                     "auto-persona for reflection {} (ns={}) failed: {}",
@@ -143,6 +159,7 @@ pub fn run_auto_persona(
     namespace: &str,
     config: &AutoPersonaConfig,
     llm: &dyn AutonomyLlm,
+    keypair: Option<&AgentKeypair>,
 ) -> anyhow::Result<()> {
     let conn = db::open(db_path)?;
     let policy = db::resolve_governance_policy(&conn, namespace).unwrap_or_default();
@@ -168,7 +185,12 @@ pub fn run_auto_persona(
         return Ok(());
     }
 
-    let generator = PersonaGenerator::new(&conn, llm, None, PersonaConfig::default());
+    // v0.7.0 issue #811 / #813 — forward the daemon's signing keypair
+    // into the generator so both the `derived_from` link writes AND
+    // the persona body get signed end-to-end. Pre-#811 this passed
+    // `None` unconditionally, leaving every auto-persona-generated
+    // row unsigned even on daemons whose `[identity]` was wired.
+    let generator = PersonaGenerator::new(&conn, llm, keypair, PersonaConfig::default());
     let persona = match generator.generate(&entity_id, namespace) {
         Ok(p) => p,
         Err(crate::persona::PersonaError::NoReflections { .. }) => return Ok(()),
@@ -393,7 +415,7 @@ mod tests {
         );
         let cfg = AutoPersonaConfig::default();
         let llm = StubLlm;
-        run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm).unwrap();
+        run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm, None).unwrap();
         // No persona row should exist.
         let cnt: i64 = conn
             .query_row(
@@ -419,7 +441,7 @@ mod tests {
         );
         let cfg = AutoPersonaConfig::default();
         let llm = StubLlm;
-        run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm).unwrap();
+        run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm, None).unwrap();
         let cnt: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM memories WHERE memory_kind = 'persona'",
@@ -438,7 +460,7 @@ mod tests {
         let b = seed_reflection(&conn, "team/alpha", "obs2 alice", "alice Y", Some("alice"));
         let cfg = AutoPersonaConfig::default();
         let llm = StubLlm;
-        run_auto_persona(&db_path, &b, "team/alpha", &cfg, &llm).unwrap();
+        run_auto_persona(&db_path, &b, "team/alpha", &cfg, &llm, None).unwrap();
         let cnt: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM memories WHERE memory_kind = 'persona'",
@@ -465,7 +487,7 @@ mod tests {
             out_dir: out.clone(),
         };
         let llm = StubLlm;
-        run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm).unwrap();
+        run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm, None).unwrap();
         let f = out.join("team_alpha").join("alice.md");
         assert!(f.exists(), "expected persona file at {}", f.display());
         let body = std::fs::read_to_string(&f).unwrap();

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — v0.7.x doc follow-ups (post-tag)
+
+### Added
+
+- **`docs/batman-active-mode.md` + `docs/batman-active-mode.html` — operator how-to for Batman Mode activation** (issue [#800](https://github.com/alphaonedev/ai-memory-mcp/issues/800)). v0.7.0 ships 6 of 6 Batman write-time-investment forms + the 7th (all `IMPLEMENTED`) but a default install is **Batman-capable, not Batman-active**: opt-ins off, operator key absent, R001–R004 unsigned and disabled, curator daemon not running, namespace policies for Form 5 shadow_mode + Form 6 auto_classify default off. New operator-facing how-to walks the 7-step activation recipe (operator keygen → sign-seed → enable R001–R004 → curator daemon → optional reflection-pass → namespace policies → permanence), per-OS persistence (launchd plist for macOS, systemd user unit for Linux, Task Scheduler for Windows), verification block, rollback path, and the known wart that `ai-memory rules keygen` writes to `<config-dir>/operator.key` while `rules enable` looks in `<config-dir>/keys/operator.key`. GitHub Pages atlas wired into the Internals dropdown of `docs/index.html`. Cross-linked from `docs/governance.md` and `README.md` v0.7.0 highlights. Acceptance test suite at `scripts/batman-mode-acceptance.sh` pins all 7 forms against a Batman-active install.
+
 ## [v0.6.4] — 2026-05-08 — `quiet-tools`
 
 **Headline:** ai-memory v0.6.4 ships 5 tools by default, not 43. Saves ~4,700 input tokens per request on Codex / Grok / Gemini / Claude-Desktop (76.4% reduction, measured against `cl100k_base`). Run `ai-memory mcp --profile full` to keep v0.6.3 behavior 1:1. See `RELEASE_NOTES_v0.6.4.md` and `docs/MIGRATION_v0.6.4.md`.

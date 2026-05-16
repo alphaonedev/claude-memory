@@ -256,7 +256,7 @@ fn test_persona_namespace_inheritance() {
     let id = seed_reflection_for_entity(&conn, "team/alpha", "alice", "obs");
     let cfg = AutoPersonaConfig::default();
     let llm = StubLlm;
-    run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm).unwrap();
+    run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm, None).unwrap();
 
     let cnt: i64 = conn
         .query_row(
@@ -280,7 +280,7 @@ fn test_persona_auto_trigger_cadence() {
     // Seed two reflections — neither triggers (count 1 and 2).
     let _r1 = seed_reflection_for_entity(&conn, "team/alpha", "alice", "obs 1");
     let r2 = seed_reflection_for_entity(&conn, "team/alpha", "alice", "obs 2");
-    run_auto_persona(&db_path, &r2, "team/alpha", &cfg, &llm).unwrap();
+    run_auto_persona(&db_path, &r2, "team/alpha", &cfg, &llm, None).unwrap();
     let cnt: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM memories WHERE memory_kind = 'persona'",
@@ -292,7 +292,7 @@ fn test_persona_auto_trigger_cadence() {
 
     // Third reflection triggers (3 % 3 == 0).
     let r3 = seed_reflection_for_entity(&conn, "team/alpha", "alice", "obs 3");
-    run_auto_persona(&db_path, &r3, "team/alpha", &cfg, &llm).unwrap();
+    run_auto_persona(&db_path, &r3, "team/alpha", &cfg, &llm, None).unwrap();
     let cnt2: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM memories WHERE memory_kind = 'persona'",
@@ -376,7 +376,7 @@ fn test_persona_file_backed_export() {
         out_dir: out.clone(),
     };
     let llm = StubLlm;
-    run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm).unwrap();
+    run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm, None).unwrap();
     let f = out.join("team_alpha").join("alice.md");
     assert!(f.exists(), "expected persona file at {}", f.display());
     let body = std::fs::read_to_string(&f).unwrap();

@@ -154,6 +154,135 @@ fn text_or_null(opt: Option<&str>) -> ciborium::Value {
     }
 }
 
+// ---------------------------------------------------------------------------
+// v0.7.0 issue #812 / #813 — SignablePersona + sign_persona
+// ---------------------------------------------------------------------------
+//
+// Mirrors the `SignableLink` shape: a single, audited surface for the
+// seven fields the persona signature commits to, encoded via RFC 8949
+// §4.2.1 deterministic CBOR. The body of the persona Markdown is
+// hashed (SHA-256) BEFORE entering the signed envelope so the payload
+// stays bounded (32 bytes) regardless of body length — Ed25519 over
+// kilobytes of prose would still work, but the bounded shape lets the
+// `signed_events` row carry the same `payload_hash` cheaply.
+
+/// The seven fields the persona signature commits to.
+///
+/// `body_md_sha256` is the SHA-256 of the UTF-8 bytes of the rendered
+/// persona Markdown body (the same string that lands in
+/// `memories.content`). Hashing it before signing keeps the canonical
+/// payload bounded at ~200 bytes regardless of body length — a 300-500
+/// word persona body would otherwise dominate the signed envelope and
+/// inflate every `signed_events.payload_hash` recomputation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignablePersona<'a> {
+    /// The Persona memory's id (UUIDv4). Stable per (entity_id,
+    /// namespace, version) tuple — `PersonaGenerator::generate` mints
+    /// it before computing the signature.
+    pub persona_id: &'a str,
+    /// Subject the persona distils. Mirrors `Persona::entity_id`.
+    pub entity_id: &'a str,
+    /// Namespace the persona was minted under.
+    pub namespace: &'a str,
+    /// Monotonic version counter — `1` on the first generation, then
+    /// `prev + 1` per regeneration. Pinned in the signature so a
+    /// regeneration cannot replay an earlier version's signed bytes.
+    pub version: i32,
+    /// RFC3339 generation timestamp pinned in `metadata.persona.generated_at`.
+    pub generated_at: &'a str,
+    /// Source reflection ids — one `derives_from` edge per element.
+    /// Order matters at the byte level (the CBOR encoder preserves the
+    /// slice order); the writer pins the order to match
+    /// `metadata.persona.sources`.
+    pub sources: &'a [String],
+    /// SHA-256 (32 bytes) over the rendered persona Markdown body's
+    /// UTF-8 bytes. Bounds the signed payload size.
+    pub body_md_sha256: &'a [u8; 32],
+}
+
+/// RFC 8949 §4.2.1 deterministic CBOR encoding of the seven signable
+/// persona fields.
+///
+/// The encoded shape is a CBOR map with seven entries keyed by the
+/// field names below. Map keys are emitted in sort order (per RFC 8949
+/// §4.2.1 "Core Deterministic Encoding"), integers use the shortest
+/// form, the body hash is encoded as CBOR `bytes`, and the source-id
+/// list is encoded as an ordered CBOR array (slice order preserved).
+/// Encoding the same `SignablePersona` twice (or on a different host)
+/// produces identical bytes — the precondition Ed25519 needs.
+///
+/// # Errors
+///
+/// Returns an error only when CBOR serialization fails — in practice
+/// unreachable for the fixed-shape input above, but surfaced as a
+/// `Result` so callers don't have to choose between panicking and
+/// silently signing a truncated payload.
+pub fn canonical_cbor_persona(p: &SignablePersona<'_>) -> Result<Vec<u8>> {
+    use std::collections::BTreeMap;
+    let mut map: BTreeMap<&str, ciborium::Value> = BTreeMap::new();
+    map.insert(
+        "persona_id",
+        ciborium::Value::Text(p.persona_id.to_string()),
+    );
+    map.insert("entity_id", ciborium::Value::Text(p.entity_id.to_string()));
+    map.insert("namespace", ciborium::Value::Text(p.namespace.to_string()));
+    map.insert(
+        "version",
+        ciborium::Value::Integer(ciborium::value::Integer::from(p.version)),
+    );
+    map.insert(
+        "generated_at",
+        ciborium::Value::Text(p.generated_at.to_string()),
+    );
+    let sources_val = ciborium::Value::Array(
+        p.sources
+            .iter()
+            .map(|s| ciborium::Value::Text(s.clone()))
+            .collect(),
+    );
+    map.insert("sources", sources_val);
+    map.insert(
+        "body_md_sha256",
+        ciborium::Value::Bytes(p.body_md_sha256.to_vec()),
+    );
+
+    let entries: Vec<(ciborium::Value, ciborium::Value)> = map
+        .into_iter()
+        .map(|(k, v)| (ciborium::Value::Text(k.to_string()), v))
+        .collect();
+    let value = ciborium::Value::Map(entries);
+
+    let mut out: Vec<u8> = Vec::with_capacity(256);
+    ciborium::ser::into_writer(&value, &mut out).context("CBOR encode SignablePersona")?;
+    Ok(out)
+}
+
+/// Sign `persona` with `keypair`'s private key.
+///
+/// Encodes the persona via [`canonical_cbor_persona`], then runs
+/// Ed25519 over the resulting bytes. Returns the 64-byte signature,
+/// ready to drop into the `metadata.persona.signature` base64 field on
+/// the persona memory and into the `signature` BLOB column on the
+/// corresponding `signed_events` row.
+///
+/// # Errors
+///
+/// - `keypair.private` is `None` (public-only handle — verification
+///   only).
+/// - The CBOR encoding step fails (in practice unreachable; surfaced
+///   for completeness).
+pub fn sign_persona(keypair: &AgentKeypair, persona: &SignablePersona<'_>) -> Result<Vec<u8>> {
+    let signing = keypair.private.as_ref().with_context(|| {
+        format!(
+            "AgentKeypair for {} has no private key — cannot sign persona",
+            keypair.agent_id
+        )
+    })?;
+    let bytes = canonical_cbor_persona(persona)?;
+    let sig = signing.sign(&bytes);
+    Ok(sig.to_bytes().to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,5 +472,208 @@ mod tests {
         let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
         // Alice's signature must not verify under Bob's public key.
         assert!(bob.public.verify(&payload, &sig).is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // v0.7.0 issue #812 / #813 — SignablePersona + sign_persona
+    // -----------------------------------------------------------------
+
+    fn body_hash_fixture(seed: u8) -> [u8; 32] {
+        let mut h = [seed; 32];
+        h[0] ^= 0xA5;
+        h
+    }
+
+    fn persona_fixture() -> ([u8; 32], Vec<String>) {
+        let body = body_hash_fixture(0x10);
+        let sources = vec!["src-1".to_string(), "src-2".to_string()];
+        (body, sources)
+    }
+
+    #[test]
+    fn canonical_cbor_persona_is_deterministic() {
+        // Mirrors the link-side determinism test: three distinct
+        // permutations of the SignablePersona literal must collapse
+        // to identical bytes because the BTreeMap key-sort runs at
+        // encode time. Catches a regression where a future refactor
+        // swaps the BTreeMap for a HashMap or drops the explicit sort.
+        let (body, sources) = persona_fixture();
+        let persona_id = "persona-001";
+        let entity_id = "alice";
+        let namespace = "team/alpha";
+        let version = 1_i32;
+        let generated_at = "2026-05-16T12:00:00+00:00";
+
+        let perm1 = SignablePersona {
+            persona_id,
+            entity_id,
+            namespace,
+            version,
+            generated_at,
+            sources: &sources,
+            body_md_sha256: &body,
+        };
+        let perm2 = SignablePersona {
+            body_md_sha256: &body,
+            sources: &sources,
+            generated_at,
+            version,
+            namespace,
+            entity_id,
+            persona_id,
+        };
+        let perm3 = SignablePersona {
+            namespace,
+            version,
+            sources: &sources,
+            entity_id,
+            body_md_sha256: &body,
+            generated_at,
+            persona_id,
+        };
+
+        let b1 = canonical_cbor_persona(&perm1).expect("encode perm1");
+        let b2 = canonical_cbor_persona(&perm2).expect("encode perm2");
+        let b3 = canonical_cbor_persona(&perm3).expect("encode perm3");
+        assert_eq!(b1, b2);
+        assert_eq!(b2, b3);
+        // Stable across repeated encodes of the same instance.
+        assert_eq!(b1, canonical_cbor_persona(&perm1).expect("re-encode"));
+    }
+
+    #[test]
+    fn canonical_cbor_persona_differs_on_field_change() {
+        let (body, sources) = persona_fixture();
+        let base = SignablePersona {
+            persona_id: "p",
+            entity_id: "alice",
+            namespace: "team/alpha",
+            version: 1,
+            generated_at: "2026-05-16T00:00:00+00:00",
+            sources: &sources,
+            body_md_sha256: &body,
+        };
+        // Flip the body hash — different bytes must result.
+        let other_body = body_hash_fixture(0x99);
+        let altered = SignablePersona {
+            body_md_sha256: &other_body,
+            ..base.clone()
+        };
+        let a = canonical_cbor_persona(&base).expect("encode base");
+        let b = canonical_cbor_persona(&altered).expect("encode altered");
+        assert_ne!(a, b, "different body hash must produce different bytes");
+    }
+
+    #[test]
+    fn canonical_cbor_persona_handles_empty_sources() {
+        let body = body_hash_fixture(0x01);
+        let sources: Vec<String> = Vec::new();
+        let persona = SignablePersona {
+            persona_id: "p",
+            entity_id: "alice",
+            namespace: "team/alpha",
+            version: 1,
+            generated_at: "2026-05-16T00:00:00+00:00",
+            sources: &sources,
+            body_md_sha256: &body,
+        };
+        // Encoding must not panic on an empty source list. Two
+        // encodes still match (determinism over empty array).
+        let bytes = canonical_cbor_persona(&persona).expect("encode empty-sources");
+        assert!(!bytes.is_empty());
+        assert_eq!(bytes, canonical_cbor_persona(&persona).expect("re-encode"));
+    }
+
+    #[test]
+    fn sign_persona_round_trip() {
+        let kp = keypair::generate("ai:curator").expect("generate");
+        let (body, sources) = persona_fixture();
+        let persona = SignablePersona {
+            persona_id: "persona-xyz",
+            entity_id: "alice",
+            namespace: "team/alpha",
+            version: 1,
+            generated_at: "2026-05-16T12:00:00+00:00",
+            sources: &sources,
+            body_md_sha256: &body,
+        };
+        let sig_bytes = sign_persona(&kp, &persona).expect("sign");
+        assert_eq!(sig_bytes.len(), 64, "Ed25519 signatures are 64 bytes");
+
+        let payload = canonical_cbor_persona(&persona).expect("encode");
+        let mut sig_arr = [0u8; 64];
+        sig_arr.copy_from_slice(&sig_bytes);
+        let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+        kp.public.verify(&payload, &sig).expect("verify");
+    }
+
+    #[test]
+    fn sign_persona_refuses_public_only_keypair() {
+        let kp = keypair::generate("ai:curator").unwrap();
+        let pub_only = AgentKeypair {
+            agent_id: "ai:curator".to_string(),
+            public: kp.public,
+            private: None,
+        };
+        let (body, sources) = persona_fixture();
+        let persona = SignablePersona {
+            persona_id: "p",
+            entity_id: "alice",
+            namespace: "team/alpha",
+            version: 1,
+            generated_at: "2026-05-16T00:00:00+00:00",
+            sources: &sources,
+            body_md_sha256: &body,
+        };
+        let err = sign_persona(&pub_only, &persona).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("no private key"), "got: {msg}");
+    }
+
+    #[test]
+    fn sign_persona_does_not_verify_against_other_pub() {
+        // Cross-key non-replayability — Alice's signature must not
+        // verify under Bob's public key.
+        let alice = keypair::generate("alice").unwrap();
+        let bob = keypair::generate("bob").unwrap();
+        let (body, sources) = persona_fixture();
+        let persona = SignablePersona {
+            persona_id: "p",
+            entity_id: "alice",
+            namespace: "team/alpha",
+            version: 1,
+            generated_at: "2026-05-16T00:00:00+00:00",
+            sources: &sources,
+            body_md_sha256: &body,
+        };
+        let sig_bytes = sign_persona(&alice, &persona).unwrap();
+        let payload = canonical_cbor_persona(&persona).unwrap();
+        let mut sig_arr = [0u8; 64];
+        sig_arr.copy_from_slice(&sig_bytes);
+        let sig = ed25519_dalek::Signature::from_bytes(&sig_arr);
+        assert!(bob.public.verify(&payload, &sig).is_err());
+    }
+
+    #[test]
+    fn canonical_cbor_persona_version_change_produces_different_bytes() {
+        // Version is part of the signed payload so a v1 signature
+        // cannot be replayed as a v2 signature — pin that.
+        let (body, sources) = persona_fixture();
+        let v1 = SignablePersona {
+            persona_id: "p",
+            entity_id: "alice",
+            namespace: "team/alpha",
+            version: 1,
+            generated_at: "2026-05-16T00:00:00+00:00",
+            sources: &sources,
+            body_md_sha256: &body,
+        };
+        let v2 = SignablePersona {
+            version: 2,
+            ..v1.clone()
+        };
+        let a = canonical_cbor_persona(&v1).expect("encode v1");
+        let b = canonical_cbor_persona(&v2).expect("encode v2");
+        assert_ne!(a, b);
     }
 }
