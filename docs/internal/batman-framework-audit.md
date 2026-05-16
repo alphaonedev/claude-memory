@@ -15,6 +15,14 @@
 >
 > **Post-closeout state at HEAD `c9472c1`: all 7 forms IMPLEMENTED.**
 >
+> **Post-closeout state at HEAD `d17725c` (2026-05-15, ship-readiness
+> sweep): all 7 forms remain IMPLEMENTED with hardened acceptance
+> suites.** See [§"POST-CLOSEOUT STATE (2026-05-15)"](#post-closeout-state-2026-05-15)
+> at the end of this document for the per-form ship-readiness audit
+> trail (Cluster A-K fix PRs) and the v0.7.0 ship-readiness initiative
+> ([#767](https://github.com/alphaonedev/ai-memory-mcp/issues/767))
+> rollup.
+>
 > - Form 1 — `src/synthesis/mod.rs` + `tests/form_1_synthesis.rs` (issue [#754](https://github.com/alphaonedev/ai-memory-mcp/issues/754)).
 > - Form 2 — `src/atomisation/mod.rs` + `Synchronous` mode branch in `src/hooks/pre_store/auto_atomise.rs` + `tests/form_2_synchronous_atomise.rs` (issue [#755](https://github.com/alphaonedev/ai-memory-mcp/issues/755)).
 > - Form 3 — `src/multistep_ingest/{mod,executor,helpers,pipeline,cache}.rs` + `tests/form_3_multistep_ingest.rs` (issue [#756](https://github.com/alphaonedev/ai-memory-mcp/issues/756)).
@@ -37,6 +45,15 @@
 > Methodology: adversarial code-evidence verification per the 4-step protocol. Read-only on source code. Classifications biased LOWER on uncertainty (Rule 6). No reliance on Strategic Nugget #014 / planning docs (Rule 3).
 
 ## Executive summary
+
+> **Post-closeout (2026-05-15, HEAD `d17725c`):** all 7 forms are
+> IMPLEMENTED at substrate-evidence level. See
+> [§"POST-CLOSEOUT STATE (2026-05-15)"](#post-closeout-state-2026-05-15)
+> at the end of this document for the per-form ship-readiness audit
+> trail (Cluster A-K fix PRs against the original audit findings) and
+> the v0.7.0 ship-readiness initiative ([#767](https://github.com/alphaonedev/ai-memory-mcp/issues/767))
+> rollup. The audit body below is preserved verbatim as the historical
+> record that drove the wave.
 
 ai-memory v0.7.0 (commit `53b4d39`) implements **0 of Batman's 6 forms cleanly (IMPLEMENTED)**, **4 partially (Forms 2, 4, 5, 6)**, and **2 absent (Forms 1, 3)**. The 7th-form claim (substrate-authority enforcement at write time via K9/Layer-4) is **PARTIAL** — substrate-INTERNAL write-path enforcement (`memory_store`/`memory_link`/`memory_delete`/`memory_archive`/`memory_consolidate`/`memory_replay`) is wired and substrate-authoritative; agent-EXTERNAL enforcement (Bash/FilesystemWrite/NetworkRequest/ProcessSpawn) is `callable but un-wired` (`src/governance/agent_action.rs:38-42`). The X-post claim "ships 5 of Batman's 6 forms plus a 7th" materially overcounts: code-evidence supports zero clean implementations and partial coverage at best on the four forms ai-memory shares vocabulary with.
 
@@ -491,3 +508,68 @@ Triggers NOT fired:
 - **Trigger 2 (Layer 4 has no implementation code).** Substrate-INTERNAL Layer-4 is wired (K9 + `enforce_governance` + `GOVERNANCE_PRE_WRITE` hook). The 7th-form claim does NOT collapse.
 - **Trigger 4 (WT-1 atomisation materially less complete than the WT-1 audit screenshot suggested).** The atomisation engine landed and is structurally sound; the divergence from Batman's Form 2 is the embed-before-decompose order, not implementation incompleteness.
 - **Trigger 5 (ai-memory implements something genuinely novel that should arguably be 7th/8th/Nth form).** The substrate-internal authoritative governance pipeline + signed_events chain is novel and procurement-defensible; it's effectively what the 7th-form claim is pointing at, so it doesn't qualify as an "Nth form Batman missed". The signed_events cross-row hash chain (schema v34, #698 V-4 closeout) IS an arguable candidate for a procurement story Batman's framework doesn't cover — append-only tamper-evident SQL-side chain mirroring the JSONL audit log — but classifying that as an 8th-form would be a marketing choice, not a code-evidence finding.
+
+---
+
+## POST-CLOSEOUT STATE (2026-05-15)
+
+**Date of post-closeout:** 2026-05-15.
+**Final commit hash (audit-doc post-closeout snapshot):** `d17725c` (HEAD
+of `fix/v0.7.0-cluster-k`, the v0.7.0 ship-readiness omnibus PR base).
+**Original audit baseline commit:** `53b4d39` — found 0 of 6 Batman
+forms IMPLEMENTED, 4 PARTIAL (Forms 2, 4, 5, 6), 2 ABSENT (Forms 1, 3),
+and the 7th-form claim PARTIAL (substrate-INTERNAL only).
+**Initiative tracking issue:** [#767](https://github.com/alphaonedev/ai-memory-mcp/issues/767)
+— v0.7.0 ship-readiness, maximum-rigor per-feature requirements
+coverage + 6-agent review + 100% fix-all.
+
+The original audit drove the Forms 1-6 + 7th-form closeout wave, and
+the subsequent 6-reviewer ship-readiness wave drove a 12-cluster
+fix-all (A-L) campaign. As of `d17725c`, all 7 forms are
+**IMPLEMENTED** at the substrate-evidence level, each with acceptance
+suites that pin both the original Batman criterion AND the
+ship-readiness review's adversarial check on the implementation
+itself.
+
+### Per-form post-closeout state
+
+| Form | State at `53b4d39` | State at `d17725c` | Closing PRs |
+|---|---|---|---|
+| Form 1 — online dedup-and-synthesis | ABSENT | **IMPLEMENTED** | [#762](https://github.com/alphaonedev/ai-memory-mcp/pull/762) (Form 1 substrate land), [#777](https://github.com/alphaonedev/ai-memory-mcp/pull/777) (Cluster B — synthesis security + verdict-application + prompt-injection guard) |
+| Form 2 — atomisation (decompose-before-embed) | PARTIAL | **IMPLEMENTED** | [#762](https://github.com/alphaonedev/ai-memory-mcp/pull/762) (Form 2 synchronous-mode policy) |
+| Form 3 — multi-step ingest with prompt-cache reuse | ABSENT | **IMPLEMENTED** | [#763](https://github.com/alphaonedev/ai-memory-mcp/pull/763) (Form 3 orchestrator + deterministic helpers + prompt-cache) |
+| Form 4 — fact-provenance (citations + source-as-URI + atom-span) | PARTIAL | **IMPLEMENTED** | [#764](https://github.com/alphaonedev/ai-memory-mcp/pull/764) (Form 4 fields + recall surface), [#771](https://github.com/alphaonedev/ai-memory-mcp/pull/771) (Cluster A — UTF-8 panic + corrupt-JSON tracing + atomisation idempotency) |
+| Form 5 — confidence (auto + shadow + decay + calibration) | PARTIAL | **IMPLEMENTED** | [#766](https://github.com/alphaonedev/ai-memory-mcp/pull/766) (Form 5 substrate + `memory_calibrate_confidence`), [#774](https://github.com/alphaonedev/ai-memory-mcp/pull/774) (Cluster G — shadow-mode unboundedness + sampling cache + streaming calibration) |
+| Form 6 — type tagging (Batman vocabulary) | PARTIAL | **IMPLEMENTED** | [#765](https://github.com/alphaonedev/ai-memory-mcp/pull/765) (Form 6 vocabulary expansion + auto-classify hook), [#772](https://github.com/alphaonedev/ai-memory-mcp/pull/772) (Cluster E — kind-filter inversion fix + Skills CLI/HTTP parity) |
+| 7th-form — substrate-authority at write (agent-EXTERNAL Layer-4) | PARTIAL (substrate-INTERNAL only) | **IMPLEMENTED** (substrate-INTERNAL + agent-EXTERNAL via [#760](https://github.com/alphaonedev/ai-memory-mcp/issues/760)) | [#761](https://github.com/alphaonedev/ai-memory-mcp/pull/761) (7th-form Layer-4 wiring), [#775](https://github.com/alphaonedev/ai-memory-mcp/pull/775) (Cluster D — L1-6 fail-closed knob + handle_deref IDOR + matcher correctness) |
+
+### Cross-cutting infrastructure landed in the ship-readiness wave
+
+| Concern | Closing PR | Cluster |
+|---|---|---|
+| Signed-events chain integrity (BEGIN IMMEDIATE + drainer DLQ + HMAC negative tests) | [#770](https://github.com/alphaonedev/ai-memory-mcp/pull/770) | C |
+| Docs + cookbook + CLI-help accuracy sweep + 6 new MVP docs | [#768](https://github.com/alphaonedev/ai-memory-mcp/pull/768) | H |
+| CI postgres integration tests + memory_kind backfill pinning | [#773](https://github.com/alphaonedev/ai-memory-mcp/pull/773) | I |
+| Migration filename collision cleanup + uniqueness test | [#769](https://github.com/alphaonedev/ai-memory-mcp/pull/769) | J |
+| QW-4 disposition + operator-decision ADRs + accepted-debt sweep + audit post-closeout + issue cleanup | this PR | K |
+
+### Audit-honest framing post-closeout
+
+The X-post claim "ai-memory v0.7.0 ships 5 of Batman's 6 forms plus a
+7th" — which the original audit found materially overcounted — is now
+**defensibly true at HEAD `d17725c`**: all 6 Batman forms are
+IMPLEMENTED at substrate-evidence level, AND the 7th form
+(substrate-authority at write time, covering BOTH substrate-INTERNAL
+and agent-EXTERNAL Layer-4) is IMPLEMENTED. The honest-framing
+amendment vs. the original audit's recommended caveat is that the
+ship-readiness wave actually closed every gap the audit flagged
+rather than rephrasing the public claim.
+
+The canonical post-wave feature inventory remains
+[`docs/internal/v070-feature-inventory.md`](v070-feature-inventory.md).
+The full review-and-fix campaign rollup lives in
+[`docs/internal/v070-review-synthesis.md`](v070-review-synthesis.md)
+and [`docs/internal/v070-ship-readiness-final.md`](v070-ship-readiness-final.md).
+
+— Cold mountain.
+

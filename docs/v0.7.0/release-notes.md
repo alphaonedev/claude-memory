@@ -640,7 +640,11 @@ folded into the v0.7.0 tag rather than slipping to v0.7.1:
     MCP tools, substrate `storage::insert` pre-write hook. Doc:
     [`docs/policy-engine.md`](../policy-engine.md) +
     [`docs/governance/agent-action-rules.md`](../governance/agent-action-rules.md).
-- **QW (Tencent quick-wins).**
+- **QW (Tencent quick-wins).** Four QW items are referenced in the
+  Tencent positioning work; **three carry code (QW-1/QW-2/QW-3); QW-4
+  is a docs-only deliverable** (competitive positioning page +
+  landscape comparison, no substrate or wire-surface change). Per
+  [`docs/internal/v070-ship-readiness-adrs.md` ADR-1](../internal/v070-ship-readiness-adrs.md#adr-1--qw-4-disposition-docs-only-no-code-feature).
   - **QW-1** file-backed reflection chain export — `memory_export_reflection`
     + `auto_export_reflections_to_filesystem` namespace policy.
     Default destination `~/.ai-memory/reflections/<ns>/<id>.md`.
@@ -654,6 +658,11 @@ folded into the v0.7.0 tag rather than slipping to v0.7.1:
     addressable blob store with a background TTL sweep. Doc:
     [`docs/context-offload.md`](../context-offload.md). Cookbook:
     `cookbook/context-offload/`.
+  - **QW-4** *(docs-only — competitive positioning)* — Tencent
+    landscape page at [`docs/positioning.md`](../positioning.md).
+    Not a code feature; included for inventory completeness so a
+    procurement reader counting "QW items shipped" against the
+    Tencent analysis sees the same denominator.
 - **Reconciliation security sweep (11 late-cycle commits, merged
   into trunk at `64528b1`).** K9 governance gate on `handle_kg_invalidate`
   (`a41c08f`), K10 SSE `host:` prefix bypass (`7496a6e`), K10 HMAC
