@@ -419,11 +419,18 @@ impl<'a> CompactionPass for ReflectionPass<'a> {
             metadata: summary.metadata.clone(),
         };
 
-        match reflect_with_hooks(
-            self.conn,
-            &input,
-            &crate::storage::reflect::ReflectHooks::empty(),
-        ) {
+        // Issue #815 — thread the curator's signing keypair into the
+        // hook bundle so the substrate's `create_link_signed` path
+        // sees it and produces `attest_level='self_signed'` rows for
+        // every `reflects_on` edge this pass writes. Pre-#815 the
+        // call site passed `ReflectHooks::empty()`, dropping
+        // `self.keypair` on the floor and writing unsigned edges
+        // despite the comment at `verify()` claiming otherwise.
+        let hooks = crate::storage::reflect::ReflectHooks {
+            active_keypair: self.keypair,
+            ..crate::storage::reflect::ReflectHooks::empty()
+        };
+        match reflect_with_hooks(self.conn, &input, &hooks) {
             Ok(_outcome) => Ok(()),
             Err(ReflectError::DepthExceeded {
                 attempted,

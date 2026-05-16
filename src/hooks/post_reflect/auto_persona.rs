@@ -115,6 +115,15 @@ where
     ReflectHooks {
         pre_reflect: None,
         post_reflect: Some(cb),
+        // Issue #815 — the auto-persona hook signs the persona
+        // artifact via its own keypair forwarded to
+        // `PersonaGenerator::new`, but it does NOT sign the
+        // reflection's `reflects_on` edges (that's the storage layer's
+        // concern, signaled via this field). The handler that
+        // installed this hook overrides `active_keypair` to its own
+        // active keypair so the upstream `create_link_signed` path
+        // inside `storage::reflect_with_hooks` sees the keypair too.
+        active_keypair: None,
     }
 }
 

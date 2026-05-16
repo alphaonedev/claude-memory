@@ -180,6 +180,13 @@ pub fn build_post_reflect_hook(
     ReflectHooks {
         pre_reflect: None,
         post_reflect: Some(cb),
+        // Issue #815 — auto-export does not need a signing keypair;
+        // signing is owned by the reflect handler that built this hook
+        // bundle. The handler-side construction in
+        // `mcp::tools::reflect::handle_reflect` overrides this field
+        // when an active keypair is available, so the field is left
+        // None here and re-assigned by the caller.
+        active_keypair: None,
     }
 }
 

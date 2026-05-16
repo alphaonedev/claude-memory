@@ -9,6 +9,7 @@
 //! and `emit_reflection_depth_exceeded_audit` out of `src/db.rs` into
 //! this sub-module. Pure refactor — semantics unchanged.
 
+use crate::identity::keypair::AgentKeypair;
 use crate::models::ConfidenceSource;
 use anyhow::Context;
 use chrono::Utc;
@@ -16,7 +17,9 @@ use rusqlite::Connection;
 
 use crate::models::{GovernancePolicy, Memory, MemoryKind, Tier};
 
-use super::{ConflictMode, create_link, get, insert_with_conflict, resolve_governance_policy};
+use super::{
+    ConflictMode, create_link_signed, get, insert_with_conflict, resolve_governance_policy,
+};
 
 /// Typed substrate-level error surface for [`reflect`]. Kept distinct
 /// from [`crate::errors::MemoryError`] so the SQLite substrate layer
@@ -143,17 +146,28 @@ pub struct ReflectHooks<'a> {
     /// (mirrors [`crate::hooks::events::ReflectResult`]). Notify-class
     /// — return value is ignored; the reflect already landed.
     pub post_reflect: Option<Box<dyn Fn(&ReflectOutcome) + Send + Sync + 'a>>,
+    /// Issue #815 — signing keypair for the `reflects_on` edges
+    /// written inside the reflect transaction. When `Some`, each
+    /// edge is persisted via [`create_link_signed`] with this
+    /// keypair, producing `attest_level='self_signed'` rows with a
+    /// 64-byte Ed25519 signature. When `None`, edges land as
+    /// `attest_level='unsigned'` — the v0.6.x behaviour and the
+    /// state of the world before #815 fixed the storage::reflect
+    /// gap that #814 left behind.
+    pub active_keypair: Option<&'a AgentKeypair>,
 }
 
 impl<'a> ReflectHooks<'a> {
-    /// Empty bundle — both callbacks `None`. The default used by
-    /// callers that don't want to register hooks (today: the MCP
-    /// handler at `mcp::handle_reflect`).
+    /// Empty bundle — both callbacks `None`, no signing keypair.
+    /// The default used by callers that don't want to register
+    /// hooks AND don't have a keypair to sign with (test harnesses,
+    /// the thin [`reflect`] shim that preserves pre-#815 behaviour).
     #[must_use]
     pub fn empty() -> Self {
         Self {
             pre_reflect: None,
             post_reflect: None,
+            active_keypair: None,
         }
     }
 }
@@ -169,6 +183,10 @@ impl<'a> std::fmt::Debug for ReflectHooks<'a> {
         f.debug_struct("ReflectHooks")
             .field("pre_reflect", &self.pre_reflect.as_ref().map(|_| "<fn>"))
             .field("post_reflect", &self.post_reflect.as_ref().map(|_| "<fn>"))
+            .field(
+                "active_keypair",
+                &self.active_keypair.map(|k| k.agent_id.as_str()),
+            )
             .finish()
     }
 }
@@ -528,8 +546,29 @@ pub fn reflect_with_hooks(
         for src_id in &input.source_ids {
             validate::validate_link(&actual_id, src_id, "reflects_on")
                 .map_err(|e| ReflectError::Validation(e.to_string()))?;
-            create_link(conn, &actual_id, src_id, "reflects_on")
-                .map_err(|e| ReflectError::Database(e.to_string()))?;
+            // Issue #815 — the pre-#815 path called `create_link` here,
+            // which always produced `attest_level='unsigned'` rows for
+            // every reflects_on edge regardless of whether the caller
+            // had loaded a daemon keypair. Route through the signed
+            // helper instead so the keypair threaded through the
+            // hook bundle (MCP-tier handler, curator daemon) reaches
+            // the link insert and the edges land as `self_signed`
+            // with a 64-byte Ed25519 signature. Callers that pass
+            // `active_keypair: None` (the `reflect()` shim, the
+            // auto-export hook constructor's no-keypair test paths)
+            // get the previous unsigned behaviour — `create_link_signed`
+            // matches `create_link`'s output when the keypair is
+            // absent (verified by the existing
+            // `create_link_signed_without_keypair_is_unsigned` test in
+            // `src/storage/mod.rs`).
+            create_link_signed(
+                conn,
+                &actual_id,
+                src_id,
+                "reflects_on",
+                hooks.active_keypair,
+            )
+            .map_err(|e| ReflectError::Database(e.to_string()))?;
         }
         Ok(actual_id)
     })();

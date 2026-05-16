@@ -473,6 +473,7 @@ fn mid_tx_target_deletion_rolls_back_reflection_atomically() {
             ReflectHookDecision::Allow
         })),
         post_reflect: None,
+        active_keypair: None,
     };
 
     let input = reflect_input(
@@ -565,6 +566,7 @@ fn post_reflect_panic_leaves_reflection_committed_documented_gap() {
                 *outcome_capture.lock().unwrap() = Some(o.id.clone());
                 panic!("intentional panic in post_reflect handler");
             })),
+            active_keypair: None,
         };
         db::reflect_with_hooks(&conn, &input, &hooks)
     }));

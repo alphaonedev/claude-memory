@@ -489,6 +489,7 @@ fn hook_veto_refuses_reflection_without_depth_cap_audit() {
             code: 451,
         })),
         post_reflect: None,
+        active_keypair: None,
     };
     let err = db::reflect_with_hooks(&conn, &input, &hooks).expect_err("veto refuses");
     match err {
@@ -541,6 +542,7 @@ fn post_reflect_fires_after_commit_observable_on_same_connection() {
         post_reflect: Some(Box::new(move |o: &ReflectOutcome| {
             *captured_id_clone.lock().unwrap() = Some(o.id.clone());
         })),
+        active_keypair: None,
     };
     let outcome = db::reflect_with_hooks(&conn, &input, &hooks).expect("reflect ok");
     let captured = captured_id.lock().unwrap().clone();
@@ -593,6 +595,7 @@ fn both_pre_and_post_reflect_fire_on_successful_reflect() {
                 Ordering::SeqCst,
             );
         })),
+        active_keypair: None,
     };
     let _ = db::reflect_with_hooks(&conn, &input, &hooks).expect("reflect ok");
 

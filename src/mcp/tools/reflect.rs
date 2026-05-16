@@ -31,6 +31,15 @@ pub(super) fn handle_reflect(
     embedder: Option<&dyn Embed>,
     vector_index: Option<&VectorIndex>,
     mcp_client: Option<&str>,
+    // Issue #815 — when `Some`, every `reflects_on` edge written by
+    // this reflect call is signed with this keypair. When `None`
+    // (operator hasn't generated a daemon keypair, or the caller is
+    // a test harness without one) the edges land unsigned, matching
+    // the pre-#815 behaviour. Same signature shape as `handle_link`
+    // and `handle_persona_generate` use for the H2 link-signing
+    // surface so the dispatcher in `mcp::mod` can pass through the
+    // shared `active_keypair` argument verbatim.
+    active_keypair: Option<&crate::identity::keypair::AgentKeypair>,
 ) -> Result<Value, String> {
     // ─── Argument parsing ───────────────────────────────────────────
     let source_ids_arr = params["source_ids"]
@@ -200,14 +209,21 @@ pub(super) fn handle_reflect(
             .and_then(|ns| db::resolve_governance_policy(conn, ns))
             .map(|p| p.effective_auto_export_reflections_to_filesystem())
             .unwrap_or(false);
-        if auto_export {
+        let mut h = if auto_export {
             crate::hooks::post_reflect::build_post_reflect_hook(
                 db_path.to_path_buf(),
                 crate::hooks::post_reflect::AutoExportConfig::default_for_home(),
             )
         } else {
             db::ReflectHooks::empty()
-        }
+        };
+        // Issue #815 — `build_post_reflect_hook` leaves `active_keypair`
+        // None because signing is the handler's concern, not the
+        // auto-export hook's. Plug the dispatcher-supplied keypair in
+        // so the `create_link_signed` call inside
+        // `storage::reflect_with_hooks` reaches the signed path.
+        h.active_keypair = active_keypair;
+        h
     };
     let outcome = match db::reflect_with_hooks(conn, &input, &hooks) {
         Ok(o) => o,
@@ -357,6 +373,7 @@ mod tests {
             None,
             None,
             None,
+            None, // active_keypair — #815 regression coverage uses the dedicated mcp/mod.rs test
         )
         .unwrap_err();
         assert!(err.contains("source_ids"), "got: {err}");
@@ -373,6 +390,7 @@ mod tests {
             None,
             None,
             None,
+            None, // active_keypair — #815 regression coverage uses the dedicated mcp/mod.rs test
         )
         .unwrap_err();
         assert!(err.contains("empty"), "got: {err}");
@@ -389,6 +407,7 @@ mod tests {
             None,
             None,
             None,
+            None, // active_keypair — #815 regression coverage uses the dedicated mcp/mod.rs test
         )
         .unwrap_err();
         assert!(err.contains("must be a string"), "got: {err}");
@@ -405,6 +424,7 @@ mod tests {
             None,
             None,
             None,
+            None, // active_keypair — #815 regression coverage uses the dedicated mcp/mod.rs test
         )
         .unwrap_err();
         assert!(err.contains("title"), "got: {err}");
@@ -421,6 +441,7 @@ mod tests {
             None,
             None,
             None,
+            None, // active_keypair — #815 regression coverage uses the dedicated mcp/mod.rs test
         )
         .unwrap_err();
         assert!(err.contains("content"), "got: {err}");
@@ -437,6 +458,7 @@ mod tests {
             None,
             None,
             None,
+            None, // active_keypair — #815 regression coverage uses the dedicated mcp/mod.rs test
         )
         .unwrap_err();
         assert!(err.contains("invalid tier"), "got: {err}");
@@ -457,6 +479,7 @@ mod tests {
             None,
             None,
             None,
+            None, // active_keypair — #815 regression coverage uses the dedicated mcp/mod.rs test
         )
         .unwrap_err();
         assert!(err.contains("source memory not found"), "got: {err}");
@@ -478,6 +501,7 @@ mod tests {
             None,
             None,
             None,
+            None, // active_keypair — #815 regression coverage uses the dedicated mcp/mod.rs test
         )
         .expect("ok");
         assert!(resp["id"].is_string());
@@ -502,6 +526,7 @@ mod tests {
             Some(&emb),
             None,
             None,
+            None, // active_keypair — #815 regression coverage uses the dedicated mcp/mod.rs test
         )
         .expect("ok");
         let new_id = resp["id"].as_str().unwrap();
@@ -551,6 +576,7 @@ mod tests {
             None,
             None,
             None,
+            None, // active_keypair — #815 regression coverage uses the dedicated mcp/mod.rs test
         )
         .expect("ok");
         // Approval gate fires before substrate write.

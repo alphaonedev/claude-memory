@@ -931,9 +931,15 @@ fn handle_request(
                 // v0.7.0 Task 4/8 (recursive learning, issue #655) —
                 // substrate-native reflection primitive. See
                 // `handle_reflect` for the contract.
-                "memory_reflect" => {
-                    handle_reflect(conn, db_path, arguments, embedder, vector_index, mcp_client)
-                }
+                "memory_reflect" => handle_reflect(
+                    conn,
+                    db_path,
+                    arguments,
+                    embedder,
+                    vector_index,
+                    mcp_client,
+                    active_keypair,
+                ),
                 "memory_capabilities" => {
                     // v0.6.4-006 — runtime expansion via family enumeration.
                     // When `family` is set, route to the family-listing path
@@ -3408,6 +3414,152 @@ mod tests {
             .unwrap();
         let sig_bytes = sig.expect("signed link must persist a signature blob");
         assert_eq!(sig_bytes.len(), 64);
+    }
+
+    // Issue #815 — when an active keypair is plumbed through to the
+    // memory_reflect MCP handler, every reflects_on edge written
+    // inside the reflect transaction lands as attest_level =
+    // 'self_signed' with a 64-byte Ed25519 signature. Mirrors the
+    // `handle_link_with_active_keypair_returns_self_signed` shape
+    // above so the substrate's two write-paths-that-create-links
+    // (memory_link, memory_reflect) are pinned by parallel
+    // regression tests.
+    //
+    // Pre-#815 every reflects_on edge from memory_reflect landed
+    // as 'unsigned' because storage::reflect_with_hooks called
+    // `create_link` (the unsigned helper) regardless of whether
+    // the caller had loaded a daemon keypair. The fix routes
+    // through `create_link_signed` with the keypair threaded via
+    // ReflectHooks::active_keypair; this test pins that contract.
+    #[test]
+    fn handle_reflect_with_active_keypair_returns_signed_reflects_on_edges() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        // Three source observations the reflection will fan out to.
+        // Three is the minimum interesting count: it pins that every
+        // link in the loop gets signed, not just the first.
+        let mut source_ids = Vec::new();
+        for tag in ["src-a", "src-b", "src-c"] {
+            let mem = Memory {
+                id: uuid::Uuid::new_v4().to_string(),
+                tier: Tier::Mid,
+                namespace: "issue-815-reflect".into(),
+                title: tag.into(),
+                content: format!("body for {tag}"),
+                tags: vec![],
+                priority: 5,
+                confidence: 1.0,
+                source: "test".into(),
+                access_count: 0,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: json!({}),
+                reflection_depth: 0,
+                memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
+                citations: Vec::new(),
+                source_uri: None,
+                source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
+            };
+            source_ids.push(db::insert(&conn, &mem).unwrap());
+        }
+        let req = make_tools_call(
+            "memory_reflect",
+            json!({
+                "source_ids": source_ids,
+                "title": "issue-815 reflect signing pin",
+                "content": "reflects_on edges must come back self_signed",
+                "namespace": "issue-815-reflect",
+            }),
+        );
+
+        let kp = crate::identity::keypair::generate("alice").unwrap();
+        let tier_config = FeatureTier::Keyword.config();
+        let resolved_ttl = crate::config::ResolvedTtl::default();
+        let resolved_scoring = crate::config::ResolvedScoring::default();
+        let resp = handle_request(
+            &conn,
+            std::path::Path::new(":memory:"),
+            &req,
+            None,
+            None,
+            None,
+            &tier_config,
+            None,
+            &resolved_ttl,
+            &resolved_scoring,
+            true,
+            false,
+            None,
+            &crate::profile::Profile::full(),
+            None,
+            Some(&kp),
+            None,
+            None, // federation_forward_url (#318)
+            None, // recall_scope (#518)
+            None, // atomise_handler (WT-1-C)
+            None, // ingest_multistep_handler (Form 3 / #756)
+        );
+        assert!(resp.error.is_none(), "MCP error: {:?}", resp.error);
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let val: Value = serde_json::from_str(&text).unwrap();
+        let reflection_id = val["id"]
+            .as_str()
+            .expect("reflect response must carry the new memory id")
+            .to_string();
+
+        // Every reflects_on edge from this reflection must be signed
+        // with a 64-byte Ed25519 signature, and the row's attest_level
+        // must read 'self_signed'. We check all three edges so a
+        // partial-fix regression (signs the first edge only) cannot
+        // pass.
+        let mut stmt = conn
+            .prepare(
+                "SELECT target_id, attest_level, signature \
+                 FROM memory_links \
+                 WHERE source_id = ?1 AND relation = 'reflects_on' \
+                 ORDER BY created_at",
+            )
+            .unwrap();
+        let rows: Vec<(String, String, Option<Vec<u8>>)> = stmt
+            .query_map(rusqlite::params![&reflection_id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<Vec<u8>>>(2)?,
+                ))
+            })
+            .unwrap()
+            .map(std::result::Result::unwrap)
+            .collect();
+        assert_eq!(
+            rows.len(),
+            source_ids.len(),
+            "expected one reflects_on edge per source; got {rows:?}"
+        );
+        for (target_id, attest_level, signature) in &rows {
+            assert_eq!(
+                attest_level, "self_signed",
+                "reflects_on edge to {target_id} must surface self_signed (got {attest_level})"
+            );
+            let sig_bytes = signature.as_ref().unwrap_or_else(|| {
+                panic!("reflects_on edge to {target_id} must persist a signature blob")
+            });
+            assert_eq!(
+                sig_bytes.len(),
+                64,
+                "reflects_on edge to {target_id} signature must be 64 bytes (got {})",
+                sig_bytes.len()
+            );
+        }
     }
 
     #[test]

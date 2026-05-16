@@ -208,6 +208,7 @@ fn pre_reflect_fires_before_cap_check_on_refusal_path() {
             ReflectHookDecision::Allow
         })),
         post_reflect: None,
+        active_keypair: None,
     };
 
     let err = db::reflect_with_hooks(&conn, &input, &hooks)
@@ -255,6 +256,7 @@ fn pre_reflect_deny_veto_refuses_reflection_and_writes_nothing() {
             }
         })),
         post_reflect: None,
+        active_keypair: None,
     };
 
     let err =
@@ -317,6 +319,7 @@ fn post_reflect_fires_after_commit_so_new_row_is_visible() {
             #[allow(clippy::cast_sign_loss)]
             captured_depth_clone.store(outcome.reflection_depth as usize, Ordering::SeqCst);
         })),
+        active_keypair: None,
     };
     let outcome = db::reflect_with_hooks(&conn, &input, &hooks).expect("must succeed");
     let saw = captured_id.lock().unwrap().clone();
@@ -361,6 +364,7 @@ fn post_reflect_cannot_veto_reflect_persists_regardless() {
         post_reflect: Some(Box::new(move |_o: &ReflectOutcome| {
             post_ran_clone.fetch_add(1, Ordering::SeqCst);
         })),
+        active_keypair: None,
     };
     let outcome = db::reflect_with_hooks(&conn, &input, &hooks).expect("must succeed");
     assert_eq!(post_ran.load(Ordering::SeqCst), 1, "post must fire once");
@@ -396,6 +400,7 @@ fn pre_reflect_veto_emits_no_depth_cap_audit_row() {
             code: 451,
         })),
         post_reflect: None,
+        active_keypair: None,
     };
     let err = db::reflect_with_hooks(&conn, &input, &hooks).expect_err("veto must refuse");
     assert!(matches!(err, ReflectError::HookVeto { .. }));
@@ -451,6 +456,7 @@ fn both_pre_and_post_reflect_fire_when_reflect_succeeds() {
                 Ordering::SeqCst,
             );
         })),
+        active_keypair: None,
     };
     let _ = db::reflect_with_hooks(&conn, &input, &hooks).expect("reflect must succeed");
 
@@ -631,6 +637,7 @@ fn reflect_hooks_debug_renders_fn_placeholder() {
     let hooks = ReflectHooks {
         pre_reflect: Some(Box::new(|_| ReflectHookDecision::Allow)),
         post_reflect: Some(Box::new(|_| {})),
+        active_keypair: None,
     };
     let rendered = format!("{hooks:?}");
     // Both fields surface as `<fn>` in the Debug output.
