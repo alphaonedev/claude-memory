@@ -313,6 +313,7 @@ impl TierConfig {
             compaction: CapabilityCompaction::planned(),
             approval: CapabilityApproval {
                 pending_requests: 0,
+                deferred_audit_dlq_size: 0,
             },
             transcripts: CapabilityTranscripts::planned(),
             hnsw: CapabilityHnsw::default(),
@@ -816,6 +817,15 @@ pub struct CapabilityApproval {
     // P1 honesty patch: `subscribers` (no subscription API exists) and
     // `default_timeout_seconds` (no sweeper enforces timeouts) dropped
     // from the v2 wire schema.
+    /// v0.7.0 Cluster-C SEC-3 (issue #767) — live count of rows in
+    /// `signed_events_dlq` (the deferred-audit drainer's dead-letter
+    /// queue). Non-zero means at least one storage-hook
+    /// `governance.refusal` event failed to chain-log into
+    /// `signed_events` and landed in the DLQ for operator replay.
+    /// Default-omitted from the wire when zero so existing dashboards
+    /// see no churn on healthy daemons.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub deferred_audit_dlq_size: u64,
 }
 
 /// Sidechain-transcript block (capabilities schema v2). v0.7 Bucket 1.7

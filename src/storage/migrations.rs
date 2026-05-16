@@ -7,7 +7,7 @@
 //! constant, and the `migrate` function out of `src/db.rs` into
 //! this sub-module. Pure refactor — semantics unchanged. The
 //! `MAX_SUPPORTED_SCHEMA` constant in `cli::boot` must still bump
-//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 39).
+//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 40).
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
@@ -214,6 +214,28 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp
     ON audit_log (timestamp);
 CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
     ON audit_log (event_type);
+
+-- v40 (Cluster-C SEC-3, issue #767) — deferred-audit drainer DLQ.
+-- Mirrors `migrations/sqlite/0034_v07_signed_events_dlq.sql` so a
+-- fresh DB bootstrap that bypasses the migration ladder still ends
+-- up with the table present. See the migration file for the design
+-- rationale (failure-split between race-requeue and DLQ-land).
+CREATE TABLE IF NOT EXISTS signed_events_dlq (
+    dlq_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    id              TEXT NOT NULL,
+    agent_id        TEXT NOT NULL,
+    event_type      TEXT NOT NULL,
+    payload_hash    BLOB NOT NULL,
+    signature       BLOB,
+    attest_level    TEXT NOT NULL DEFAULT 'unsigned',
+    timestamp       TEXT NOT NULL,
+    failure_reason  TEXT NOT NULL,
+    failed_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_signed_events_dlq_failed_at
+    ON signed_events_dlq(failed_at);
+CREATE INDEX IF NOT EXISTS idx_signed_events_dlq_agent
+    ON signed_events_dlq(agent_id);
 ";
 
 // v17 = v0.6.3.1 (P4, audit G1) governance.inherit backfill.
@@ -363,7 +385,17 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
 //       additive on legacy rows; the auto-derive engine is opt-in via
 //       `AI_MEMORY_AUTO_CONFIDENCE=1` so the column stays at
 //       'caller_provided' until operators flip the switch.
-const CURRENT_SCHEMA_VERSION: i64 = 39;
+// v40 = v0.7.0 Cluster-C SEC-3 closeout (issue #767) — adds the
+//       `signed_events_dlq` table backing the deferred-audit drainer's
+//       new dead-letter-queue path. Pre-Cluster-C the drainer dropped
+//       failed appends silently; with v40 in place the drainer requeues
+//       on `SQLITE_CONSTRAINT_UNIQUE` (chain-head race) and lands every
+//       other failure in `signed_events_dlq`. Pure additive on legacy
+//       data — fresh installs inherit the table via the bootstrap
+//       SCHEMA; pre-v40 deployments pick it up here. The DLQ is
+//       intentionally NOT append-only (operator-driven replay deletes
+//       rows after re-append).
+const CURRENT_SCHEMA_VERSION: i64 = 40;
 
 const MIGRATION_V15_SQLITE: &str =
     include_str!("../../migrations/sqlite/0010_v063_hierarchy_kg.sql");
@@ -608,6 +640,12 @@ const MIGRATION_V38_SQLITE: &str =
 // index on `confidence_source` covering the calibration scan.
 const MIGRATION_V39_SQLITE: &str =
     include_str!("../../migrations/sqlite/0033_v07_form5_confidence_calibration.sql");
+// v0.7.0 Cluster-C SEC-3 closeout (issue #767) — `signed_events_dlq`
+// table. CREATE TABLE IF NOT EXISTS + indexes — fully idempotent.
+// Substrate for the deferred-audit drainer's new dead-letter-queue
+// path (race-on-UNIQUE requeue; non-race errors land here).
+const MIGRATION_V40_SQLITE: &str =
+    include_str!("../../migrations/sqlite/0034_v07_signed_events_dlq.sql");
 
 // COVERAGE: per-version ALTER/CREATE branches inside this function
 // are guarded by `has_X` column-existence probes and `IF NOT EXISTS`
@@ -1537,6 +1575,14 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             conn.execute_batch(MIGRATION_V39_SQLITE)?;
         }
 
+        if version < 40 {
+            // v0.7.0 Cluster-C SEC-3 closeout (issue #767) — add the
+            // `signed_events_dlq` table backing the deferred-audit
+            // drainer's dead-letter-queue path. CREATE TABLE IF NOT
+            // EXISTS + indexes — fully idempotent on re-run.
+            conn.execute_batch(MIGRATION_V40_SQLITE)?;
+        }
+
         conn.execute("DELETE FROM schema_version", [])?;
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?1)",
@@ -1742,8 +1788,8 @@ mod tests {
         // other is a documented foot-gun. We pin the relationship
         // so a future bump is loud.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 39,
-            "module docstring advertises 37; bump the docstring when this number changes"
+            CURRENT_SCHEMA_VERSION, 40,
+            "module docstring advertises 40; bump the docstring when this number changes"
         );
     }
 

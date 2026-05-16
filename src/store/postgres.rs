@@ -138,6 +138,13 @@ const MIGRATION_V37_FORM4_PROVENANCE: &str =
 const MIGRATION_V38_FORM5_CONFIDENCE: &str =
     include_str!("../../migrations/postgres/0020_v07_form5_confidence_calibration.sql");
 
+/// v0.7.0 Cluster-C SEC-3 closeout (issue #767) — `signed_events_dlq`
+/// table backing the deferred-audit drainer's dead-letter-queue path.
+/// Mirrors SQLite schema v40. Pure additive CREATE TABLE IF NOT EXISTS
+/// + indexes — fully idempotent.
+const MIGRATION_V39_SIGNED_EVENTS_DLQ: &str =
+    include_str!("../../migrations/postgres/0021_v07_signed_events_dlq.sql");
+
 /// Current schema version. Matches SQLite CURRENT_SCHEMA_VERSION (src/db.rs:233).
 /// Incremented on each migration step.
 ///
@@ -238,7 +245,11 @@ const MIGRATION_V38_FORM5_CONFIDENCE: &str =
 //       backfill required (every pre-Form-5 row stays at the
 //       `caller_provided` baseline; the auto-derive engine is opt-in
 //       via `AI_MEMORY_AUTO_CONFIDENCE=1`).
-const CURRENT_SCHEMA_VERSION: i32 = 38;
+// v39 = v0.7.0 Cluster-C SEC-3 closeout (issue #767) — adds the
+//       `signed_events_dlq` table backing the deferred-audit drainer's
+//       dead-letter-queue path. Pure additive CREATE TABLE IF NOT
+//       EXISTS + indexes — fully idempotent. Mirrors SQLite v40.
+const CURRENT_SCHEMA_VERSION: i32 = 39;
 
 /// Default embedding column dimension used when the caller doesn't pass
 /// `--embedding-dim` to `ai-memory schema-init`. Matches the v0.7.0
@@ -688,6 +699,9 @@ impl PostgresStore {
         if current_version < 38 {
             self.migrate_v38().await?;
         }
+        if current_version < 39 {
+            self.migrate_v39().await?;
+        }
 
         Ok(())
     }
@@ -1133,6 +1147,38 @@ impl PostgresStore {
         tracing::info!(
             target = "store::postgres",
             "schema migration v38 applied (form5 auto-confidence + shadow-mode + calibration)"
+        );
+        Ok(())
+    }
+
+    /// v39 — Cluster-C SEC-3 closeout (issue #767): `signed_events_dlq`
+    /// table backing the deferred-audit drainer's dead-letter-queue
+    /// path.
+    ///
+    /// Pure additive CREATE TABLE IF NOT EXISTS + indexes — fully
+    /// idempotent on re-run. Mirrors SQLite schema v40. No backfill
+    /// (the DLQ starts empty on every existing deployment).
+    async fn migrate_v39(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v39 tx", e))?;
+
+        sqlx::raw_sql(MIGRATION_V39_SIGNED_EVENTS_DLQ)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("apply v39 signed_events_dlq", e))?;
+
+        record_schema_version(&mut tx, 39).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v39 migration", e))?;
+
+        tracing::info!(
+            target = "store::postgres",
+            "schema migration v39 applied (signed_events_dlq dead-letter queue)"
         );
         Ok(())
     }
@@ -9280,7 +9326,7 @@ mod tests {
         // future bump on either side without the corresponding port
         // re-trips this assertion before the migration runner gets a
         // chance to write a partial schema to disk.
-        assert_eq!(CURRENT_SCHEMA_VERSION, 38);
+        assert_eq!(CURRENT_SCHEMA_VERSION, 39);
     }
 
     #[tokio::test]

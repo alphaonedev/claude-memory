@@ -239,6 +239,13 @@ fn build_capabilities_overlay(
         if let Ok(n) = db::count_pending_actions_by_status(c, "pending") {
             caps.approval.pending_requests = n;
         }
+        // v0.7.0 Cluster-C SEC-3 (issue #767) — surface the deferred-
+        // audit drainer's DLQ depth. Best-effort: a missing table
+        // (pre-v40 DB) or transient lock falls through to 0 so the
+        // capabilities response always succeeds.
+        if let Ok(n) = crate::governance::deferred_audit::dlq_size(c) {
+            caps.approval.deferred_audit_dlq_size = n;
+        }
     }
 
     caps

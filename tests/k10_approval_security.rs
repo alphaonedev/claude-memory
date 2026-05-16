@@ -151,6 +151,64 @@ async fn seed_pending_delete_row(
     .expect("queue_pending_action")
 }
 
+/// Compute the K7-style HMAC signature header value for a request body
+/// with a caller-controlled method. Underpins the cross-method negative
+/// test below — production callers go through `sign` (always POST) but
+/// the regression test needs to forge a GET-signed signature.
+fn sign_with_method(
+    secret: &str,
+    method: &str,
+    timestamp: &str,
+    pending_id: &str,
+    body: &str,
+) -> String {
+    use sha2::Digest;
+    use sha2::Sha256;
+    fn sha256_hex(s: &str) -> String {
+        let mut h = Sha256::new();
+        h.update(s.as_bytes());
+        format!("{:x}", h.finalize())
+    }
+    fn hmac_sha256_hex(key_hex: &str, body: &str) -> String {
+        const BLOCK: usize = 64;
+        let key_bytes = hex_decode(key_hex).unwrap_or_else(|| key_hex.as_bytes().to_vec());
+        let mut key = key_bytes;
+        if key.len() > BLOCK {
+            let mut h = Sha256::new();
+            h.update(&key);
+            key = h.finalize().to_vec();
+        }
+        key.resize(BLOCK, 0);
+        let mut opad = [0x5cu8; BLOCK];
+        let mut ipad = [0x36u8; BLOCK];
+        for i in 0..BLOCK {
+            opad[i] ^= key[i];
+            ipad[i] ^= key[i];
+        }
+        let mut inner = Sha256::new();
+        inner.update(ipad);
+        inner.update(body.as_bytes());
+        let inner_digest = inner.finalize();
+        let mut outer = Sha256::new();
+        outer.update(opad);
+        outer.update(inner_digest);
+        format!("{:x}", outer.finalize())
+    }
+    fn hex_decode(s: &str) -> Option<Vec<u8>> {
+        if !s.len().is_multiple_of(2) {
+            return None;
+        }
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+            .collect()
+    }
+    let key_hash = sha256_hex(secret);
+    let canonical = format!("{timestamp}.{method}.{pending_id}.{body}");
+    let sig = hmac_sha256_hex(&key_hash, &canonical);
+    format!("sha256={sig}")
+}
+
 /// Compute the K7-style HMAC signature header value for a request body.
 /// Verbatim copy of the helper in `tests/k10_approval_http.rs` — the
 /// logic is small enough to duplicate without the cost of a shared
@@ -653,4 +711,102 @@ async fn evaluate_without_synthetic_rule_does_not_auto_allow() {
         matches!(d2, Decision::Deny(_)),
         "explicit deny must still win when no synthetic rule shadows it"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Cluster-C COV-5 (issue #767) — HMAC binding regression tests.
+//
+// The K10 canonical request (release-branch commit 99ffacc) was
+// promoted from `<ts>.<body>` to `<ts>.<METHOD>.<pending_id>.<body>`
+// so a captured signature can't be redirected across methods or
+// pending-ids. These two tests pin that binding from the negative
+// side — a signature computed against METHOD=GET (or
+// pending_id=other) MUST 401 when presented against a POST request
+// to the original pending_id (or vice versa). Without the binding
+// the handler would accept the redirected signature; with the
+// binding the canonical-string mismatch produces a constant-time
+// comparison fail and a 401.
+// ---------------------------------------------------------------------------
+
+/// A signature computed with METHOD=GET in its canonical string MUST
+/// NOT verify a POST request, even when timestamp + `pending_id` + body
+/// are identical. Pins the method component of the K10 canonical bind.
+#[tokio::test]
+async fn hmac_cross_method_binding_rejected() {
+    let _g = K10_SECURITY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    set_active_hooks_hmac_secret(Some("k10-cross-method-secret".to_string()));
+    let (router, db) = build_router_with_db();
+    let pending_id = seed_pending_delete_row(&db, "scratch", "alice").await;
+
+    let body = json!({"decision": "approve", "remember": "once"}).to_string();
+    let now_ts = chrono::Utc::now().timestamp().to_string();
+    // Sign canonical with METHOD=GET. The handler's verifier
+    // hard-codes the actual request method into the canonical string
+    // when verifying — so signing as GET and sending as POST must
+    // 401, even though every other component is fresh.
+    let sig = sign_with_method(
+        "k10-cross-method-secret",
+        "GET",
+        &now_ts,
+        &pending_id,
+        &body,
+    );
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/approvals/{pending_id}"))
+        .header("content-type", "application/json")
+        .header("x-ai-memory-timestamp", &now_ts)
+        .header("x-ai-memory-signature", sig)
+        .header("x-agent-id", "operator-1")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "GET-signed signature on POST request must be 401 (Cluster-C COV-5 method binding)"
+    );
+    set_active_hooks_hmac_secret(None);
+}
+
+/// A signature computed with `pending_id=A` in its canonical string
+/// MUST NOT verify a request whose URL path carries `pending_id=B`,
+/// even when timestamp + method + body are identical. Pins the
+/// `pending_id` component of the K10 canonical bind.
+#[tokio::test]
+async fn hmac_cross_pending_id_binding_rejected() {
+    let _g = K10_SECURITY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    set_active_hooks_hmac_secret(Some("k10-cross-pid-secret".to_string()));
+    let (router, db) = build_router_with_db();
+    // Two distinct pending rows. We sign against id_a but POST to id_b.
+    let pending_id_a = seed_pending_delete_row(&db, "scratch", "alice").await;
+    let pending_id_b = seed_pending_delete_row(&db, "scratch", "bob").await;
+    assert_ne!(
+        pending_id_a, pending_id_b,
+        "test fixture must seed two distinct pending rows"
+    );
+
+    let body = json!({"decision": "approve", "remember": "once"}).to_string();
+    let now_ts = chrono::Utc::now().timestamp().to_string();
+    // Sign canonical with pending_id_a — but POST to /approvals/{id_b}.
+    let sig = sign("k10-cross-pid-secret", &now_ts, &pending_id_a, &body);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/approvals/{pending_id_b}"))
+        .header("content-type", "application/json")
+        .header("x-ai-memory-timestamp", &now_ts)
+        .header("x-ai-memory-signature", sig)
+        .header("x-agent-id", "operator-1")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "signature bound to id_a presented at id_b's URL must be 401 \
+         (Cluster-C COV-5 pending_id binding)"
+    );
+    set_active_hooks_hmac_secret(None);
 }

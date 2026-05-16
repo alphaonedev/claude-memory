@@ -187,15 +187,63 @@ pub fn canonical_chain_bytes(event: &SignedEvent) -> Vec<u8> {
 /// canonical hash is the SHA-256 over the canonical bytes of the
 /// row with the highest sequence; the next inserted row's
 /// `prev_hash` is exactly this value.
+///
+/// # Cluster-C COR-9 (issue #767): NULL-sequence diagnostic
+///
+/// Prior to this fix the query was
+/// `SELECT … COALESCE(sequence, 0) … ORDER BY COALESCE(sequence, 0) DESC`,
+/// which silently treated a row whose `sequence IS NULL` (a
+/// pre-v34 row that the v34 backfill missed) as sequence == 0 and
+/// would then issue `next_seq = 1`, colliding with the legitimately-
+/// backfilled first row on the UNIQUE index. The mask hid a real
+/// migration-needed state behind a misleading SQLITE_CONSTRAINT_UNIQUE.
+///
+/// We now restrict the head SELECT to `WHERE sequence IS NOT NULL`,
+/// and issue a SEPARATE diagnostic SELECT that asserts no
+/// `sequence IS NULL` rows exist. If any are found post-v34 the
+/// function returns a clear error and emits `tracing::error!` so an
+/// operator can run `ai-memory migrate` (or invoke
+/// `migrate_v34_backfill_chain` directly) to repair the chain.
 fn read_chain_head(conn: &Connection) -> Result<(i64, [u8; 32])> {
+    // COR-9 diagnostic: hard-fail on NULL-sequence rows so a
+    // partially-migrated DB never silently produces a duplicate
+    // sequence. The v34 backfill is idempotent — operators recovering
+    // from this error re-run the migration ladder.
+    let null_seq_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM signed_events WHERE sequence IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .context("read_chain_head: null-sequence diagnostic")?;
+    if null_seq_count > 0 {
+        tracing::error!(
+            null_sequence_rows = null_seq_count,
+            "signed_events: found {null_seq_count} row(s) with sequence IS NULL — \
+             v34 chain backfill is incomplete. Re-run the migration ladder \
+             (`ai-memory migrate` or restart with the current binary) to \
+             stamp prev_hash + sequence on the unmigrated rows; refusing to \
+             append further audit rows until the chain is repaired."
+        );
+        anyhow::bail!(
+            "read_chain_head: {null_seq_count} signed_events row(s) have sequence IS NULL — \
+             v34 chain backfill incomplete; re-run `ai-memory migrate`"
+        );
+    }
+
     // Pull the column shape that `canonical_chain_bytes` needs,
-    // ordered by sequence DESC so the head is the first row.
+    // ordered by sequence DESC so the head is the first row. Restrict
+    // to non-NULL sequences (the diagnostic above guarantees this
+    // matches every row, but the WHERE makes the read itself robust
+    // against a TOCTOU window if a concurrent unmigrated INSERT
+    // landed between the diagnostic and this query).
     let mut stmt = conn
         .prepare(
             "SELECT id, agent_id, event_type, payload_hash, signature, attest_level, \
-                    timestamp, COALESCE(sequence, 0) \
+                    timestamp, sequence \
              FROM signed_events \
-             ORDER BY COALESCE(sequence, 0) DESC, rowid DESC \
+             WHERE sequence IS NOT NULL \
+             ORDER BY sequence DESC, rowid DESC \
              LIMIT 1",
         )
         .context("read_chain_head: prepare")?;
@@ -418,10 +466,10 @@ pub fn payload_hash(bytes: &[u8]) -> Vec<u8> {
 /// rather than ignored so the audit chain never silently drops a
 /// row).
 pub fn append_signed_event(conn: &Connection, event: &SignedEvent) -> Result<()> {
-    // v34 (#698 V-4 closeout): compute chain head + INSERT in a
-    // single IMMEDIATE transaction so the (read MAX(sequence),
-    // INSERT new row) pair is atomic against concurrent writers on
-    // the same connection mutex.
+    // v34 (#698 V-4 closeout) / Cluster-C SEC-3 (issue #767): compute
+    // chain head + INSERT in a single IMMEDIATE transaction so the
+    // (read MAX(sequence), INSERT new row) pair is atomic against
+    // concurrent writers on the same connection mutex.
     //
     // SQLite serializes write transactions, but a concurrent
     // BEGIN IMMEDIATE on a sibling connection that beats us to the
@@ -434,9 +482,18 @@ pub fn append_signed_event(conn: &Connection, event: &SignedEvent) -> Result<()>
     // see no contention; we still wrap in IMMEDIATE for correctness
     // under multi-connection deployments (the deferred-audit
     // drainer opens its own connection on the same DB file).
-    let tx = conn
-        .unchecked_transaction()
-        .context("append signed_event: begin tx")?;
+    //
+    // SEC-3 specifically: `rusqlite::Connection::unchecked_transaction`
+    // defaults to BEGIN DEFERRED — the prior comment claiming
+    // IMMEDIATE was a bug that let two writers on sibling
+    // connections both read a stale chain head, with one losing the
+    // INSERT race to `SQLITE_CONSTRAINT_UNIQUE` and (when invoked
+    // through the deferred-audit drainer) silently dropping the
+    // audit row. We now use `transaction_with_behavior(Immediate)`
+    // to grab the wal-write lock at BEGIN time so the read-then-
+    // INSERT pair is serialized at the SQLite layer.
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)
+        .context("append signed_event: begin IMMEDIATE tx")?;
     append_signed_event_no_tx(&tx, event)?;
     tx.commit().context("append signed_event: commit tx")?;
     Ok(())
@@ -963,6 +1020,99 @@ mod tests {
         // Listing now exercises the row.get(1)? Err arm.
         let res = list_signed_events(&conn, None, 10, 0);
         assert!(res.is_err(), "row decode must fail when agent_id is NULL");
+    }
+
+    // -----------------------------------------------------------------
+    // COR-9 (issue #767) — read_chain_head NULL-sequence diagnostic
+    // -----------------------------------------------------------------
+
+    /// A legacy DB carrying a row with `sequence IS NULL` (pre-v34 or
+    /// a backfill that was interrupted) MUST be detected by
+    /// `read_chain_head` — surfacing as a clear error rather than
+    /// silently colliding on the UNIQUE index when a fresh
+    /// `append_signed_event` would otherwise compute `next_seq = 1`
+    /// against an already-stamped first row.
+    #[test]
+    fn read_chain_head_rejects_null_sequence_row() {
+        // Build a NULL-permissive schema so we can INSERT a sequence
+        // IS NULL row directly.
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE signed_events (
+                id              TEXT PRIMARY KEY,
+                agent_id        TEXT NOT NULL,
+                event_type      TEXT NOT NULL,
+                payload_hash    BLOB NOT NULL,
+                signature       BLOB,
+                attest_level    TEXT NOT NULL DEFAULT 'unsigned',
+                timestamp       TEXT NOT NULL,
+                prev_hash       BLOB,
+                sequence        INTEGER
+            );
+            CREATE UNIQUE INDEX idx_signed_events_sequence
+                ON signed_events(sequence);",
+        )
+        .unwrap();
+        // Insert a row whose sequence column is NULL (pre-v34 shape).
+        conn.execute(
+            "INSERT INTO signed_events \
+             (id, agent_id, event_type, payload_hash, signature, attest_level, timestamp, \
+              prev_hash, sequence) \
+             VALUES ('legacy', 'alice', 'memory_link.created', X'00', NULL, 'unsigned', \
+             '2026-05-13T00:00:00+00:00', NULL, NULL)",
+            [],
+        )
+        .unwrap();
+
+        // read_chain_head MUST surface this clearly, not silently
+        // collapse the NULL to 0.
+        let err = read_chain_head(&conn).expect_err("NULL-sequence row must trigger diagnostic");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("sequence IS NULL") || rendered.contains("backfill incomplete"),
+            "diagnostic must mention NULL-sequence rows; got: {rendered}"
+        );
+    }
+
+    /// And, by extension, `append_signed_event` MUST refuse to grow
+    /// the chain when the diagnostic fires — silently appending atop
+    /// a partially-migrated table is the exact failure mode COR-9 closes.
+    #[test]
+    fn append_signed_event_refuses_when_null_sequence_present() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE signed_events (
+                id              TEXT PRIMARY KEY,
+                agent_id        TEXT NOT NULL,
+                event_type      TEXT NOT NULL,
+                payload_hash    BLOB NOT NULL,
+                signature       BLOB,
+                attest_level    TEXT NOT NULL DEFAULT 'unsigned',
+                timestamp       TEXT NOT NULL,
+                prev_hash       BLOB,
+                sequence        INTEGER
+            );
+            CREATE UNIQUE INDEX idx_signed_events_sequence
+                ON signed_events(sequence);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO signed_events \
+             (id, agent_id, event_type, payload_hash, signature, attest_level, timestamp, \
+              prev_hash, sequence) \
+             VALUES ('legacy', 'alice', 'memory_link.created', X'00', NULL, 'unsigned', \
+             '2026-05-13T00:00:00+00:00', NULL, NULL)",
+            [],
+        )
+        .unwrap();
+        let event = fixture("alice", "memory_link.created");
+        let err = append_signed_event(&conn, &event)
+            .expect_err("append must refuse while NULL-sequence row exists");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("sequence IS NULL") || rendered.contains("backfill incomplete"),
+            "diagnostic must surface in append error; got: {rendered}"
+        );
     }
 
     #[test]
