@@ -204,6 +204,12 @@ criterion = { version = "0.5", features = ["html_reports"] }
 uuid = { version = "1", features = ["v4", "v7"] }
 serde_json = "1"
 tempfile = "3"
+# v0.7.0 Cluster-F PERF regression suite (`tests/cluster_f_perf_regressions.rs`)
+# needs `Connection::trace` to count individual statements fired during
+# recall, so the `trace` feature on rusqlite is dev-only. Production
+# builds keep the bare `rusqlite = { version = "0.32" }` import — the
+# trace surface compiles into a no-op without this feature.
+rusqlite = { version = "0.32", features = ["trace"] }
 tower = { version = "0.5", features = ["util"] }
 # Wave 4 (v0.6.3) — TLS test fixture generator. Pinned to an exact version
 # so cert / key / fingerprint bytes stay stable across machines (rcgen's
