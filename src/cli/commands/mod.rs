@@ -20,3 +20,8 @@ pub mod persona;
 // `confidence_shadow_observations` and emits per-(namespace, source)
 // baselines.
 pub mod calibrate_confidence;
+// v0.7.0 Cluster E API-2 (issue #767) — `ai-memory skill <subcommand>`
+// CLI parity for the 7 L1-5 Agent Skills MCP tools. Each subcommand
+// dispatches into the same substrate handler the MCP `tools/call`
+// dispatch uses, so no new business logic lands here.
+pub mod skill;

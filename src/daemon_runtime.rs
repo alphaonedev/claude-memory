@@ -388,6 +388,12 @@ pub enum Command {
     /// `confidence_shadow_observations` and emits per-(namespace,
     /// source) baselines computed over the window.
     Calibrate(crate::cli::commands::calibrate_confidence::CalibrateArgs),
+    /// v0.7.0 Cluster E API-2 (issue #767) — `ai-memory skill
+    /// <register|list|get|resource|export|promote|compose>` CLI parity
+    /// surface for the 7 L1-5 Agent Skills MCP tools. Dispatches into
+    /// the same substrate handlers (re-exported under
+    /// `crate::mcp::handle_skill_*`); no business logic is duplicated.
+    Skill(crate::cli::commands::skill::SkillArgs),
 }
 
 /// `ai-memory governance` parent argument struct.
@@ -1299,6 +1305,26 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
                 }
             }
         }
+        Command::Skill(a) => {
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            // v0.7.0 Cluster E API-2 (issue #767) — `ai-memory skill
+            // <subcommand>`. The CLI dispatches with `active_keypair =
+            // None` to match the existing CLI convention (Persona /
+            // Calibrate also run without daemon-side ambient state).
+            // Operators who want signed skill registers/exports/promotes
+            // hit the MCP / HTTP surface where the daemon owns the
+            // keypair; the CLI surface stays unsigned by design so
+            // shell scripts can drive skills without re-implementing
+            // the keypair-load ceremony.
+            match cli::commands::skill::run(&db_path, &a, None, &mut out)? {
+                0 => Ok(()),
+                code => std::process::exit(code),
+            }
+        }
     };
 
     // WAL checkpoint after write commands to prevent unbounded WAL growth
@@ -1336,6 +1362,13 @@ pub fn is_write_command(cmd: &Command) -> bool {
             | Command::AutoConsolidate(_)
             | Command::Gc
             | Command::Atomise(_)
+            // v0.7.0 Cluster E API-2 (issue #767) — register / export /
+            // promote write to the `skills` and `signed_events` tables.
+            // List / get / resource / compose are read-only but classify
+            // the whole verb family as write-class so the post-run WAL
+            // checkpoint keeps the long-lived sqlite file from growing
+            // unbounded under register-heavy workloads.
+            | Command::Skill(_)
     )
 }
 
