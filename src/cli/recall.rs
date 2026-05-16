@@ -83,11 +83,16 @@ pub struct RecallArgs {
     /// filter. Comma-separated. Examples:
     ///   --kind concept
     ///   --kind concept,entity,claim
+    ///   --kinds concept,entity,claim    (plural alias for MCP parity)
     /// Recognised values: observation, reflection, persona, concept,
     /// entity, claim, relation, event, conversation, decision.
     /// OR-of-kinds within the flag; AND with the other filters.
     /// Pass 'all' or omit for no filter.
-    #[arg(long = "kind", value_name = "KIND[,KIND...]")]
+    ///
+    /// Cluster E audit API-3 (issue #767): the MCP tool param is
+    /// `kinds` (plural), so the CLI accepts both spellings via an
+    /// alias for cross-interface ergonomics.
+    #[arg(long = "kind", alias = "kinds", value_name = "KIND[,KIND...]")]
     pub kind: Option<String>,
 }
 

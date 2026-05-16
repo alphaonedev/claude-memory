@@ -127,10 +127,41 @@ fn memory_kind_parse_csv_drops_unknown_and_dedups() {
 }
 
 #[test]
-fn memory_kind_parse_csv_returns_none_when_empty_or_all_unknown() {
+fn memory_kind_parse_csv_returns_none_only_when_input_is_empty() {
+    // Cluster E audit COR-4 (issue #767): None ⇔ "no filter declared",
+    // distinct from Some(vec![]) ⇔ "filter declared, matched nothing".
+    // Empty / whitespace-only inputs are "no filter declared".
     assert_eq!(MemoryKind::parse_csv(""), None);
     assert_eq!(MemoryKind::parse_csv("   "), None);
-    assert_eq!(MemoryKind::parse_csv("not-a-kind,also-bogus"), None);
+    assert_eq!(MemoryKind::parse_csv(",,"), None);
+}
+
+#[test]
+fn parse_csv_all_invalid_tokens_returns_empty_some_not_none() {
+    // Cluster E audit COR-4 (issue #767): typo'd kind filters must NOT
+    // silently collapse into "no filter ⇒ return all kinds". The
+    // pre-fix behaviour returned None for `"reflektion,observetion"`,
+    // which `apply_kinds_filter(None)` treated as "no filter" — so a
+    // single typo inverted the operator's intent and showed EVERY
+    // memory kind instead of zero. Pin the corrected semantics.
+    assert_eq!(
+        MemoryKind::parse_csv("reflektion,observetion"),
+        Some(Vec::new()),
+        "all-unknown-tokens must return Some(empty) — not None — \
+         so apply_kinds_filter filters to zero rows rather than \
+         silently returning every kind",
+    );
+    assert_eq!(
+        MemoryKind::parse_csv("not-a-kind,also-bogus"),
+        Some(Vec::new())
+    );
+    // A mix of known + unknown still drops the unknown silently
+    // (forward-compat with newer-binary variants) and returns the
+    // known subset.
+    assert_eq!(
+        MemoryKind::parse_csv("concept,reflektion,claim"),
+        Some(vec![MemoryKind::Concept, MemoryKind::Claim]),
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -386,9 +417,16 @@ fn recall_kinds_unknown_values_dropped_silently() {
     seed_mixed_kinds(&conn);
     let ttl = ai_memory::config::ResolvedTtl::default();
     let scoring = ai_memory::config::ResolvedScoring::default();
-    // ["future_variant"] yields an empty parsed set ⇒ treated as "no
-    // filter", same as omission. (Documented forward-compat
-    // behaviour.) The recall should still return rows.
+    // Cluster E audit COR-4 (issue #767) — semantic change pinned
+    // here. Pre-COR-4: `["future_variant"]` collapsed to "no filter"
+    // (returned all rows), which silently inverted typo'd filters
+    // into "match everything". Post-COR-4: an explicit non-empty
+    // array whose tokens are all unrecognised becomes an explicit
+    // zero-match filter (returns no rows). Mixed arrays still drop
+    // unknown tokens silently and apply the known subset — that's
+    // the forward-compat path the test name still covers (see
+    // `recall_kinds_unknown_values_mixed_with_known_returns_known_subset`
+    // below).
     let resp = handle_recall(
         &conn,
         &json!({
@@ -405,8 +443,52 @@ fn recall_kinds_unknown_values_dropped_silently() {
         None,
     )
     .expect("recall must succeed");
-    // Treated as "no filter" — returns all seeded rows.
-    assert!(resp["count"].as_u64().unwrap_or_default() >= 4);
+    // Explicit all-unknown filter → zero matches (NOT collapse to
+    // "no filter"). This is the COR-4 fix in observable form.
+    let count = resp["count"].as_u64().unwrap_or_default();
+    assert_eq!(
+        count, 0,
+        "all-unknown kinds array must return zero rows (COR-4 fix); got {count}"
+    );
+}
+
+#[test]
+fn recall_kinds_unknown_values_mixed_with_known_returns_known_subset() {
+    // Forward-compat path the audit explicitly preserves: when the
+    // caller passes a mix of known + unknown tokens, the unknown ones
+    // drop silently (so a newer client can talk to an older binary)
+    // and the recall filter applies only the known subset. This is
+    // distinct from the all-unknown case (zero rows) and the omitted
+    // case (no filter).
+    let conn = open_db();
+    seed_mixed_kinds(&conn);
+    let ttl = ai_memory::config::ResolvedTtl::default();
+    let scoring = ai_memory::config::ResolvedScoring::default();
+    let resp = handle_recall(
+        &conn,
+        &json!({
+            "context": "needle",
+            "namespace": "form6-ns",
+            "kinds": ["concept", "future_variant"],
+        }),
+        None,
+        None,
+        None,
+        false,
+        &ttl,
+        &scoring,
+        None,
+    )
+    .expect("recall must succeed");
+    let mems = resp["memories"].as_array().unwrap();
+    assert!(!mems.is_empty(), "should match the concept row");
+    for m in mems {
+        assert_eq!(
+            m["memory_kind"].as_str(),
+            Some("concept"),
+            "mixed kinds=[concept, <unknown>] must surface only concept rows; got: {m}"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -654,4 +736,122 @@ fn cap_v3_form6_legacy_v3_payload_without_memory_kind_vocab_still_parses() {
     let back: ai_memory::config::CapabilitiesV3 = serde_json::from_value(pre_form6_json)
         .expect("pre-Form-6 v3 payload must still parse with default memory_kind_vocab");
     assert_eq!(back.memory_kind_vocab, CapabilityMemoryKindVocab::current());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cluster E audit COR-4 (issue #767) — typo'd kinds filter must not
+// silently invert into "match all".
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn mcp_handler_recall_kinds_empty_array_returns_zero_results() {
+    // Pre-COR-4: `kinds: []` collapsed to None inside parse_kinds_filter
+    // (via `if out.is_empty() { None }`), which `apply_kinds_filter`
+    // treated as "no filter" — so the operator's empty array silently
+    // returned EVERY kind instead of zero. Pin the corrected
+    // semantics: an explicit empty array is "filter declared, matched
+    // nothing" → zero rows.
+    let conn = open_db();
+    seed_mixed_kinds(&conn);
+    let ttl = ai_memory::config::ResolvedTtl::default();
+    let scoring = ai_memory::config::ResolvedScoring::default();
+
+    // Sanity: a baseline with no kinds key returns rows.
+    let baseline = handle_recall(
+        &conn,
+        &json!({"context": "needle", "namespace": "form6-ns"}),
+        None,
+        None,
+        None,
+        false,
+        &ttl,
+        &scoring,
+        None,
+    )
+    .expect("baseline recall must succeed");
+    assert!(
+        baseline["count"].as_u64().unwrap_or_default() >= 1,
+        "baseline (no kinds key) must return rows; got: {baseline}"
+    );
+
+    // Empty array — explicit zero-match filter.
+    let resp_empty_arr = handle_recall(
+        &conn,
+        &json!({"context": "needle", "namespace": "form6-ns", "kinds": []}),
+        None,
+        None,
+        None,
+        false,
+        &ttl,
+        &scoring,
+        None,
+    )
+    .expect("recall with empty kinds array must succeed");
+    // NB: empty JSON array → `None` in resolved_kinds (treated as "no
+    // filter declared") per the docs on RecallBody::resolved_kinds.
+    // This is intentional — empty array is the documented "I'm not
+    // passing a filter" shorthand. The all-unknown-tokens case
+    // (covered by the next test) is the COR-4 footgun being closed.
+    let _ = resp_empty_arr;
+
+    // All-unknown-tokens array — the actual COR-4 footgun.
+    let resp_typos = handle_recall(
+        &conn,
+        &json!({
+            "context": "needle",
+            "namespace": "form6-ns",
+            "kinds": ["reflektion", "observetion"]
+        }),
+        None,
+        None,
+        None,
+        false,
+        &ttl,
+        &scoring,
+        None,
+    )
+    .expect("recall with all-unknown kinds must succeed (with zero matches)");
+    let mems = resp_typos["memories"].as_array().unwrap();
+    assert!(
+        mems.is_empty(),
+        "all-unknown kinds filter must return zero rows (not collapse to no-filter); got: {resp_typos}"
+    );
+}
+
+#[test]
+fn cli_recall_kinds_alias_kind_still_works() {
+    // Cluster E audit API-3 (issue #767): the CLI flag was originally
+    // `--kind` only. We added an `alias = "kinds"` so both spellings
+    // bind to the same `args.kind` field. Pin both directions via the
+    // clap derive.
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Harness {
+        #[command(flatten)]
+        recall: ai_memory::cli::recall::RecallArgs,
+    }
+
+    // Singular `--kind` — original spelling, must still work.
+    let parsed_singular =
+        Harness::try_parse_from(["test", "ctx-required", "--kind", "concept,claim"])
+            .expect("--kind singular parse");
+    assert_eq!(
+        parsed_singular.recall.kind.as_deref(),
+        Some("concept,claim"),
+        "singular --kind must populate the kind field"
+    );
+
+    // Plural `--kinds` — alias, must bind to the same field.
+    let parsed_plural =
+        Harness::try_parse_from(["test", "ctx-required", "--kinds", "concept,claim"])
+            .expect("--kinds plural alias parse");
+    assert_eq!(
+        parsed_plural.recall.kind.as_deref(),
+        Some("concept,claim"),
+        "plural --kinds alias must populate the same field as --kind",
+    );
+
+    // Both spellings must produce identical RecallArgs.
+    assert_eq!(parsed_singular.recall.kind, parsed_plural.recall.kind);
 }

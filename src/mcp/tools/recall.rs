@@ -15,9 +15,19 @@ use serde_json::{Value, json};
 ///   * an array of strings: `["concept", "claim"]`
 ///   * a single comma-separated string: `"concept,claim"`
 ///   * the literal string `"all"` (any-of-all, equivalent to omission)
-/// Returns `None` when the field is absent or syntactically empty so
-/// callers treat that as "no kind filter". Unknown tokens are dropped
-/// silently — a future variant emitted by a newer client should not
+///
+/// Returns `None` when the field is absent, the string is empty /
+/// whitespace, the array is empty, or the value is `"all"` — every
+/// case maps to "no filter declared, return all kinds".
+///
+/// Returns `Some(vec![])` when the caller declared a filter (non-empty
+/// string or non-empty array) but every token was unknown
+/// (e.g. `"reflektion"`). Cluster E audit COR-4 (issue #767):
+/// collapsing this case to `None` silently inverted typo'd filters
+/// into "match all", which is the bug the v0.7.0 audit flagged.
+///
+/// Unknown tokens are dropped silently within a partially-valid
+/// filter — a future variant emitted by a newer client should not
 /// break recall on an older binary.
 fn parse_kinds_filter(params: &Value) -> Option<Vec<MemoryKind>> {
     let raw = params.get("kinds")?;
@@ -28,6 +38,10 @@ fn parse_kinds_filter(params: &Value) -> Option<Vec<MemoryKind>> {
         return MemoryKind::parse_csv(s);
     }
     if let Some(arr) = raw.as_array() {
+        // Empty array → no filter declared.
+        if arr.is_empty() {
+            return None;
+        }
         let mut out: Vec<MemoryKind> = Vec::new();
         for v in arr {
             if let Some(name) = v.as_str()
@@ -37,7 +51,9 @@ fn parse_kinds_filter(params: &Value) -> Option<Vec<MemoryKind>> {
                 out.push(k);
             }
         }
-        if out.is_empty() { None } else { Some(out) }
+        // Non-empty array (even all-unknown) → return Some so the
+        // downstream filter applies (COR-4 fix — see above).
+        Some(out)
     } else {
         None
     }
@@ -46,6 +62,10 @@ fn parse_kinds_filter(params: &Value) -> Option<Vec<MemoryKind>> {
 /// v0.7.x Form 6 — apply the parsed kinds filter to a recall result
 /// set in-place. No-op when `kinds == None`. OR-of-kinds semantics:
 /// a memory passes when `kinds.contains(&memory.memory_kind)`.
+///
+/// Cluster E audit COR-4 (issue #767): `Some(vec![])` (empty allow-
+/// list, intentionally declared filter that matched zero known kinds)
+/// returns zero rows rather than collapsing into "no filter".
 fn apply_kinds_filter(
     results: Vec<(Memory, f64)>,
     kinds: Option<&[MemoryKind]>,
