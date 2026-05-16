@@ -228,7 +228,11 @@ printf '%s\n' '{"action":"allow"}'
 "#,
     );
 
-    let executor = ExecExecutor::new(cfg_for(script, HookMode::Exec, 5_000));
+    // 30s budget (was 5s) — macOS CI runners measured at 5-8s subprocess
+    // startup for a fresh `/bin/sh` exec under load. Local runs finish
+    // in ~130ms; the budget here is for CI-flake resilience, not real
+    // workload. Real-deployment hook timeouts are operator-configured.
+    let executor = ExecExecutor::new(cfg_for(script, HookMode::Exec, 30_000));
     let r = executor
         .fire(HookEvent::PostStore, json!({}))
         .await

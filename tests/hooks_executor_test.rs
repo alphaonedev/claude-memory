@@ -661,7 +661,19 @@ fn executor_error_display_child_exit_signaled() {
         s.contains("<signaled>"),
         "display should render <signaled>: {s}"
     );
-    assert!(s.contains("crashed"));
+    // P2 (#628 agent-5) / release/v0.7.0 cbe934c: stderr is REDACTED out
+    // of the Display impl to avoid credential exfiltration via hostile
+    // hooks (`printenv >&2; exit 1`). The redacted tail still reaches
+    // the operator log via `log_redacted_stderr_at_failure`, but it
+    // must NOT appear in the caller-facing reason string.
+    assert!(
+        !s.contains("crashed"),
+        "raw stderr must NOT leak into Display: {s}"
+    );
+    assert!(
+        s.contains("see operator log for redacted stderr"),
+        "display should point to operator log: {s}"
+    );
 }
 
 /// `ExecutorError::source()` returns `Some` for Spawn / Io variants

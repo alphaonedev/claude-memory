@@ -431,13 +431,46 @@ impl PostgresStore {
         // substitute the caller's chosen dim here. CREATE TABLE IF NOT
         // EXISTS means the dim only "takes" on first init; subsequent
         // calls against an already-populated schema are no-ops.
+        //
+        // v0.7.0 ship-readiness: CI runs 30+ `live_*` tests in parallel
+        // against a single postgres service container. `CREATE EXTENSION
+        // IF NOT EXISTS vector` is DDL-idempotent but Postgres' catalog
+        // serializes EXTENSION installs at a lower layer, so concurrent
+        // first-init calls can collide with `duplicate key value
+        // violates unique constraint "pg_extension_name_index"` or
+        // `tuple concurrently updated`. Both are race-only errors — the
+        // extension always lands on at least one of the racing callers.
+        // We retry up to 5 times with brief backoff and treat the retry-
+        // success as the canonical idempotent semantics.
         let init_sql = render_schema_sql(INIT_SCHEMA, dim);
-        sqlx::raw_sql(&init_sql).execute(&pool).await.map_err(|e| {
-            StoreError::BackendUnavailable {
+        let mut last_err: Option<sqlx::Error> = None;
+        for attempt in 0..5_u32 {
+            match sqlx::raw_sql(&init_sql).execute(&pool).await {
+                Ok(_) => {
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    let is_concurrent_init = msg.contains("pg_extension_name_index")
+                        || msg.contains("tuple concurrently updated")
+                        || msg.contains("duplicate key value");
+                    if !is_concurrent_init || attempt == 4 {
+                        last_err = Some(e);
+                        break;
+                    }
+                    // Brief jittered backoff: 25 / 50 / 100 / 200ms.
+                    let backoff_ms = 25u64 << attempt;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                }
+            }
+        }
+        if let Some(e) = last_err {
+            return Err(StoreError::BackendUnavailable {
                 backend: "postgres".to_string(),
                 detail: format!("init schema: {e}"),
-            }
-        })?;
+            });
+        }
 
         // Sanity-check pgvector version. We support 0.7.x–0.8.x; older
         // versions have HNSW behaviour differences we haven't tested
