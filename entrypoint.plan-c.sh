@@ -31,6 +31,19 @@ if [ ! -f /root/.config/ai-memory/keys/daemon.priv ]; then
   /usr/local/bin/ai-memory identity generate --agent-id daemon --json
 fi
 
+# #845: optional [api] api_key block when AI_MEMORY_API_KEY is set.
+# Without this, the S5-C1 fix-campaign guard (v0.7.0 2026-05-13) refuses
+# to bind the daemon to any non-loopback address without an api_key.
+# Container-port-publish requires binding to 0.0.0.0 (container 127.0.0.1
+# != host 127.0.0.1), so an api_key is mandatory for the container
+# deployment shape. Generate per-deploy via openssl rand -hex 32.
+API_KEY_TOML=""
+if [ -n "${AI_MEMORY_API_KEY:-}" ]; then
+  API_KEY_TOML="
+[api]
+api_key = \"${AI_MEMORY_API_KEY}\""
+fi
+
 # config.toml — top-level fields per AppConfig (see src/config.rs line 1433).
 # Sections [memory], [autonomous], [governance], [federation] are NOT valid
 # AppConfig keys — serde silently ignores them, falling through to defaults.
@@ -53,6 +66,7 @@ hash_chain = true
 
 [permissions]
 mode = "enforce"
+${API_KEY_TOML}
 TOML
 mkdir -p /etc/ai-memory
 cp /root/.config/ai-memory/config.toml /etc/ai-memory/config.toml
