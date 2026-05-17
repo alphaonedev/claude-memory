@@ -497,6 +497,21 @@ pub mod tools {
         pub use super::super::kg_invalidate::handle_kg_invalidate;
     }
 
+    /// Issue #831 — re-export the `memory_promote` substrate handler so
+    /// the lifecycle regression test (`tests/lifecycle_ttl_and_promote.rs`)
+    /// can drive it directly without going through the stdio loop. Pins
+    /// both the default (jump-to-long) and the `target_tier=mid`
+    /// stepwise behaviour of the MCP tool.
+    #[doc(hidden)]
+    pub fn handle_promote_for_tests(
+        conn: &rusqlite::Connection,
+        db_path: &std::path::Path,
+        params: &serde_json::Value,
+        mcp_client: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        super::promote::handle_promote(conn, db_path, params, mcp_client)
+    }
+
     /// v0.7.x Form 1/2 acceptance tests need to drive the `memory_store`
     /// MCP write path from an integration test crate. Thin pass-through
     /// to the internal `handle_store` dispatch. Not part of the supported

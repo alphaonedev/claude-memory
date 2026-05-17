@@ -136,7 +136,7 @@ All three interfaces share the same database (`src/db.rs`) and validation (`src/
 
 - **Memory**: 15-field struct with id, tier (short/mid/long), namespace, title, content, tags, priority (1-10), confidence (0.0-1.0), source, metadata (JSON), timestamps
 - **MemoryLink**: Typed directional relationships (related_to, supersedes, contradicts, derived_from)
-- **Tiers**: short (6h TTL), mid (7d TTL), long (permanent)
+- **Tiers**: short (6h TTL), mid (7d TTL), long (permanent). Tier transitions: automatic mid→long via touch at 5 accesses (`PROMOTION_THRESHOLD`); explicit `memory_promote` jumps to long in a single call by default (short→long or mid→long, NOT short→mid→long stepwise). The MCP tool now accepts an optional `target_tier` parameter (`"mid"` or `"long"`) for callers that want to stop at an intermediate tier; omitting it preserves the historical highest-reachable-tier behavior. Downgrades (e.g. mid→short) are never honored — `db::update` enforces tier monotonicity.
 - **Feature tiers**: keyword (FTS5 only) → semantic (MiniLM embeddings) → smart (Ollama) → autonomous (cross-encoder reranking)
 
 ### Recall Pipeline

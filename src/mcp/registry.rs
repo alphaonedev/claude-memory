@@ -681,12 +681,13 @@ pub fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_promote",
-                "description": "Promote a memory to long-term, or clone to an ancestor namespace.",
-                "docs": "Promote a memory. Default: bump tier to long-term (permanent, clears expiry). Task 1.7: when 'to_namespace' is supplied, clone the memory to a hierarchical-ancestor namespace and link clone → source with 'derived_from'. Original is untouched.",
+                "description": "Promote a memory to long-term (or to a chosen intermediate tier), or clone to an ancestor namespace.",
+                "docs": "Promote a memory. Default: bump tier to long-term (permanent, clears expiry) — short→long and mid→long are both done in a single call (NOT a stepwise short→mid→long ladder). Issue #831: pass 'target_tier' ('mid' or 'long') to stop on an intermediate tier; 'target_tier'='mid' keeps the existing expires_at (mid is a 7-day-TTL bucket, not permanent). Task 1.7: when 'to_namespace' is supplied, clone the memory to a hierarchical-ancestor namespace and link clone → source with 'derived_from'. Original is untouched.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "id": {"type": "string"},
+                        "target_tier": {"type": "string", "enum": ["mid", "long"], "description": "Issue #831: optional explicit tier landing — 'mid' stops at the 7-day-TTL bucket (keeps expires_at), 'long' clears expiry and pins permanently. Omitting this preserves the historical 'jump to long' behaviour. Downgrade requests (target_tier='short' on a higher-tier row) are rejected."},
                         "to_namespace": {"type": "string", "description": "Task 1.7: hierarchical-ancestor namespace to clone this memory into. Must be a proper ancestor (per namespace_ancestors()). Original memory stays put; a new memory with derived_from link is created at the target namespace."}
                     },
                     "required": ["id"]
