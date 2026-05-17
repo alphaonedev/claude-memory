@@ -24,11 +24,11 @@
 //! in production, `MockOllamaClient` in tests). Read-only
 //! `memory_persona` is available at Semantic+.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::autonomy::AutonomyLlm;
 use crate::config::FeatureTier;
-use crate::persona::{get_latest_persona, PersonaConfig, PersonaError, PersonaGenerator};
+use crate::persona::{PersonaConfig, PersonaError, PersonaGenerator, get_latest_persona};
 
 /// Wire shape (read-only):
 ///

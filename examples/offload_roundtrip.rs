@@ -9,11 +9,12 @@
 //! Ollama dependency.
 //!
 //! Flags:
-//!   --db <path>         SQLite path; created if missing.
+//!   --db <path>         `SQLite` path; created if missing.
 //!   --input <path>      File to offload.
 //!   --output <path>     Where deref writes the round-tripped bytes.
 //!   --report <path>     JSON report (round-trip + tamper outcomes).
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use ai_memory::offload::{ContextOffloader, OffloadConfig, OffloadError};
@@ -61,7 +62,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let digest = hasher.finalize();
     let mut out = String::with_capacity(64);
     for byte in digest {
-        out.push_str(&format!("{byte:02x}"));
+        write!(out, "{byte:02x}").expect("writing to String never fails");
     }
     out
 }
@@ -98,8 +99,7 @@ fn main() -> Result<()> {
     let tamper_refused = match off.deref(&result.ref_id, None) {
         Err(e) => e
             .downcast_ref::<OffloadError>()
-            .map(|err| matches!(err, OffloadError::IntegrityFailed { .. }))
-            .unwrap_or(false),
+            .is_some_and(|err| matches!(err, OffloadError::IntegrityFailed { .. })),
         Ok(_) => false,
     };
 

@@ -28,8 +28,7 @@
 use crate::cli::CliOutput;
 use crate::db;
 use crate::mcp::{
-    handle_namespace_clear_standard, handle_namespace_get_standard,
-    handle_namespace_set_standard,
+    handle_namespace_clear_standard, handle_namespace_get_standard, handle_namespace_set_standard,
 };
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
@@ -115,24 +114,45 @@ pub enum NamespaceAction {
     },
 }
 
-pub fn run(db_path: &Path, args: NamespaceArgs, json_out: bool, out: &mut CliOutput<'_>) -> Result<()> {
+pub fn run(
+    db_path: &Path,
+    args: NamespaceArgs,
+    json_out: bool,
+    out: &mut CliOutput<'_>,
+) -> Result<()> {
     match args.action {
         NamespaceAction::SetStandard {
             namespace,
             id,
             parent,
             governance,
-        } => set_standard(db_path, &namespace, &id, parent.as_deref(), governance.as_deref(), json_out, out),
+        } => set_standard(
+            db_path,
+            &namespace,
+            &id,
+            parent.as_deref(),
+            governance.as_deref(),
+            json_out,
+            out,
+        ),
         NamespaceAction::GetStandard { namespace, inherit } => {
             get_standard(db_path, &namespace, inherit, json_out, out)
         }
-        NamespaceAction::ClearStandard { namespace } => clear_standard(db_path, &namespace, json_out, out),
+        NamespaceAction::ClearStandard { namespace } => {
+            clear_standard(db_path, &namespace, json_out, out)
+        }
         NamespaceAction::BatmanPolicy {
             atomise_threshold,
             atom_max_tokens,
             max_reflection_depth,
             classify_mode,
-        } => batman_policy(atomise_threshold, atom_max_tokens, max_reflection_depth, &classify_mode, out),
+        } => batman_policy(
+            atomise_threshold,
+            atom_max_tokens,
+            max_reflection_depth,
+            &classify_mode,
+            out,
+        ),
     }
 }
 
@@ -154,22 +174,28 @@ fn set_standard(
         params["parent"] = json!(p);
     }
     if let Some(g) = governance {
-        let gov_val: Value = serde_json::from_str(g)
-            .context("--governance must be a valid JSON object")?;
+        let gov_val: Value =
+            serde_json::from_str(g).context("--governance must be a valid JSON object")?;
         params["governance"] = gov_val;
     }
-    let resp = handle_namespace_set_standard(&conn, &params)
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let resp = handle_namespace_set_standard(&conn, &params).map_err(|e| anyhow::anyhow!(e))?;
     emit(out, json_out, &resp, |o, r| {
         writeln!(
             o.stdout,
             "set standard: namespace='{}' standard_id='{}'{}",
             r["namespace"].as_str().unwrap_or(""),
             r["standard_id"].as_str().unwrap_or(""),
-            r.get("parent").and_then(Value::as_str).map(|p| format!(" parent='{p}'")).unwrap_or_default(),
+            r.get("parent")
+                .and_then(Value::as_str)
+                .map(|p| format!(" parent='{p}'"))
+                .unwrap_or_default(),
         )?;
         if let Some(gov) = r.get("governance") {
-            writeln!(o.stdout, "governance merged: {}", serde_json::to_string_pretty(gov)?)?;
+            writeln!(
+                o.stdout,
+                "governance merged: {}",
+                serde_json::to_string_pretty(gov)?
+            )?;
         }
         Ok(())
     })
@@ -187,16 +213,32 @@ fn get_standard(
         "namespace": namespace,
         "inherit": inherit,
     });
-    let resp = handle_namespace_get_standard(&conn, &params)
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let resp = handle_namespace_get_standard(&conn, &params).map_err(|e| anyhow::anyhow!(e))?;
     emit(out, json_out, &resp, |o, r| {
         if let Some(chain) = r.get("chain").and_then(Value::as_array) {
-            writeln!(o.stdout, "namespace: {}", r["namespace"].as_str().unwrap_or(""))?;
-            writeln!(o.stdout, "chain: {}", chain.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" -> "))?;
+            writeln!(
+                o.stdout,
+                "namespace: {}",
+                r["namespace"].as_str().unwrap_or("")
+            )?;
+            writeln!(
+                o.stdout,
+                "chain: {}",
+                chain
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            )?;
             if let Some(stds) = r.get("standards").and_then(Value::as_array) {
                 writeln!(o.stdout, "standards in chain:")?;
                 for s in stds {
-                    writeln!(o.stdout, "  - {}: {}", s["namespace"].as_str().unwrap_or(""), s["standard_id"].as_str().unwrap_or("null"))?;
+                    writeln!(
+                        o.stdout,
+                        "  - {}: {}",
+                        s["namespace"].as_str().unwrap_or(""),
+                        s["standard_id"].as_str().unwrap_or("null")
+                    )?;
                 }
             }
         } else if r.get("standard_id").map_or(true, Value::is_null) {
@@ -210,7 +252,11 @@ fn get_standard(
                 r["title"].as_str().unwrap_or(""),
             )?;
             if let Some(gov) = r.get("governance") {
-                writeln!(o.stdout, "governance:\n{}", serde_json::to_string_pretty(gov)?)?;
+                writeln!(
+                    o.stdout,
+                    "governance:\n{}",
+                    serde_json::to_string_pretty(gov)?
+                )?;
             }
         }
         Ok(())
@@ -225,13 +271,16 @@ fn clear_standard(
 ) -> Result<()> {
     let conn = db::open(db_path)?;
     let params = json!({ "namespace": namespace });
-    let resp = handle_namespace_clear_standard(&conn, &params)
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let resp = handle_namespace_clear_standard(&conn, &params).map_err(|e| anyhow::anyhow!(e))?;
     emit(out, json_out, &resp, |o, r| {
         writeln!(
             o.stdout,
             "{} standard pointer for namespace '{}'",
-            if r["cleared"].as_bool().unwrap_or(false) { "cleared" } else { "no-op (no standard set)" },
+            if r["cleared"].as_bool().unwrap_or(false) {
+                "cleared"
+            } else {
+                "no-op (no standard set)"
+            },
             r["namespace"].as_str().unwrap_or(namespace),
         )?;
         Ok(())

@@ -8,7 +8,7 @@
 //!
 //! 1. **Model-agnostic identity** — recipe runs with `ai:test-not-claude-agent@host`
 //!    (deliberately not a real model name) and produces a substrate-
-//!    resident Persona keyed on the agent's entity_id.
+//!    resident Persona keyed on the agent's `entity_id`.
 //!
 //! 2. **Substrate-resident artifacts only** — no files written to
 //!    `~/.ai-memory/personas/` or any other filesystem location. The
@@ -16,14 +16,14 @@
 //!
 //! 3. **Full provenance chain** — after the recipe completes:
 //!    - The Persona row in `memories` has `memory_kind = 'persona'`
-//!      and `metadata.persona_provenance` JSON with substrate_version,
-//!      agent_id, body_sha256, signature_b64.
+//!      and `metadata.persona_provenance` JSON with `substrate_version`,
+//!      `agent_id`, `body_sha256`, `signature_b64`.
 //!    - `signed_events` has at least one row with
 //!      `event_type = 'persona.generated'` and a signature.
 //!    - `memory_links` has at least one `derived_from` edge from the
 //!      persona to a reflection.
-//!    - `entity_aliases` has rows mapping the agent_id (and other
-//!      aliases) to the entity_id.
+//!    - `entity_aliases` has rows mapping the `agent_id` (and other
+//!      aliases) to the `entity_id`.
 //!
 //! Mirrors the corrected execution flow from issue #809 closure +
 //! `cookbook/nhi-self-curation/01-any-agent.sh`. Same code path that
@@ -41,6 +41,21 @@ use serde_json::json;
 use tempfile::TempDir;
 
 static INIT_TRACING: Once = Once::new();
+
+/// SHA-256 of `bytes` rendered as a lowercase hex string. Helper for
+/// the namespace-derivation prefix in the NHI-self-persona recipe;
+/// extracted from the two prior inline `format!`/`collect`/`fold`
+/// blocks both to dedupe and to satisfy `clippy::format_collect`.
+fn hex_encode_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    let mut h = Sha256::new();
+    h.update(bytes);
+    h.finalize().iter().fold(String::new(), |mut acc, b| {
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
+}
 
 fn init_tracing() {
     INIT_TRACING.call_once(|| {
@@ -144,7 +159,7 @@ fn seed_reflection(
     id
 }
 
-/// Register an entity alias in entity_aliases.
+/// Register an entity alias in `entity_aliases`.
 fn register_entity_alias(conn: &Connection, entity_id: &str, alias: &str) {
     conn.execute(
         "INSERT OR IGNORE INTO entity_aliases (entity_id, alias, created_at)
@@ -155,9 +170,11 @@ fn register_entity_alias(conn: &Connection, entity_id: &str, alias: &str) {
 }
 
 /// The load-bearing test: model-agnostic NHI self-Persona generation
-/// works with a deliberately-not-Claude agent_id, lands every artifact
+/// works with a deliberately-not-Claude `agent_id`, lands every artifact
 /// in the substrate, and writes ZERO filesystem side-channels.
 #[test]
+#[allow(clippy::too_many_lines)]
+#[allow(clippy::items_after_statements)]
 fn nhi_self_persona_any_agent_substrate_resident() {
     init_tracing();
 
@@ -167,15 +184,7 @@ fn nhi_self_persona_any_agent_substrate_resident() {
     let agent_id = "ai:fictional-test-bot@unit-test-host";
     let namespace = format!(
         "ai-memory-mcp/nhi-self/{}",
-        &{
-            use sha2::{Digest, Sha256};
-            let mut h = Sha256::new();
-            h.update(agent_id.as_bytes());
-            h.finalize()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        }[..12]
+        &hex_encode_sha256(agent_id.as_bytes())[..12]
     );
     let entity_id = uuid::Uuid::new_v4().to_string();
 
@@ -184,7 +193,7 @@ fn nhi_self_persona_any_agent_substrate_resident() {
     let conn = db::open(&db_path).unwrap();
 
     // ----- Step 1: register entity_aliases for the agent -------------
-    register_entity_alias(&conn, &entity_id, &format!("NHI {}", agent_id));
+    register_entity_alias(&conn, &entity_id, &format!("NHI {agent_id}"));
     register_entity_alias(&conn, &entity_id, agent_id);
 
     // ----- Step 2: seed observations + reflections --------------------
@@ -337,15 +346,7 @@ fn nhi_self_persona_any_agent_substrate_resident() {
     ] {
         let other_ns = format!(
             "ai-memory-mcp/nhi-self/{}",
-            &{
-                use sha2::{Digest, Sha256};
-                let mut h = Sha256::new();
-                h.update(other.as_bytes());
-                h.finalize()
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>()
-            }[..12]
+            &hex_encode_sha256(other.as_bytes())[..12]
         );
         assert_ne!(
             other_ns, namespace,
@@ -359,10 +360,11 @@ fn nhi_self_persona_any_agent_substrate_resident() {
 }
 
 /// Negative test: the substrate refuses to mint a persona for a
-/// non-existent entity_id. This is the substrate's existing contract;
+/// non-existent `entity_id`. This is the substrate's existing contract;
 /// we pin it here so a future refactor that loosens the gate has to
 /// explicitly flip this test red.
 #[test]
+#[allow(clippy::items_after_statements)]
 fn nhi_self_persona_refuses_unknown_entity() {
     use ai_memory::autonomy::AutonomyLlm;
     use ai_memory::config::FeatureTier;

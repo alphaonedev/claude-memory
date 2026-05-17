@@ -856,10 +856,7 @@ fn load_operator_signing_key_from_dir(
             if parent_pub.exists() {
                 use base64::Engine;
                 let encoded = std::fs::read_to_string(&parent_pub).with_context(|| {
-                    format!(
-                        "governance.no_operator_key: read {}",
-                        parent_pub.display()
-                    )
+                    format!("governance.no_operator_key: read {}", parent_pub.display())
                 })?;
                 let trimmed = encoded.trim();
                 let pub_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD

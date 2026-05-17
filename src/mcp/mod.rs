@@ -1786,7 +1786,10 @@ mod tests {
         crate::identity::keypair::save(&kp, dir.path()).unwrap();
         let loaded = super::load_active_keypair_for_mcp_in(dir.path(), Some("ai:alice"))
             .expect("agent-specific keypair should resolve when on disk");
-        assert!(loaded.can_sign(), "loaded agent-specific keypair must carry a private half");
+        assert!(
+            loaded.can_sign(),
+            "loaded agent-specific keypair must carry a private half"
+        );
         assert_eq!(loaded.agent_id, "ai:alice");
     }
 
@@ -1800,12 +1803,13 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let daemon_kp = crate::identity::keypair::generate("daemon").unwrap();
         crate::identity::keypair::save(&daemon_kp, dir.path()).unwrap();
-        let loaded = super::load_active_keypair_for_mcp_in(
-            dir.path(),
-            Some("host:host.local:pid-12345"),
-        )
-        .expect("daemon fallback must engage when agent-specific key absent");
-        assert!(loaded.can_sign(), "daemon fallback keypair must carry a private half");
+        let loaded =
+            super::load_active_keypair_for_mcp_in(dir.path(), Some("host:host.local:pid-12345"))
+                .expect("daemon fallback must engage when agent-specific key absent");
+        assert!(
+            loaded.can_sign(),
+            "daemon fallback keypair must carry a private half"
+        );
         assert_eq!(loaded.agent_id, "daemon");
     }
 
@@ -1813,7 +1817,10 @@ mod tests {
     fn issue_811_load_active_keypair_for_mcp_returns_none_when_neither_present() {
         let dir = tempfile::TempDir::new().unwrap();
         let loaded = super::load_active_keypair_for_mcp_in(dir.path(), Some("ai:none"));
-        assert!(loaded.is_none(), "no key files → None (preserves v0.6.4 unsigned behaviour)");
+        assert!(
+            loaded.is_none(),
+            "no key files → None (preserves v0.6.4 unsigned behaviour)"
+        );
     }
 
     #[test]

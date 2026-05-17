@@ -10,7 +10,7 @@
 //! `#[cfg(feature = "sal")] if matches!(StorageBackend::Postgres) {…}`
 //! branch in `handlers/http.rs`, `handlers/hook_subscribers.rs`, and
 //! `handlers/federation_receive.rs` while the underlying calls land on
-//! the SqliteStore impls (which exist for every method used on the
+//! the `SqliteStore` impls (which exist for every method used on the
 //! "happy" postgres branch). Branches that route through
 //! `crate::store::postgres::*_via_store` helpers exercise the
 //! `downcast_postgres` → `BackendUnavailable` error path → `503
@@ -18,7 +18,7 @@
 //! `store_err_to_response`.
 //!
 //! The `cov_18_offload_ttl_postgres` baseline tested a similar
-//! "Postgres flag with SqliteStore" pattern for the offload TTL
+//! "Postgres flag with `SqliteStore`" pattern for the offload TTL
 //! plumbing. This file generalises it across the handler surface.
 
 #![cfg(feature = "sal")]

@@ -20,16 +20,16 @@
 //!    sign-via-CLI ⇒ verify-from-disk ⇒ refuse-enforcement.
 //!
 //! Tests below drive the CLI handlers directly (no subprocess spawn)
-//! against a tempdir-scoped operator key + an in-process SQLite
+//! against a tempdir-scoped operator key + an in-process `SQLite`
 //! connection. Each test owns its own conn + key dir so they run in
 //! parallel safely under `cargo test`.
 
 use std::path::PathBuf;
 use std::sync::Once;
 
+use ai_memory::cli::CliOutput;
 use ai_memory::cli::namespace as ns_cli;
 use ai_memory::cli::rules as rules_cli;
-use ai_memory::cli::CliOutput;
 use ai_memory::db;
 use ai_memory::governance::agent_action::{AgentAction, Decision, check_agent_action};
 use ai_memory::governance::rules_store;
@@ -63,8 +63,7 @@ fn setup_operator_key() -> (TempDir, PathBuf) {
     let verifying = signing.verifying_key();
     let pub_b64 = {
         use base64::Engine;
-        base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(verifying.to_bytes())
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(verifying.to_bytes())
     };
 
     // The two locations the v0.7.0 binary checks:
@@ -168,7 +167,7 @@ fn namespace_batman_policy_classify_mode_regex_only() {
 }
 
 /// `get-standard` on a namespace with no standard returns the empty
-/// envelope (standard_id = null).
+/// envelope (`standard_id` = null).
 #[test]
 fn namespace_get_standard_returns_null_when_unbound() {
     let (_db_dir, db_path) = fresh_db();
@@ -215,14 +214,15 @@ fn namespace_get_standard_json_inherit_returns_chain() {
 /// `set-standard` then `get-standard` round-trips the binding +
 /// surfaces the merged governance policy.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn namespace_set_then_get_standard_round_trip() {
+    use ai_memory::models::{Memory, Tier};
+    use chrono::Utc;
     let (_db_dir, db_path) = fresh_db();
     let conn = db::open(&db_path).unwrap();
 
     // Create a standard memory directly via the DB layer so we don't
     // depend on the store CLI.
-    use ai_memory::models::{Memory, Tier};
-    use chrono::Utc;
     let std_id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let mem = Memory {
@@ -303,8 +303,7 @@ fn namespace_set_then_get_standard_round_trip() {
         &mut out2,
     )
     .unwrap();
-    let get_resp: Value =
-        serde_json::from_str(String::from_utf8(stdout2).unwrap().trim()).unwrap();
+    let get_resp: Value = serde_json::from_str(String::from_utf8(stdout2).unwrap().trim()).unwrap();
     assert_eq!(get_resp["standard_id"], json!(std_id));
     assert_eq!(
         get_resp["governance"]["auto_classify_kind"],
@@ -331,8 +330,7 @@ fn namespace_set_then_get_standard_round_trip() {
         &mut out3,
     )
     .unwrap();
-    let clr_resp: Value =
-        serde_json::from_str(String::from_utf8(stdout3).unwrap().trim()).unwrap();
+    let clr_resp: Value = serde_json::from_str(String::from_utf8(stdout3).unwrap().trim()).unwrap();
     assert_eq!(clr_resp["cleared"], json!(true));
     assert_eq!(clr_resp["namespace"], json!("round-trip-ns"));
 }
@@ -449,15 +447,15 @@ fn rules_enable_signed_signature_verifies_against_operator_pubkey() {
 // CRACK 1 — additional namespace CLI coverage
 // ---------------------------------------------------------------------------
 
-/// `namespace set-standard --parent` writes the parent_namespace
-/// column on namespace_meta.
+/// `namespace set-standard --parent` writes the `parent_namespace`
+/// column on `namespace_meta`.
 #[test]
 fn namespace_set_standard_with_parent_sets_parent_column() {
+    use ai_memory::models::{Memory, Tier};
+    use chrono::Utc;
     let (_db_dir, db_path) = fresh_db();
     let conn = db::open(&db_path).unwrap();
 
-    use ai_memory::models::{Memory, Tier};
-    use chrono::Utc;
     let std_id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     db::insert(
@@ -486,7 +484,10 @@ fn namespace_set_standard_with_parent_sets_parent_column() {
 
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
-    let mut out = CliOutput { stdout: &mut stdout, stderr: &mut stderr };
+    let mut out = CliOutput {
+        stdout: &mut stdout,
+        stderr: &mut stderr,
+    };
     ns_cli::run(
         &db_path,
         ns_cli::NamespaceArgs {
@@ -520,7 +521,10 @@ fn namespace_clear_standard_unbound_returns_cleared_false() {
     let (_db_dir, db_path) = fresh_db();
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
-    let mut out = CliOutput { stdout: &mut stdout, stderr: &mut stderr };
+    let mut out = CliOutput {
+        stdout: &mut stdout,
+        stderr: &mut stderr,
+    };
     ns_cli::run(
         &db_path,
         ns_cli::NamespaceArgs {
@@ -537,13 +541,13 @@ fn namespace_clear_standard_unbound_returns_cleared_false() {
 }
 
 /// Human-readable (non-JSON) output of `set-standard` includes the
-/// human banner with the namespace + standard_id.
+/// human banner with the namespace + `standard_id`.
 #[test]
 fn namespace_set_standard_human_output_emits_banner() {
-    let (_db_dir, db_path) = fresh_db();
-    let conn = db::open(&db_path).unwrap();
     use ai_memory::models::{Memory, Tier};
     use chrono::Utc;
+    let (_db_dir, db_path) = fresh_db();
+    let conn = db::open(&db_path).unwrap();
     let std_id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     db::insert(
@@ -572,7 +576,10 @@ fn namespace_set_standard_human_output_emits_banner() {
 
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
-    let mut out = CliOutput { stdout: &mut stdout, stderr: &mut stderr };
+    let mut out = CliOutput {
+        stdout: &mut stdout,
+        stderr: &mut stderr,
+    };
     ns_cli::run(
         &db_path,
         ns_cli::NamespaceArgs {
@@ -588,10 +595,22 @@ fn namespace_set_standard_human_output_emits_banner() {
     )
     .unwrap();
     let s = String::from_utf8(stdout).unwrap();
-    assert!(s.contains("set standard"), "human output should announce 'set standard' — got: {s}");
-    assert!(s.contains("human-out-ns"), "namespace name should appear in output — got: {s}");
-    assert!(s.contains(&std_id), "standard id should appear in output — got: {s}");
-    assert!(s.contains("parent-ns"), "parent should appear when provided — got: {s}");
+    assert!(
+        s.contains("set standard"),
+        "human output should announce 'set standard' — got: {s}"
+    );
+    assert!(
+        s.contains("human-out-ns"),
+        "namespace name should appear in output — got: {s}"
+    );
+    assert!(
+        s.contains(&std_id),
+        "standard id should appear in output — got: {s}"
+    );
+    assert!(
+        s.contains("parent-ns"),
+        "parent should appear when provided — got: {s}"
+    );
 }
 
 /// `clear-standard` human-readable output for a no-op clear shows
@@ -601,11 +620,16 @@ fn namespace_clear_standard_human_output_says_no_op() {
     let (_db_dir, db_path) = fresh_db();
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
-    let mut out = CliOutput { stdout: &mut stdout, stderr: &mut stderr };
+    let mut out = CliOutput {
+        stdout: &mut stdout,
+        stderr: &mut stderr,
+    };
     ns_cli::run(
         &db_path,
         ns_cli::NamespaceArgs {
-            action: ns_cli::NamespaceAction::ClearStandard { namespace: "never".into() },
+            action: ns_cli::NamespaceAction::ClearStandard {
+                namespace: "never".into(),
+            },
         },
         false,
         &mut out,
@@ -625,7 +649,10 @@ fn namespace_batman_policy_non_default_knobs_round_trip() {
     let (_db_dir, db_path) = fresh_db();
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
-    let mut out = CliOutput { stdout: &mut stdout, stderr: &mut stderr };
+    let mut out = CliOutput {
+        stdout: &mut stdout,
+        stderr: &mut stderr,
+    };
     ns_cli::run(
         &db_path,
         ns_cli::NamespaceArgs {
@@ -653,10 +680,10 @@ fn namespace_batman_policy_non_default_knobs_round_trip() {
 /// formatter (line ~204 in cli/namespace.rs).
 #[test]
 fn namespace_get_standard_human_output_with_bound_standard() {
-    let (_db_dir, db_path) = fresh_db();
-    let conn = db::open(&db_path).unwrap();
     use ai_memory::models::{Memory, Tier};
     use chrono::Utc;
+    let (_db_dir, db_path) = fresh_db();
+    let conn = db::open(&db_path).unwrap();
     let std_id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     db::insert(
@@ -685,7 +712,10 @@ fn namespace_get_standard_human_output_with_bound_standard() {
 
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
-    let mut out = CliOutput { stdout: &mut stdout, stderr: &mut stderr };
+    let mut out = CliOutput {
+        stdout: &mut stdout,
+        stderr: &mut stderr,
+    };
     ns_cli::run(
         &db_path,
         ns_cli::NamespaceArgs {
@@ -697,7 +727,10 @@ fn namespace_get_standard_human_output_with_bound_standard() {
             },
         },
         true,
-        &mut CliOutput { stdout: &mut Vec::new(), stderr: &mut Vec::new() },
+        &mut CliOutput {
+            stdout: &mut Vec::new(),
+            stderr: &mut Vec::new(),
+        },
     )
     .unwrap();
 
@@ -728,7 +761,10 @@ fn namespace_get_standard_human_output_inherit_chain() {
     let (_db_dir, db_path) = fresh_db();
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
-    let mut out = CliOutput { stdout: &mut stdout, stderr: &mut stderr };
+    let mut out = CliOutput {
+        stdout: &mut stdout,
+        stderr: &mut stderr,
+    };
     ns_cli::run(
         &db_path,
         ns_cli::NamespaceArgs {
@@ -742,8 +778,14 @@ fn namespace_get_standard_human_output_inherit_chain() {
     )
     .unwrap();
     let s = String::from_utf8(stdout).unwrap();
-    assert!(s.contains("namespace:"), "human inherit output has 'namespace:' line");
-    assert!(s.contains("chain:"), "human inherit output has 'chain:' line");
+    assert!(
+        s.contains("namespace:"),
+        "human inherit output has 'namespace:' line"
+    );
+    assert!(
+        s.contains("chain:"),
+        "human inherit output has 'chain:' line"
+    );
 }
 
 /// `set-standard` against a memory that does NOT exist errors cleanly
@@ -753,7 +795,10 @@ fn namespace_set_standard_nonexistent_memory_errors() {
     let (_db_dir, db_path) = fresh_db();
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
-    let mut out = CliOutput { stdout: &mut stdout, stderr: &mut stderr };
+    let mut out = CliOutput {
+        stdout: &mut stdout,
+        stderr: &mut stderr,
+    };
     let err = ns_cli::run(
         &db_path,
         ns_cli::NamespaceArgs {
@@ -818,14 +863,17 @@ fn rules_disable_signed_signature_verifies_against_operator_pubkey() {
     let pubkey = {
         use base64::Engine;
         let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(std::fs::read_to_string(key_dir.join("operator.key.pub")).unwrap().trim())
+            .decode(
+                std::fs::read_to_string(key_dir.join("operator.key.pub"))
+                    .unwrap()
+                    .trim(),
+            )
             .unwrap();
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&raw);
         ed25519_dalek::VerifyingKey::from_bytes(&arr).unwrap()
     };
-    rules_store::verify_rule_signature(&updated, &pubkey)
-        .expect("disable signature must verify");
+    rules_store::verify_rule_signature(&updated, &pubkey).expect("disable signature must verify");
 }
 
 /// Parity test for the Add verb — the third site PR #801 fixed.
@@ -839,7 +887,10 @@ fn rules_add_signed_signature_verifies_against_operator_pubkey() {
 
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
-    let mut out = CliOutput { stdout: &mut stdout, stderr: &mut stderr };
+    let mut out = CliOutput {
+        stdout: &mut stdout,
+        stderr: &mut stderr,
+    };
     rules_cli::run(
         &db_path,
         rules_cli::RulesArgs {
@@ -862,12 +913,19 @@ fn rules_add_signed_signature_verifies_against_operator_pubkey() {
 
     let conn = db::open(&db_path).unwrap();
     let rule = rules_store::get(&conn, "R-add-test").unwrap().unwrap();
-    assert!(rule.enabled, "add --disabled was false; rule should be enabled");
+    assert!(
+        rule.enabled,
+        "add --disabled was false; rule should be enabled"
+    );
     assert_eq!(rule.attest_level, "operator_signed");
     let pubkey = {
         use base64::Engine;
         let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(std::fs::read_to_string(key_dir.join("operator.key.pub")).unwrap().trim())
+            .decode(
+                std::fs::read_to_string(key_dir.join("operator.key.pub"))
+                    .unwrap()
+                    .trim(),
+            )
             .unwrap();
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&raw);
@@ -878,7 +936,7 @@ fn rules_add_signed_signature_verifies_against_operator_pubkey() {
 }
 
 /// Gap #6 — keygen↔enable path-mismatch fallback. The operator key is
-/// placed at the PARENT of the key_dir (where `rules keygen` writes by
+/// placed at the PARENT of the `key_dir` (where `rules keygen` writes by
 /// default); `load_operator_signing_key_from_dir` must fall back to
 /// the parent so a fresh keygen → enable round-trip just works.
 #[test]
@@ -935,7 +993,10 @@ fn rules_enable_with_operator_key_at_parent_dir_falls_back() {
     // must reach up one level for the operator.key.
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
-    let mut out = CliOutput { stdout: &mut stdout, stderr: &mut stderr };
+    let mut out = CliOutput {
+        stdout: &mut stdout,
+        stderr: &mut stderr,
+    };
     rules_cli::run(
         &db_path,
         rules_cli::RulesArgs {
@@ -989,7 +1050,10 @@ fn rules_enable_with_no_operator_key_anywhere_errors_with_both_paths() {
 
     let mut stdout: Vec<u8> = Vec::new();
     let mut stderr: Vec<u8> = Vec::new();
-    let mut out = CliOutput { stdout: &mut stdout, stderr: &mut stderr };
+    let mut out = CliOutput {
+        stdout: &mut stdout,
+        stderr: &mut stderr,
+    };
     let err = rules_cli::run(
         &db_path,
         rules_cli::RulesArgs {
@@ -1020,6 +1084,8 @@ fn rules_enable_with_no_operator_key_anywhere_errors_with_both_paths() {
 /// signature never validated.
 #[test]
 fn rules_enable_then_check_agent_action_refuses_matching_path() {
+    use std::sync::Mutex;
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
     let (_key_tmp, key_dir) = setup_operator_key();
     let (_db_tmp, db_path) = fresh_db();
     let conn = db::open(&db_path).unwrap();
@@ -1065,14 +1131,12 @@ fn rules_enable_then_check_agent_action_refuses_matching_path() {
 
     // Point `resolve_operator_pubkey` at our test key dir via the
     // AI_MEMORY_OPERATOR_PUBKEY env var (no global state).
-    let pub_b64 =
-        std::fs::read_to_string(key_dir.join("operator.key.pub")).unwrap();
+    let pub_b64 = std::fs::read_to_string(key_dir.join("operator.key.pub")).unwrap();
     // SAFETY: This test owns the env var read by the L1-6 gate; we
     // restore it after the assertion below. cargo test runs tests in
     // multiple threads inside the same process, so we keep the var
-    // scoped to a critical section guarded by a mutex.
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // scoped to a critical section guarded by a mutex (declared at
+    // function top per clippy::items_after_statements).
     let _guard = ENV_LOCK.lock().unwrap();
     let prev = std::env::var("AI_MEMORY_OPERATOR_PUBKEY").ok();
     unsafe {

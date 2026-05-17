@@ -33,7 +33,7 @@ use ai_memory::atomisation::curator::{Atom, Curator, CuratorError};
 use ai_memory::atomisation::{Atomiser, AtomiserConfig};
 use ai_memory::config::FeatureTier;
 use ai_memory::forensic::bundle::{ExportForensicBundleArgs, build, build_files};
-use ai_memory::models::{Memory, MemoryKind, Tier};
+use ai_memory::models::{ConfidenceSource, Memory, MemoryKind, Tier};
 use ai_memory::storage as db;
 use anyhow::{Context, Result, anyhow};
 
@@ -141,7 +141,7 @@ fn seed_parent(conn: &rusqlite::Connection, namespace: &str) -> Result<(String, 
         citations: vec![],
         source_uri: None,
         source_span: None,
-        confidence_source: Default::default(),
+        confidence_source: ConfidenceSource::default(),
         confidence_signals: None,
         confidence_decayed_at: None,
     };

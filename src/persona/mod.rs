@@ -51,8 +51,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use anyhow::{Context, Result};
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::Utc;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -60,9 +60,9 @@ use sha2::{Digest, Sha256};
 
 use crate::autonomy::AutonomyLlm;
 use crate::identity::keypair::AgentKeypair;
-use crate::identity::sign::{sign_persona, SignablePersona};
+use crate::identity::sign::{SignablePersona, sign_persona};
 use crate::models::{Memory, MemoryKind, Tier};
-use crate::signed_events::{append_signed_event, SignedEvent};
+use crate::signed_events::{SignedEvent, append_signed_event};
 use crate::storage as db;
 use crate::validate;
 

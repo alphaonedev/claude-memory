@@ -321,7 +321,14 @@ pub fn run_once(
     // persona", so we stay no-op when the daemon hasn't been issued a
     // keypair. The `personas_generated` counter on `CuratorReport`
     // reflects the count and lands in the `_curator/reports` JSON.
-    persona_sweep(conn, llm_client, &candidates, cfg, active_keypair, &mut report);
+    persona_sweep(
+        conn,
+        llm_client,
+        &candidates,
+        cfg,
+        active_keypair,
+        &mut report,
+    );
 
     report.completed_at = chrono::Utc::now().to_rfc3339();
     report.cycle_duration_ms = started.elapsed().as_millis();
@@ -427,9 +434,9 @@ fn persona_sweep(
         Ok(())
     })();
     if let Err(e) = scan_result {
-        report
-            .errors
-            .push(format!("persona_sweep: scan for mentioned_entity_id failed: {e}"));
+        report.errors.push(format!(
+            "persona_sweep: scan for mentioned_entity_id failed: {e}"
+        ));
         return;
     }
 
@@ -1738,8 +1745,7 @@ mod tests {
         let mut rfl = make_eligible_memory("auto-persona-ns", "reflection-of-obs");
         rfl.memory_kind = crate::models::MemoryKind::Reflection;
         rfl.reflection_depth = 1;
-        rfl.content =
-            "This reflection mentions the entity under test.".to_string();
+        rfl.content = "This reflection mentions the entity under test.".to_string();
         let rfl_id = db::insert(&conn, &rfl).unwrap();
         conn.execute(
             "UPDATE memories SET mentioned_entity_id = ?1 WHERE id = ?2",
@@ -1767,10 +1773,9 @@ mod tests {
         );
 
         // Persona row exists and is signed at the artifact level.
-        let persona =
-            crate::persona::get_latest_persona(&conn, entity_id, "auto-persona-ns")
-                .expect("get_latest_persona failed")
-                .expect("persona row must exist after sweep");
+        let persona = crate::persona::get_latest_persona(&conn, entity_id, "auto-persona-ns")
+            .expect("get_latest_persona failed")
+            .expect("persona row must exist after sweep");
         assert_eq!(
             persona.attest_level, "self_signed",
             "persona attest_level must be self_signed (was {:?})",
