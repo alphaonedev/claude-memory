@@ -1039,12 +1039,36 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
             cli::backup::run_restore(&db_path, &a, j, &mut out)
         }
         Command::Curator(a) => {
-            let stdout = std::io::stdout();
-            let stderr = std::io::stderr();
-            let mut so = stdout.lock();
-            let mut se = stderr.lock();
-            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
-            cli::curator::run(&db_path, &a, app_config, &mut out).await
+            // Initialize the tracing subscriber so the daemon-start
+            // banner and per-cycle `tracing::info!` lines in
+            // `curator::run_daemon` actually emit. Previously only the
+            // HTTP `serve` path called `init_tracing()`, leaving the
+            // curator path silent regardless of `RUST_LOG`. `try_init`
+            // inside `init_tracing` makes this safe to call even when
+            // another subscriber is already installed.
+            init_tracing();
+            // Daemon mode runs indefinitely on a `spawn_blocking` worker
+            // that itself calls `tracing::info!`. If the dispatch held
+            // the process-wide `Stdout::lock()` while the daemon ran,
+            // the blocking thread's tracing write would deadlock on the
+            // ReentrantMutex (same-thread re-entry is fine; cross-thread
+            // contention isn't). `--daemon` doesn't write to `out`
+            // anyway, so route it to `io::sink()` and only lock the
+            // real stdout/stderr for the modes that actually emit CLI
+            // output (`--once`, `--reflect`, `--rollback`).
+            if a.daemon {
+                let mut so = std::io::sink();
+                let mut se = std::io::sink();
+                let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+                cli::curator::run(&db_path, &a, app_config, &mut out).await
+            } else {
+                let stdout = std::io::stdout();
+                let stderr = std::io::stderr();
+                let mut so = stdout.lock();
+                let mut se = stderr.lock();
+                let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+                cli::curator::run(&db_path, &a, app_config, &mut out).await
+            }
         }
         Command::Bench(a) => cmd_bench(&a),
         #[cfg(feature = "sal")]
