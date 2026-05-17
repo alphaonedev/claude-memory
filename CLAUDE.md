@@ -275,6 +275,25 @@ v0.7.0 ships. None is skippable. All three are pre-release.
 See tasks #16 → #17 → #18 → #19 (FINAL MISSION docs+pages
 drift) for the current execution state.
 
+**Six strategic high-level lanes (operator-set 2026-05-17 pm).**
+The canonical lane index lives in memory
+`b1109500-c655-49f1-b9a0-76e93bc890f6` (namespace
+`_v070_strategic_tracking`). Every session boot should load it.
+
+| # | Lane | Task |
+|---|------|------|
+| 1 | Bugs/issues — fix everything | #22 |
+| 2 | Code line coverage | #23 |
+| 3 | Full-spectrum testing (NHI + A2A 100% regression + net-new) | #24 |
+| 4 | Code refactoring (3-wave mandate) | #25 |
+| 5 | Documentation drift — 100% remediation | #26 |
+| 6 | GitHub Pages website redesign (3 audiences + 3 AI-NHI brass tacks) | #27 → issue #832 |
+
+All 6 pre-release. None skippable. Cross-lane discipline: Lane 1 is
+the meta-lane (every other lane's findings land there); Lane 3
+re-runs on the Wave-3 post-refactor binary; Lane 5 final sweep is
+post-refactor; Lane 6 can run in parallel with Lane 4.
+
 **Provenance.** Live memory `5d703efe-273b-4c84-8f40-ceb97b55d71e`
 in namespace `global/policies` is the canonical version of this
 directive and supersedes the earlier
