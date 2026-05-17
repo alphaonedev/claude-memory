@@ -231,6 +231,55 @@ Tracking issue: #198.
 - PRs target `develop` branch, not `main`. `main` is production releases only.
 - Commit format: `<type>: <summary>` (feat, fix, docs, style, refactor, test, chore, perf)
 
+## Prime directive (operator-set, 2026-05-17)
+
+> This is a **prime directive** — it overrides any general-purpose
+> framing of "non-blocking", "trend-line", or "surface-level" issues.
+> It applies to every agent that touches this repository.
+
+**The rule.** If you find or identify an issue, OPEN AN ISSUE,
+TRACK THE ISSUE, FIX THE ISSUE. Every issue gets fixed. That is
+the standard.
+
+**No surface-level dismissals.** There is no such thing as a
+"surface-level" issue. Do not classify findings as "non-blocking",
+"docs-drift", "trend-line", "MCP-coverage-gap", or any framing
+that would let the issue rot in a queue. Every gap is a defect.
+Every defect is fixed.
+
+**World-class only.** We are driving toward perfection. The
+ai-memory codebase is now substantial (70 MCP tools, 50 HTTP
+endpoints, 40 CLI subcommands, tens of thousands of lines of
+Rust); the architectural North Star is long-term code-base
+manageability so the codebase lasts for a very long time.
+
+**Mechanics.**
+- Discovery → tracker entry → fix → close is one non-divisible
+  workflow. The discoverer is responsible for all three steps
+  OR for explicitly handing off each step to a named queue/PR
+  with a tracker reference.
+- Every `auto-filed-by-agent` issue MUST have a "Proposed fix"
+  section with concrete file paths + line counts.
+- For each test-campaign phase: a separate "findings" memory
+  enumerating EVERY anomaly. All findings reach the issue
+  tracker before the next phase starts.
+- Documentation drift between code behavior and docstrings is a
+  real defect. File AND fix the docs (or fix the behavior so it
+  matches the docs).
+- The phrases "non-blocking", "trend-line gap", and
+  "surface-level" are banned in finding writeups.
+
+**Three-wave refactor mandate (pre-v0.7.0 release).** Three
+sequenced waves of refactor + review work must complete BEFORE
+v0.7.0 ships. None is skippable. All three are pre-release.
+See tasks #16 → #17 → #18 → #19 (FINAL MISSION docs+pages
+drift) for the current execution state.
+
+**Provenance.** Live memory `5d703efe-273b-4c84-8f40-ceb97b55d71e`
+in namespace `global/policies` is the canonical version of this
+directive and supersedes the earlier
+`71ecce23-611b-4984-962d-d37c4309f261`.
+
 ## Commit & push policy (project override of global default)
 
 > This policy **overrides** Claude Code's global default ("NEVER commit unless
