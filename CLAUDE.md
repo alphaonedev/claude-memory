@@ -275,11 +275,11 @@ v0.7.0 ships. None is skippable. All three are pre-release.
 See tasks #16 → #17 → #18 → #19 (FINAL MISSION docs+pages
 drift) for the current execution state.
 
-**Six strategic high-level lanes (operator-set 2026-05-17 pm-v2).**
+**Six strategic high-level lanes (operator-set 2026-05-17 pm-v3).**
 The canonical lane index lives in memory
-`afd38b34-ffc2-4f5b-a0a5-f039e3c86bf2` (namespace
-`_v070_strategic_tracking`; supersedes earlier `b1109500-...`).
-Every session boot should load it.
+`c413ac25-912c-4ffb-b939-5c19a201c25a` (namespace
+`_v070_strategic_tracking`; supersedes earlier `afd38b34-...` and
+`b1109500-...`). Every session boot should load it.
 
 | # | Lane | Task |
 |---|------|------|
@@ -295,7 +295,10 @@ Lane 3 testing tracks:
 - Track B: A2A 4-domain IronClaw, 100% regression + net-new — #8
 - Track C: Postgres + Apache AGE on 192.168.50.1 — #9
 - Track D: Cross-node integration (.100 ↔ .1) — #10
-- **Track E: DO agent hive — CPU-only, recursive learning at swarm scale** — #28 → issue #833 (**operator $-approval gated**)
+- **Track E1: DO CPU agent hive — sustained, low-TCO, xAI Grok 4.3 API** — #28 → issue #833 (**operator $-approval gated**)
+- **Track E2: AWS GPU burst hive — vLLM + Llama-3.1-8B self-hosted, 2-3 day window, $200 cap** — #29 → issue #834 (**operator $-approval gated**)
+
+E1 + E2 are complementary, not competing. E1 = "anyone can run on commodity hardware" (C-Level audience case study); E2 = "GPU-grade enterprise performance" (SME-engineering audience case study). Both demonstrate the same D1-D5 swarm/hive primitives; Lane 6 website uses both.
 
 All 6 lanes pre-release. None skippable. Cross-lane discipline: Lane 1 is
 the meta-lane (every other lane's findings land there); Lane 3
