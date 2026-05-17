@@ -275,11 +275,11 @@ v0.7.0 ships. None is skippable. All three are pre-release.
 See tasks #16 → #17 → #18 → #19 (FINAL MISSION docs+pages
 drift) for the current execution state.
 
-**Six strategic high-level lanes (operator-set 2026-05-17 pm-v3).**
+**Six strategic high-level lanes (operator-set 2026-05-17 pm-v4).**
 The canonical lane index lives in memory
-`c413ac25-912c-4ffb-b939-5c19a201c25a` (namespace
-`_v070_strategic_tracking`; supersedes earlier `afd38b34-...` and
-`b1109500-...`). Every session boot should load it.
+`ab6aedf5-c85e-4e22-ab16-0d70a5431402` (namespace
+`_v070_strategic_tracking`; supersedes earlier `c413ac25-...`,
+`afd38b34-...`, `b1109500-...`). Every session boot should load it.
 
 | # | Lane | Task |
 |---|------|------|
