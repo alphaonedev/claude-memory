@@ -186,7 +186,7 @@ pub enum RulesAction {
     SignSeed {
         /// Path to the operator private seed (32 bytes) — same shape
         /// `rules keygen --out` writes. Defaults to
-        /// `~/.config/ai-memory/operator.key`.
+        /// `<resolved --key-dir>/operator.key`.
         #[arg(long, value_name = "PATH")]
         key: Option<PathBuf>,
         /// Override the DB path (useful for smoke tests against a
@@ -369,14 +369,19 @@ pub fn run(
             // The top-level `--db` flag already produced `conn` above.
             // When the operator passes `--db` on the subcommand (the
             // L1-6 ergonomic shortcut for one-shot scripts), reopen
-            // against that path; otherwise reuse the open handle.
+            // against that path; otherwise reuse the open handle. If
+            // `--key` is omitted, resolve the singleton key file from
+            // the already-resolved top-level `--key-dir` so scripted
+            // `rules sign-seed --key-dir <dir>` calls do not silently
+            // fall back to the user's global config directory.
+            let resolved_key = key.unwrap_or_else(|| key_dir.join("operator.key"));
             if let Some(db_path) = db {
                 let conn2 = rusqlite::Connection::open(&db_path).with_context(|| {
                     format!("rules.sign-seed: open db at {}", db_path.display())
                 })?;
-                sign_seed_rules(&conn2, key.as_deref(), json, out)?;
+                sign_seed_rules(&conn2, Some(resolved_key.as_path()), json, out)?;
             } else {
-                sign_seed_rules(&conn, key.as_deref(), json, out)?;
+                sign_seed_rules(&conn, Some(resolved_key.as_path()), json, out)?;
             }
             Ok(())
         }
@@ -1904,6 +1909,38 @@ mod tests {
             stderr: &mut stderr,
         };
         run(&db_path, args, false, &mut out).expect("sign-seed reuse");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_sign_seed_uses_key_dir_when_key_is_absent() {
+        let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
+        let key_file = key_dir.join("operator.key");
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        keygen_operator(&key_file, false, &mut out).unwrap();
+
+        let args = RulesArgs {
+            key_dir: Some(key_dir),
+            action: RulesAction::SignSeed {
+                key: None,
+                db: None,
+            },
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+
+        run(&db_path, args, true, &mut out).expect("sign-seed honors --key-dir");
+        let s = String::from_utf8(stdout).unwrap();
+        assert!(s.contains("rules.sign-seed"), "got: {s}");
     }
 
     #[test]
