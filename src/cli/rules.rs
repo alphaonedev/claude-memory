@@ -387,13 +387,42 @@ pub fn run(
             // When the operator passes `--db` on the subcommand (the
             // L1-6 ergonomic shortcut for one-shot scripts), reopen
             // against that path; otherwise reuse the open handle.
+            //
+            // #822: precedence for the operator key path —
+            //   1. explicit `--key <PATH>` on the subcommand wins;
+            //   2. else derive a path under the top-level `--key-dir` /
+            //      `AI_MEMORY_KEY_DIR` resolution (line above), matching
+            //      the dual-layout discipline of
+            //      `load_operator_signing_key_from_dir` —
+            //         a. `<key_dir>/operator.key` (the singleton
+            //            layout `rules keygen` writes);
+            //         b. `<key_dir>/operator.priv` (the legacy `kp::save`
+            //            layout that paired with `operator.pub`).
+            //      Both files are raw 32-byte ed25519 seeds, so the
+            //      same `load_operator_signing_key` reader handles
+            //      either path without further branching;
+            //   3. else `sign_seed_rules`'s own fallback to
+            //      `resolve_operator_key_path(None)` (the legacy
+            //      `~/.config/ai-memory/operator.key` shape) keeps
+            //      working when neither is supplied.
+            let resolved_key: Option<PathBuf> = key.or_else(|| {
+                let key_layout = key_dir.join("operator.key");
+                if key_layout.exists() {
+                    return Some(key_layout);
+                }
+                let priv_layout = key_dir.join("operator.priv");
+                if priv_layout.exists() {
+                    return Some(priv_layout);
+                }
+                None
+            });
             if let Some(db_path) = db {
                 let conn2 = rusqlite::Connection::open(&db_path).with_context(|| {
                     format!("rules.sign-seed: open db at {}", db_path.display())
                 })?;
-                sign_seed_rules(&conn2, key.as_deref(), json, out)?;
+                sign_seed_rules(&conn2, resolved_key.as_deref(), json, out)?;
             } else {
-                sign_seed_rules(&conn, key.as_deref(), json, out)?;
+                sign_seed_rules(&conn, resolved_key.as_deref(), json, out)?;
             }
             Ok(())
         }
@@ -1979,6 +2008,103 @@ mod tests {
             stderr: &mut stderr,
         };
         run(&db_path, args, false, &mut out).expect("sign-seed reuse");
+    }
+
+    /// #822 regression helper: drive `rules sign-seed --key-dir <dir>`
+    /// (with no explicit `--key`) and assert it succeeds. Pre-fix this
+    /// fell through to `~/.config/ai-memory/operator.key` and failed
+    /// with `No such file or directory` on CI runners with no $HOME
+    /// keypair laid down.
+    #[cfg(unix)]
+    fn assert_sign_seed_succeeds_with_key_dir_only(
+        db_path: &std::path::Path,
+        key_dir: std::path::PathBuf,
+    ) {
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        rules_store::insert(
+            &conn,
+            &Rule {
+                id: "R-822".into(),
+                kind: "bash".into(),
+                matcher: r#"{"command_regex":"^x"}"#.into(),
+                severity: "refuse".into(),
+                reason: "t".into(),
+                namespace: "_global".into(),
+                created_by: "test".into(),
+                created_at: 0,
+                enabled: true,
+                signature: None,
+                attest_level: "unsigned".into(),
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let args = RulesArgs {
+            key_dir: Some(key_dir),
+            action: RulesAction::SignSeed {
+                key: None, // load-bearing: NO explicit --key.
+                db: None,
+            },
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        let result = run(db_path, args, true, &mut out);
+        let stderr_s = String::from_utf8_lossy(&stderr).to_string();
+        assert!(
+            result.is_ok(),
+            "#822: sign-seed must honor --key-dir; got err={result:?} stderr={stderr_s}"
+        );
+        let s = String::from_utf8(stdout).unwrap();
+        assert!(s.contains("rules.sign-seed"), "got: {s}");
+    }
+
+    /// #822 regression — layout-2 (`<key_dir>/operator.key`, the
+    /// singleton-file layout `rules keygen --out <dir>/operator.key`
+    /// writes; this is the layout the failing CI test used).
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_sign_seed_honors_key_dir_layout_key() {
+        let (dir, db_path, _kp_key_dir) = fresh_env_with_operator_key();
+        // Lay down only the singleton-file layout.
+        let key_dir = dir.path().join("keys-822-key");
+        std::fs::create_dir_all(&key_dir).unwrap();
+        let key_file = key_dir.join("operator.key");
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        keygen_operator(&key_file, false, &mut out).unwrap();
+        assert!(key_file.exists(), "keygen must lay down operator.key");
+        assert!(
+            !key_dir.join("operator.priv").exists(),
+            "this branch must not have the .priv layout present"
+        );
+        assert_sign_seed_succeeds_with_key_dir_only(&db_path, key_dir);
+    }
+
+    /// #822 regression — layout-1 (`<key_dir>/operator.priv` +
+    /// `operator.pub`, the legacy `kp::save` layout that
+    /// `fresh_env_with_operator_key` writes).
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_sign_seed_honors_key_dir_layout_priv() {
+        let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
+        assert!(
+            key_dir.join("operator.priv").exists(),
+            "fresh_env_with_operator_key must lay down operator.priv"
+        );
+        assert!(
+            !key_dir.join("operator.key").exists(),
+            "this branch must not have the .key layout present"
+        );
+        assert_sign_seed_succeeds_with_key_dir_only(&db_path, key_dir);
     }
 
     #[test]
