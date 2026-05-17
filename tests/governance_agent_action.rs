@@ -14,70 +14,22 @@
 //! (`governance_sandbox_boundary.rs`), and A2A replication
 //! (`governance_a2a_rules.rs`) properties.
 
-use std::sync::Mutex;
-
 use ai_memory::governance::agent_action::{
     AgentAction, Decision, GOVERNANCE_CHECK_EVENT_TYPE, check_agent_action,
 };
 use ai_memory::governance::rules_store::{self, Rule};
-use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
-use rand_core::OsRng;
+
+mod common;
+use common::*;
 
 // Same pattern as `tests/governance_a2a_rules.rs`: production
 // `enforced_rule_passes` drops any rule whose `attest_level !=
 // "operator_signed"` whenever `resolve_operator_pubkey()` returns a
 // key (env var OR `~/Library/Application Support/ai-memory/operator
 // .key.pub` on macOS). Tests install their own keypair via the env
-// var so the assertions hold regardless of host state.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-struct EnvVarGuard {
-    key: &'static str,
-    prev: Option<String>,
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: String) -> Self {
-        let lock = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let prev = std::env::var(key).ok();
-        // SAFETY: env mutation is serialized by `ENV_LOCK` held in `_lock`.
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self {
-            key,
-            prev,
-            _lock: lock,
-        }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        // SAFETY: env mutation is serialized by `ENV_LOCK` held in `_lock`.
-        unsafe {
-            match &self.prev {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
-
-/// Generate a fresh test keypair and install its verifying key in
-/// `AI_MEMORY_OPERATOR_PUBKEY`; returns the signing key + an RAII
-/// guard that restores prior env on drop.
-fn install_test_operator_key() -> (SigningKey, EnvVarGuard) {
-    let signing = SigningKey::generate(&mut OsRng);
-    let pub_b64 =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signing.verifying_key().to_bytes());
-    let guard = EnvVarGuard::set("AI_MEMORY_OPERATOR_PUBKEY", pub_b64);
-    (signing, guard)
-}
+// var (see `common::install_test_operator_key`) so the assertions
+// hold regardless of host state.
 
 fn fresh_conn() -> rusqlite::Connection {
     let conn = rusqlite::Connection::open_in_memory().unwrap();

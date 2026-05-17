@@ -35,77 +35,23 @@
 //! "R003"), not on the reason string. Reasons are operator-authored
 //! and may evolve.
 
-use std::sync::Mutex;
-
 use ai_memory::governance::rules_store::{self, Rule};
 use ai_memory::mcp::handle_check_agent_action;
-use base64::Engine;
-use ed25519_dalek::{Signer, SigningKey};
-use rand_core::OsRng;
+use ed25519_dalek::SigningKey;
 use rusqlite::Connection;
 use serde_json::json;
+
+mod common;
+use common::*;
 
 // Hermetic-test pattern: production `enforced_rule_passes` drops
 // `operator_signed` rules whose signature fails verification against
 // the resolved operator pubkey. Previously these tests inserted
 // placeholder 64-byte signatures (`vec![0xAB; 64]`) which fail
-// against any real pubkey. The fix: generate a per-test keypair,
-// install it in `AI_MEMORY_OPERATOR_PUBKEY`, and sign each rule's
-// canonical bytes with the matching signing key.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-struct EnvVarGuard {
-    key: &'static str,
-    prev: Option<String>,
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: String) -> Self {
-        let lock = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let prev = std::env::var(key).ok();
-        // SAFETY: env mutation is serialized by `ENV_LOCK` held in `_lock`.
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self {
-            key,
-            prev,
-            _lock: lock,
-        }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        // SAFETY: env mutation is serialized by `ENV_LOCK` held in `_lock`.
-        unsafe {
-            match &self.prev {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
-
-fn install_test_operator_key() -> (SigningKey, EnvVarGuard) {
-    let signing = SigningKey::generate(&mut OsRng);
-    let pub_b64 =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signing.verifying_key().to_bytes());
-    let guard = EnvVarGuard::set("AI_MEMORY_OPERATOR_PUBKEY", pub_b64);
-    (signing, guard)
-}
-
-fn sign_rule(mut rule: Rule, signing: &SigningKey) -> Rule {
-    rule.attest_level = "operator_signed".into();
-    rule.signature = None;
-    let canonical =
-        rules_store::canonical_bytes_for_signing(&rule).expect("canonical_bytes_for_signing");
-    rule.signature = Some(signing.sign(&canonical).to_bytes().to_vec());
-    rule
-}
+// against any real pubkey. The fix: `install_test_operator_key()`
+// (in `common`) generates a per-test keypair, installs it in
+// `AI_MEMORY_OPERATOR_PUBKEY`, and `sign_rule()` (also in `common`)
+// signs each rule's canonical bytes with the matching signing key.
 
 fn fresh_governance_conn() -> Connection {
     let conn = Connection::open_in_memory().expect("open in-memory db");

@@ -28,65 +28,21 @@
 //! This test pins all three.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use ai_memory::governance::agent_action::{AgentAction, Decision, check_agent_action_no_audit};
 use ai_memory::governance::rules_store::{self, Rule};
-use base64::Engine;
-use ed25519_dalek::{Signer, SigningKey};
-use rand_core::OsRng;
+use ed25519_dalek::Signer;
 use rusqlite::Connection;
+
+mod common;
+use common::*;
 
 // Hermetic-test pattern: production `enforced_rule_passes` drops
 // `operator_signed` rules whose signature fails verification against
-// the resolved operator pubkey. Test installs its own keypair in
-// `AI_MEMORY_OPERATOR_PUBKEY` and signs the rule with the matching
-// signing key so assertions hold regardless of host state.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-struct EnvVarGuard {
-    key: &'static str,
-    prev: Option<String>,
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: String) -> Self {
-        let lock = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let prev = std::env::var(key).ok();
-        // SAFETY: env mutation is serialized by `ENV_LOCK` held in `_lock`.
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self {
-            key,
-            prev,
-            _lock: lock,
-        }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        // SAFETY: env mutation is serialized by `ENV_LOCK` held in `_lock`.
-        unsafe {
-            match &self.prev {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
-
-fn install_test_operator_key() -> (SigningKey, EnvVarGuard) {
-    let signing = SigningKey::generate(&mut OsRng);
-    let pub_b64 =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signing.verifying_key().to_bytes());
-    let guard = EnvVarGuard::set("AI_MEMORY_OPERATOR_PUBKEY", pub_b64);
-    (signing, guard)
-}
+// the resolved operator pubkey. `install_test_operator_key()` (in
+// `common`) installs a per-test keypair in `AI_MEMORY_OPERATOR_PUBKEY`
+// and the rule below is signed with the matching signing key so
+// assertions hold regardless of host state.
 
 fn fresh_conn() -> Connection {
     let conn = Connection::open_in_memory().expect("open in-memory db");

@@ -29,7 +29,6 @@
 //! chain.
 
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -41,62 +40,18 @@ use ai_memory::governance::deferred_audit::{
     install_deferred_audit_drainer, spawn_drainer_task, spawn_supervised_drainer,
 };
 use ai_memory::governance::rules_store::{self, Rule};
-use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
-use rand_core::OsRng;
+
+mod common;
+use common::*;
 
 // Same pattern as `tests/governance_a2a_rules.rs` /
 // `tests/governance_agent_action.rs`: production `enforced_rule_passes`
 // drops any rule whose `attest_level != "operator_signed"` when an
 // operator pubkey resolves (env OR on-disk `operator.key.pub`). Each
-// test installs its own keypair in the env so the assertions hold
-// regardless of host state. The mutex serializes the modify-test-
-// restore region against parallel tests in this binary.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-struct EnvVarGuard {
-    key: &'static str,
-    prev: Option<String>,
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: String) -> Self {
-        let lock = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let prev = std::env::var(key).ok();
-        // SAFETY: env mutation is serialized by `ENV_LOCK` held in `_lock`.
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self {
-            key,
-            prev,
-            _lock: lock,
-        }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        // SAFETY: env mutation is serialized by `ENV_LOCK` held in `_lock`.
-        unsafe {
-            match &self.prev {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
-
-fn install_test_operator_key() -> (SigningKey, EnvVarGuard) {
-    let signing = SigningKey::generate(&mut OsRng);
-    let pub_b64 =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signing.verifying_key().to_bytes());
-    let guard = EnvVarGuard::set("AI_MEMORY_OPERATOR_PUBKEY", pub_b64);
-    (signing, guard)
-}
+// test calls `install_test_operator_key()` (in `common`) which installs
+// the keypair in the env, holds the shared `ENV_LOCK` for its lifetime,
+// and restores prior env state on drop.
 
 // ---------------------------------------------------------------------------
 // Test helpers

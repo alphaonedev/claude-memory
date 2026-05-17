@@ -9,88 +9,19 @@
 //! enforcement path on the receiving side is symmetric with the
 //! authoring side.
 
-use std::sync::Mutex;
-
 use ai_memory::governance::agent_action::{AgentAction, Decision, check_agent_action};
 use ai_memory::governance::rules_store::{self, Rule};
-use base64::Engine;
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use rand_core::OsRng;
+
+mod common;
+use common::*;
 
 // Tests in this file mutate the process-wide
 // `AI_MEMORY_OPERATOR_PUBKEY` env var so `resolve_operator_pubkey()`
 // returns the in-test key rather than the host's on-disk
-// `operator.key.pub`. Serialize the modify-test-restore region so
-// parallel test threads don't race.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-/// Generate a fresh test keypair and install its verifying key in the
-/// `AI_MEMORY_OPERATOR_PUBKEY` env var so production
-/// `resolve_operator_pubkey()` returns this key (bypasses the host's
-/// `~/Library/Application Support/ai-memory/operator.key.pub`). Returns
-/// the signing key + a guard that restores the prior env var on drop.
-fn install_test_operator_key() -> (SigningKey, EnvVarGuard) {
-    let signing = SigningKey::generate(&mut OsRng);
-    let verifying = signing.verifying_key();
-    let guard = EnvVarGuard::set("AI_MEMORY_OPERATOR_PUBKEY", encode_pubkey(&verifying));
-    (signing, guard)
-}
-
-fn encode_pubkey(vk: &VerifyingKey) -> String {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(vk.to_bytes())
-}
-
-/// RAII guard: holds the `ENV_LOCK`, sets the env var on construction,
-/// restores prior value on drop. Pairs with `install_test_operator_key`
-/// so every test that mutates the env exits clean even on assertion
-/// panic.
-struct EnvVarGuard {
-    key: &'static str,
-    prev: Option<String>,
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: String) -> Self {
-        let lock = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let prev = std::env::var(key).ok();
-        // SAFETY: env mutation is serialized by `ENV_LOCK` held in `_lock`.
-        unsafe {
-            std::env::set_var(key, value);
-        }
-        Self {
-            key,
-            prev,
-            _lock: lock,
-        }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        // SAFETY: env mutation is serialized by `ENV_LOCK` held in `_lock`.
-        unsafe {
-            match &self.prev {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-}
-
-/// Build a rule, sign its canonical bytes with `signing`, and store the
-/// 64-byte Ed25519 signature on the returned `Rule`. Mirrors what
-/// `ai-memory rules sign-seed` produces in production.
-fn sign_rule(mut rule: Rule, signing: &SigningKey) -> Rule {
-    rule.attest_level = "operator_signed".into();
-    rule.signature = None;
-    let canonical =
-        rules_store::canonical_bytes_for_signing(&rule).expect("canonical_bytes_for_signing");
-    rule.signature = Some(signing.sign(&canonical).to_bytes().to_vec());
-    rule
-}
+// `operator.key.pub`. `common::install_test_operator_key()` does the
+// install + returns an `EnvVarGuard` whose drop restores prior state;
+// the guard holds the shared `ENV_LOCK` so parallel tests in this
+// binary don't race on the env var.
 
 fn fresh_conn() -> rusqlite::Connection {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
