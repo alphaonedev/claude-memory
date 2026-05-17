@@ -275,11 +275,13 @@ v0.7.0 ships. None is skippable. All three are pre-release.
 See tasks #16 → #17 → #18 → #19 (FINAL MISSION docs+pages
 drift) for the current execution state.
 
-**Six strategic high-level lanes (operator-set 2026-05-17 pm-v4).**
+**Six strategic high-level lanes (operator-corrected 2026-05-17 pm-v7).**
 The canonical lane index lives in memory
-`ab6aedf5-c85e-4e22-ab16-0d70a5431402` (namespace
-`_v070_strategic_tracking`; supersedes earlier `c413ac25-...`,
-`afd38b34-...`, `b1109500-...`). Every session boot should load it.
+`f970d6f6-7bde-4d6b-9a53-500734961e04` (namespace
+`_v070_strategic_tracking`; supersedes `ab6aedf5-...`, `c413ac25-...`,
+`afd38b34-...`, `b1109500-...`). Operator correction memory:
+`338278f5-1d42-4e95-88c5-84d5fc3b1f53` (IP swap + Docker IronClaw +
+E1/E2 withdrawal). Every session boot should load both.
 
 | # | Lane | Task |
 |---|------|------|
@@ -290,15 +292,18 @@ The canonical lane index lives in memory
 | 5 | Documentation drift — 100% remediation | #26 |
 | 6 | GitHub Pages website redesign (3 audiences + 3 AI-NHI brass tacks) | #27 → issue #832 |
 
-Lane 3 testing tracks:
+Lane 3 testing tracks (corrected per operator 2026-05-17 pm-v7,
+memory `338278f5-1d42-4e95-88c5-84d5fc3b1f53`):
 - Track A: NHI playbook P0-P11 + verdict — #7 (P0-P2 done)
-- Track B: A2A 4-domain IronClaw, 100% regression + net-new — #8
-- Track C: Postgres + Apache AGE on 192.168.50.1 — #9
-- Track D: Cross-node integration (.100 ↔ .1) — #10
-- **Track E1: DO CPU agent hive — sustained, low-TCO, xAI Grok 4.3 API** — #28 → issue #833 (**operator $-approval gated**)
-- **Track E2: AWS GPU burst hive — vLLM + Llama-3.1-8B self-hosted, 2-3 day window, $200 cap** — #29 → issue #834 (**operator $-approval gated**)
+- Track B: A2A 4-domain IronClaw **in Docker** on this node (192.168.50.100), Grok 4.3 via xAI API, 100% regression + net-new — #8
+- Track C: Postgres + Apache AGE on Linux node **192.168.1.50** (NOT .50.1 — that was earlier-session drift) — #9
+- Track D: Cross-node integration (.100 ↔ **.1.50**) — #10
+- **Track E1 (DO CPU agent hive) — WITHDRAWN from active scope.** Pursuit requires explicit human biologic operator approval. Issue #833 / task #28 frozen.
+- **Track E2 (AWS GPU burst hive) — WITHDRAWN from active scope.** Same gating as E1. Issue #834 / task #29 frozen.
 
-E1 + E2 are complementary, not competing. E1 = "anyone can run on commodity hardware" (C-Level audience case study); E2 = "GPU-grade enterprise performance" (SME-engineering audience case study). Both demonstrate the same D1-D5 swarm/hive primitives; Lane 6 website uses both.
+**Current blocker for Track C/D:** 192.168.50.100 cannot reach
+192.168.1.50 (different subnets; ping + 22 + 5432 unreachable).
+Operator action needed: route / VPN / bridge between subnets.
 
 All 6 lanes pre-release. None skippable. Cross-lane discipline: Lane 1 is
 the meta-lane (every other lane's findings land there); Lane 3
