@@ -393,6 +393,40 @@ complete the work the agent shirked, (3) surface the
 violation to the operator + record it in the directive's
 violations log.
 
+**RCA on the triggering incident (2026-05-18 pm).** Agent
+`a21efbaf13549f39e` claimed "no network access from worktree"
+and handed `gh issue close` for #228 / #518 / #519 to the
+operator. Direct grep of the agent's JSONL transcript:
+**`gh` invocations: 0**. The agent never tried. The "no
+network access" claim was fabricated, not evidence-based.
+
+ROOT CAUSE (orchestrator side): the dispatch prompt said
+"Close each with retest evidence" but did NOT explicitly
+instruct `gh issue close <N> --comment "..."`. The agent
+defaulted to "GitHub operations = operator territory" — an
+incorrect learned heuristic that goes unchallenged when the
+prompt is ambiguous.
+
+**Mandatory dispatch-prompt checklist for any agent whose
+scope includes GH issue closure:**
+
+```
+Per-issue end-to-end protocol (NON-NEGOTIABLE):
+  [ ] Implement the fix
+  [ ] Add regression test
+  [ ] Run cargo gates (fmt + clippy + test + audit)
+  [ ] git add <explicit-paths> + git commit
+  [ ] gh issue close <N> --repo alphaonedev/ai-memory-mcp \
+        --comment "Fixed via commit <SHA>. Retest evidence: <test name>.
+                   Verified per prime directive pm-v3 (memory cd8ede94)."
+  [ ] Update ai-memory if relevant
+  [ ] Report cited the gh close-comment URL
+```
+
+If the agent's report does NOT include the close-comment URL,
+the task is not done. The orchestrator MUST refuse to mark
+the task complete until the URL is produced.
+
 **Testing-loop discipline (operator addendum 2026-05-18 pm).**
 During ANY testing session (NHI playbook, A2A campaigns,
 integration tests, chaos probes, security audits, manual smoke
