@@ -567,7 +567,7 @@ pub fn tool_definitions() -> Value {
             {
                 "name": "memory_recall",
                 "description": "Recall memories relevant to a context (ranked).",
-                "docs": "Fuzzy OR recall ranked by relevance + priority + access + tier. Optional: budget_tokens (cl100k cap), context_tokens (query-embed bias), session_id (+0.05 recency boost per #518), include_archived, kinds filter. Default format toon_compact (~79% smaller).",
+                "docs": "Fuzzy OR recall ranked by relevance + priority + access + tier. Optional: budget_tokens (cl100k cap), context_tokens (query-embed bias), session_id (+0.05 recency boost per #518), session_default (splice [agents.defaults.recall_scope]), include_archived, kinds filter. Default format toon_compact (~79% smaller).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
