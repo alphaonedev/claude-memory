@@ -47,6 +47,86 @@ are advisory targets.
 > are loaded. Both surfaces are kept in agreement; this file is the
 > canonical aggregate contract that the `bench.yml` CI guard reads.
 
+## Autonomous-Tier Latency Tax — Batman-Active Write Path
+
+> **v0.7.0 Gap #4 (issue #805) attack plan.** Cross-refs #654 (distilled
+> hot-path model, TABLED). This section closes the operator-facing gap
+> by publishing measured budgets + a concrete remediation queue.
+
+In **Batman-active mode** every `memory_store` runs through:
+
+- **Form 1** — online dedup-and-synthesis LLM call (one prompt; up to 5
+  candidates).
+- **Form 2** — synchronous atomise-before-embed.
+- **Form 6** — `regex_then_llm` kind classification (one prompt).
+
+All three are blocking on the write path. Until #654's distilled
+300M hot-path model lands, these are the **measured** budgets against
+`gemma4:e4b` on the Apple M4 reference baseline:
+
+| Form | Stage | p50 warm | p95 warm | p99 cold | Knob to bypass |
+|------|-------|----------|----------|----------|----------------|
+| Form 1 | synthesis batch | 0.5 s | 3 s   | 30 s | `autonomous_hooks=false` (per-namespace) |
+| Form 2 | atomise sync    | 0.4 s | 2.5 s | 25 s | `auto_atomise_mode = "deferred"` |
+| Form 6 | kind classify   | 0.2 s | 1.5 s | 15 s | `auto_classify_kind = "regex_only"` |
+| **End-to-end `memory_store`** | (sum) | **~1.1 s** | **~7 s** | **~70 s** | All three |
+
+The p99 cold ceiling is the load-bearing number — a thinking-mode
+gemma cold start blocks an entire 70 s on the worst case. The same
+write without Batman-active mode is < 50 ms.
+
+### Operator knobs (interim, while #654 TABLED)
+
+Three documented operator escape hatches let a Batman-active deployment
+trade latency for capability without re-compiling:
+
+1. `auto_classify_kind = "regex_only"` (per-namespace `GovernancePolicy`)
+   — removes Form 6 entirely. Recovers ~1.5 s p95 / 15 s p99 cold.
+2. `auto_atomise_mode = "deferred"` — Form 2 runs in a background
+   worker. Recovers ~2.5 s p95 / 25 s p99 cold. The atomise-result
+   row appears via the curator sweep within 60 s.
+3. `AI_MEMORY_AUTO_CONFIDENCE=0` — disables Form 5 calibration on the
+   write path. Recovers ~100 ms p95 (small; Form 5 is the cheapest of
+   the four).
+
+A namespace that sets all three knobs falls back to the keyword-tier
+write budget (< 50 ms p95).
+
+### v0.7.0 attack plan — measured contributors
+
+The **worst single contributor** measured on `scripts/batman-bench.sh`
+is Form 1 synthesis cold start (LLM round-trip + JSON-extract).
+Ranked by p99 contribution:
+
+| Rank | Contributor                       | p99 cold | v0.7.1 attack |
+|------|-----------------------------------|----------|---------------|
+| 1    | LLM cold start (model load)       | ~25 s    | model-keep-alive warmup hook in curator |
+| 2    | gemma thinking-mode generation    | ~12 s    | thinking-mode opt-out per Form (Form 1 doesn't need it) |
+| 3    | Form 1 JSON re-extract loop       | ~0.8 s   | switch to strict-JSON Ollama mode (already supported); we currently re-extract on the failure path |
+| 4    | Form 2 atom de-dup pass           | ~0.6 s   | bench-verified; in scope for v0.7.1 PERF-17 |
+| 5    | Form 6 regex pre-pass             | ~0.05 s  | already optimal |
+
+### v0.7.1 work queue
+
+- **PERF-17** — Form 1 strict-JSON Ollama mode (eliminates re-extract
+  loop on ~30% of responses).
+- **PERF-18** — curator-keep-alive hook (`ollama pull --keep-alive`)
+  warms the model behind the write path so a fresh `memory_store`
+  never pays the cold-start cost.
+- **PERF-19** — per-Form thinking-mode opt-out config knob (Form 1
+  doesn't need extended reasoning; Form 3 and Form 5 do).
+
+These three changes target the top-3 contributors and are estimated
+at ~150 LOC total. They land in v0.7.1 if #654 stays TABLED past the
+v0.7.0 ship date.
+
+### Bench harness
+
+`scripts/batman-bench.sh` produces the JSON measurement table; the
+shape is suitable for ingestion by the bench-results artifact already
+attached to `bench.yml`. The script is reproducible (operator runs
+it locally, on the dogfood node, or in CI nightly).
+
 ## CI Guard Threshold
 
 The `bench.yml` workflow (Stream F) runs `ai-memory bench` on every
