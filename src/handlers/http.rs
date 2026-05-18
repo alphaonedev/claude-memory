@@ -342,37 +342,49 @@ pub struct ConflictReport {
     pub suggested_merge: Option<String>,
 }
 
-#[allow(clippy::too_many_lines)]
-pub async fn create_memory(
-    State(app): State<AppState>,
-    headers: HeaderMap,
-    JsonOrBadRequest(body): JsonOrBadRequest<CreateMemory>,
-) -> impl IntoResponse {
-    let state = app.db.clone();
-    if let Err(e) = validate::validate_create(&body) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": e.to_string()})),
-        )
-            .into_response();
-    }
+// ---------------------------------------------------------------------------
+// #866 — `create_memory` stage-helpers.
+//
+// The original `create_memory` carried ~790 LOC across the agent_id
+// resolution, on_conflict policy, embed-before-lock pass, governance
+// pre-write hook, the actual `db::insert`, the federation fanout, and
+// the postgres-SAL branch. Each stage has a clear input → output
+// contract, so each lives in a dedicated helper. The wrapper below
+// is the orchestrator: it sequences the six stage helpers (1 agent_id
+// → 2 on_conflict → 3 embed-before-lock → 4 governance → 5 insert →
+// 6 fanout) and returns the assembled HTTP response.
+//
+// Helpers return `Result<T, axum::response::Response>` so any short-
+// circuit envelope (validation error, conflict, governance pending,
+// federation quorum failure) is just an `?` away from the orchestrator.
+// ---------------------------------------------------------------------------
 
-    // Resolve agent_id via the HTTP precedence chain:
-    //   1. top-level `body.agent_id`
-    //   2. embedded `body.metadata.agent_id` (caller's NHI claim — load-bearing
-    //      for federation receivers and clients that prefer the metadata-only
-    //      shape; mirrors the MCP precedence at `src/mcp.rs:1514-1516` and the
-    //      CLAUDE.md §Agent Identity (NHI) contract)
-    //   3. `X-Agent-Id` request header
-    //   4. per-request anonymous fallback
-    //
-    // L11 (NHI-D-fed-agentid-mutation): prior to this, step 2 was missing.
-    // A federated peer that resent a memory through `POST /api/v1/memories`
-    // (or a client that only stamped `metadata.agent_id`) would have its claim
-    // silently rewritten to the per-request anonymous id by the
-    // unconditional `obj.insert("agent_id", ...)` below, breaking the
-    // immutable-provenance contract documented in CLAUDE.md and enforced at
-    // the SQL layer by `db::insert_if_newer` / `apply_remote_memory`.
+/// #866 stage 1 — resolve `agent_id` via the HTTP precedence chain:
+///   1. top-level `body.agent_id`
+///   2. embedded `body.metadata.agent_id` (caller's NHI claim — load-
+///      bearing for federation receivers and clients that prefer the
+///      metadata-only shape; mirrors the MCP precedence at
+///      `src/mcp.rs:1514-1516` and the CLAUDE.md §Agent Identity (NHI)
+///      contract).
+///   3. `X-Agent-Id` request header
+///   4. per-request anonymous fallback
+///
+/// Also validates `body.scope` (when supplied at the top level) and
+/// merges both the resolved `agent_id` and the scope into a fresh
+/// `metadata` value. The returned metadata is the canonical one for
+/// the subsequent stages — `body.metadata` is consumed here.
+///
+/// L11 (NHI-D-fed-agentid-mutation): prior to this split, step 2 was
+/// missing — a federated peer that resent a memory through
+/// `POST /api/v1/memories` (or a client that only stamped
+/// `metadata.agent_id`) would have its claim silently rewritten to
+/// the per-request anonymous id, breaking the immutable-provenance
+/// contract documented in CLAUDE.md and enforced at the SQL layer by
+/// `db::insert_if_newer` / `apply_remote_memory`.
+fn resolve_create_agent_id(
+    headers: &HeaderMap,
+    body: &CreateMemory,
+) -> Result<(String, serde_json::Value), axum::response::Response> {
     let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
     let metadata_agent_id = body
         .metadata
@@ -380,518 +392,269 @@ pub async fn create_memory(
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
     let explicit_agent_id = body.agent_id.as_deref().or(metadata_agent_id.as_deref());
-    let agent_id = match crate::identity::resolve_http_agent_id(explicit_agent_id, header_agent_id)
-    {
-        Ok(id) => id,
-        Err(e) => {
-            return (
+    let agent_id = crate::identity::resolve_http_agent_id(explicit_agent_id, header_agent_id)
+        .map_err(|e| {
+            (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": format!("invalid agent_id: {e}")})),
             )
-                .into_response();
-        }
-    };
-    let mut metadata = body.metadata;
+                .into_response()
+        })?;
+    let mut metadata = body.metadata.clone();
     if let Some(obj) = metadata.as_object_mut() {
         obj.insert(
             "agent_id".to_string(),
             serde_json::Value::String(agent_id.clone()),
         );
     }
-    // #151 scope: validate + merge into metadata if supplied at the top level
-    // (inline metadata.scope still works; top-level is a shortcut)
+    // #151 scope: validate + merge into metadata if supplied at the top
+    // level (inline metadata.scope still works; top-level is a shortcut).
     if let Some(ref s) = body.scope {
-        if let Err(e) = validate::validate_scope(s) {
-            return (
+        validate::validate_scope(s).map_err(|e| {
+            (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": e.to_string()})),
             )
-                .into_response();
-        }
+                .into_response()
+        })?;
         if let Some(obj) = metadata.as_object_mut() {
             obj.insert("scope".to_string(), serde_json::Value::String(s.clone()));
         }
     }
+    Ok((agent_id, metadata))
+}
 
-    // v0.7.0 Wave-3 — Postgres-backed daemons take the SAL trait
-    // dispatch path. The trait's `store` accepts a fully-formed
-    // `Memory` value; the legacy SQLite path below also assembles
-    // a canonical `Memory` row but with substantially more
-    // ceremony (federation fanout, embedder integration, conflict
-    // policy enforcement, governance hooks). The Postgres branch
-    // takes the simpler shape — the upstream layers (governance,
-    // federation, audit) are still SQLite-bound today and lighting
-    // them up on Postgres is a follow-on wave. Until then the
-    // postgres-backed daemon ships a clean store-and-return path
-    // that's portable across both adapters.
-    #[cfg(feature = "sal")]
-    if matches!(app.storage_backend, StorageBackend::Postgres) {
-        let now = Utc::now();
-        // v0.7.0 L5 — fire the LLM `auto_tag` hook before assembling the
-        // canonical `Memory` row so the postgres `tags` column lands
-        // populated with LLM suggestions on the FIRST insert (no
-        // post-insert metadata update needed, unlike the MCP path's
-        // best-effort `db::update` at `src/mcp.rs:1864`). The hook is
-        // gated to autonomous/smart tiers (`tier_config.llm_model.is_some()`),
-        // skipped when operator supplied tags, and silently no-ops when
-        // Ollama is unreachable. See `maybe_auto_tag` for the full gate list.
-        let auto_tags = maybe_auto_tag(
-            &app,
-            &body.title,
-            &body.content,
-            &body.tags,
-            &body.namespace,
-        )
-        .await;
-        let mut final_tags = body.tags.clone();
-        for t in &auto_tags {
-            if !final_tags.iter().any(|existing| existing == t) {
-                final_tags.push(t.clone());
-            }
-        }
-        let mem = Memory {
-            id: Uuid::new_v4().to_string(),
-            tier: body.tier.clone(),
-            namespace: body.namespace.clone(),
-            title: body.title.clone(),
-            content: body.content.clone(),
-            tags: final_tags,
-            priority: body.priority,
-            confidence: body.confidence,
-            source: body.source.clone(),
-            access_count: 0,
-            created_at: now.to_rfc3339(),
-            updated_at: now.to_rfc3339(),
-            last_accessed_at: None,
-            expires_at: body.expires_at.clone(),
-            metadata,
-            reflection_depth: 0,
-            memory_kind: crate::models::MemoryKind::Observation,
-            entity_id: None,
-            persona_version: None,
-            citations: Vec::new(),
-            source_uri: None,
-            source_span: None,
-            confidence_source: ConfidenceSource::CallerProvided,
-            confidence_signals: None,
-            confidence_decayed_at: None,
-        };
-        let ctx = crate::store::CallerContext::for_agent(agent_id.clone());
+/// #866 stage 3 — embed-before-lock. Issue #219: the embedder runs
+/// 10-200 ms of ONNX / Ollama work that must not hold the single
+/// shared `Mutex<Connection>` on a multi-agent daemon.
+///
+/// v0.7.0 Round-2 F10 — calls α's `Embedder::embed_with_status` so the
+/// success/skip/fail outcome is captured alongside the vector. The
+/// success-path response stays silent on `Indexed`; non-`Indexed`
+/// outcomes are surfaced as `embed_status` on the response body so the
+/// caller can tell semantic recall will miss this row until a re-index.
+/// Keyword-only deployments (embedder=None) report `Indexed` so the
+/// response shape is unchanged on nodes where the semantic layer is
+/// intentionally absent.
+fn embed_create_before_lock(
+    app: &AppState,
+    title: &str,
+    content: &str,
+) -> (Option<Vec<f32>>, EmbedStatus) {
+    let embedding_text = format!("{title} {content}");
+    match app.embedder.as_ref().as_ref() {
+        None => (None, EmbedStatus::Indexed),
+        Some(emb) => emb.embed_with_status(&embedding_text),
+    }
+}
 
-        // v0.7.0 Wave-3 Continuation 5 (S18 / semantic recall) —
-        // compute the embedding before the SAL store call so the
-        // postgres `embedding` column lands populated. Without this,
-        // `recall_hybrid` filters every row out via
-        // `WHERE embedding IS NOT NULL` and semantic queries return 0
-        // results. Mirrors the SQLite path (handlers.rs ~L1093) where
-        // the embedding is generated outside the DB lock.
-        let embedding_text = format!("{} {}", mem.title, mem.content);
-        let embedding: Option<Vec<f32>> = match app.embedder.as_ref().as_ref() {
-            None => None,
-            Some(emb) => emb.embed(&embedding_text).ok(),
-        };
-
-        // v0.7.0 Wave-3 Continuation 3 (Phase 20) — governance walk on
-        // writes. The postgres branch now enforces the same inheritance
-        // chain + approver_type policy as the sqlite path. When the
-        // walk lands on an `Approve`-level rule the action is queued in
-        // `pending_actions` and we return 202 Accepted with the pending
-        // id — the caller must then drive the consensus path through
-        // `POST /pending/{id}/approve`.
-        let payload_for_pending = serde_json::to_value(&mem).unwrap_or_else(|_| json!({}));
-        match app
-            .store
-            .enforce_governance_action(
-                crate::store::GovernedAction::Store,
-                &mem.namespace,
-                &agent_id,
-                None,
-                None,
-                &payload_for_pending,
+/// #866 stage 2 — resolve the `on_conflict` policy:
+///   - `error` (default): 409 CONFLICT + typed payload if a row with
+///     the same (title, namespace) already exists.
+///   - `version`: rewrite the title to the next free suffix.
+///   - `merge`: fall through; `db::insert` will UPSERT via the legacy
+///     INSERT ... ON CONFLICT path.
+///
+/// Returns the final title to embed in the canonical row, or an
+/// already-assembled error response for the orchestrator to surface.
+fn resolve_create_conflict_title(
+    conn: &rusqlite::Connection,
+    body: &CreateMemory,
+    on_conflict_mode: &str,
+) -> Result<String, axum::response::Response> {
+    match on_conflict_mode {
+        "error" => match db::find_by_title_namespace(conn, &body.title, &body.namespace) {
+            Ok(Some(existing_id)) => Err((
+                StatusCode::CONFLICT,
+                Json(json!({
+                    "code": "CONFLICT",
+                    "error": format!(
+                        "memory with title '{}' already exists in namespace '{}'",
+                        body.title, body.namespace
+                    ),
+                    "existing_id": existing_id,
+                })),
             )
-            .await
-        {
-            Ok(crate::models::GovernanceDecision::Allow) => {}
-            Ok(crate::models::GovernanceDecision::Deny(reason)) => {
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(json!({"error": format!("denied: {reason}")})),
-                )
-                    .into_response();
-            }
-            Ok(crate::models::GovernanceDecision::Pending(pending_id)) => {
-                return (
-                    StatusCode::ACCEPTED,
-                    Json(json!({
-                        "status": "pending",
-                        "pending_id": pending_id,
-                        "namespace": mem.namespace,
-                        "storage_backend": "postgres",
-                    })),
-                )
-                    .into_response();
-            }
-            Err(e) => return store_err_to_response(e),
-        }
-
-        return match app
-            .store
-            .store_with_embedding(&ctx, &mem, embedding.as_deref())
-            .await
-        {
-            Ok(id) => {
-                // v0.7.0 Wave-3 Continuation 2 Phase 9 — audit emit on
-                // postgres write. The audit module is file-based with no
-                // SQLite coupling, so the emit chains through the same
-                // hash + sequence ladder as a sqlite-backed write. The
-                // F2 fix (cross-restart sequence persistence) lights up
-                // for postgres-backed daemons through this path.
-                if crate::audit::is_enabled() {
-                    let scope = mem
-                        .metadata
-                        .get("scope")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string);
-                    crate::audit::emit(crate::audit::EventBuilder::new(
-                        crate::audit::AuditAction::Store,
-                        crate::audit::actor(agent_id.clone(), "http_body", scope.clone()),
-                        crate::audit::target_memory(
-                            id.clone(),
-                            mem.namespace.clone(),
-                            Some(mem.title.clone()),
-                            Some(mem.tier.to_string()),
-                            scope,
-                        ),
-                    ));
-                }
-                // F-A2A1.6 (#700, S18) — postgres-branch federation
-                // fanout on `create_memory`. Mirrors the sqlite path
-                // at handlers/http.rs:937-966 so peers receive the
-                // freshly-stored row via `sync_push_via_store`, which
-                // re-embeds on arrival (see
-                // handlers/federation_receive.rs:387-395). Without
-                // this, a recall against a federated reader peer
-                // returns 0 rows even after the row settles on the
-                // leader — A2A scenario S18 reproduced this with
-                // `list=[1,1]` (peer sees the row in keyword list)
-                // but `/api/v1/recall` empty top-K (no embedding on
-                // peer's `embedding` column → pgvector cosine filter
-                // strips every row).
-                //
-                // Failure handling: fanout failures surface as 503
-                // with `Retry-After: 2` mirroring sqlite. The local
-                // commit has already landed; per ADR-0001 the
-                // substrate does NOT roll back on quorum failure.
-                if let Some(fed) = app.federation.as_ref() {
-                    let mut mem_echo = mem.clone();
-                    mem_echo.id = id.clone();
-                    match crate::federation::broadcast_store_quorum(fed, &mem_echo).await {
-                        Ok(tracker) => {
-                            if let Err(err) = crate::federation::finalise_quorum(&tracker) {
-                                let payload =
-                                    crate::federation::QuorumNotMetPayload::from_err(&err);
-                                return (
-                                    StatusCode::SERVICE_UNAVAILABLE,
-                                    [("Retry-After", "2")],
-                                    Json(serde_json::to_value(&payload).unwrap_or_default()),
-                                )
-                                    .into_response();
-                            }
-                        }
-                        Err(err) => {
-                            let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
-                            return (
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                [("Retry-After", "2")],
-                                Json(serde_json::to_value(&payload).unwrap_or_default()),
-                            )
-                                .into_response();
-                        }
-                    }
-                }
-                // #869 (2026-05-18) — pre-fix the silent
-                // `unwrap_or_else(json!({}))` masked a serialise
-                // failure as 201 + `{}`. Route through the typed
-                // helper that returns a 500 envelope on encode error
-                // so the wire surface stays honest.
-                let mut payload =
-                    match super::to_value_or_500("create_memory.postgres.response", &mem) {
-                        Ok(v) => v,
-                        Err(resp) => return resp,
-                    };
-                if let Some(obj) = payload.as_object_mut() {
-                    obj.insert("id".to_string(), serde_json::Value::String(id));
-                    // v0.7.0 L5 — echo LLM-generated tags as a dedicated
-                    // `auto_tags` field, matching MCP `handle_store`'s
-                    // response shape at `src/mcp.rs:1909-1911`. Operator-
-                    // supplied tags continue to land in the regular
-                    // `tags` array; `auto_tags` lets callers detect
-                    // which tags were LLM-derived without diffing.
-                    if !auto_tags.is_empty() {
-                        obj.insert("auto_tags".to_string(), json!(auto_tags));
-                    }
-                }
-                (StatusCode::CREATED, Json(payload)).into_response()
-            }
-            Err(e) => store_err_to_response(e),
-        };
-    }
-
-    // v0.7.0 L5 — fire the LLM `auto_tag` autonomy hook BEFORE the
-    // embedding pass + DB lock. Both LLM and embedder calls are
-    // network/CPU work that must not happen under the single shared
-    // `Mutex<Connection>` on a multi-agent daemon. Gated to
-    // autonomous/smart tiers (`tier_config.llm_model.is_some()`) and
-    // skipped when operator supplied tags — see `maybe_auto_tag` for
-    // the full gate list. Mirrors MCP `handle_store`'s gate at
-    // `src/mcp.rs:1812-1822`.
-    let auto_tags = maybe_auto_tag(
-        &app,
-        &body.title,
-        &body.content,
-        &body.tags,
-        &body.namespace,
-    )
-    .await;
-
-    // Issue #219: generate the embedding BEFORE taking the DB lock. Embedding
-    // (MiniLM ONNX / nomic via Ollama) is 10-200ms of work we do not want
-    // holding the single `Mutex<Connection>` on a multi-agent daemon.
-    //
-    // v0.7.0 Round-2 F10 — call α's `Embedder::embed_with_status` so we
-    // capture the success/skip/fail outcome alongside the vector. The
-    // success-path response stays silent on `Indexed`; non-`Indexed`
-    // outcomes are surfaced as `embed_status` on the response body so
-    // the caller can tell semantic recall will miss this row until a
-    // re-index. Keyword-only deployments (embedder=None) report
-    // `Indexed` so the response shape is unchanged on nodes where the
-    // semantic layer is intentionally absent.
-    let embedding_text = format!("{} {}", body.title, body.content);
-    let (embedding, embed_status): (Option<Vec<f32>>, EmbedStatus) =
-        match app.embedder.as_ref().as_ref() {
-            None => (None, EmbedStatus::Indexed),
-            Some(emb) => emb.embed_with_status(&embedding_text),
-        };
-
-    // v0.6.3.1 P2 (G6) — resolve `on_conflict` policy. HTTP defaults to
-    // 'error' (no legacy v1 backward-compat to honor); callers that want
-    // the v0.6.3 silent-merge behaviour must pass on_conflict='merge'.
-    let on_conflict_mode = body.on_conflict.as_deref().unwrap_or("error");
-    if !matches!(on_conflict_mode, "error" | "merge" | "version") {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": format!(
-                    "invalid on_conflict '{on_conflict_mode}' (expected error|merge|version)"
-                )
-            })),
-        )
-            .into_response();
-    }
-
-    let now = Utc::now();
-    let lock = state.lock().await;
-    let expires_at = body.expires_at.or_else(|| {
-        body.ttl_secs
-            .or(lock.2.ttl_for_tier(&body.tier))
-            .map(|s| (now + Duration::seconds(s)).to_rfc3339())
-    });
-
-    // v0.6.3.1 P2 (G6) — apply the conflict policy before building the
-    // canonical row. Mirror MCP handle_store: 'error' returns 409 with a
-    // typed payload; 'version' rewrites the title to a free suffix;
-    // 'merge' falls through to db::insert which keeps the legacy
-    // INSERT...ON CONFLICT upsert.
-    let resolved_title = match on_conflict_mode {
-        "error" => match db::find_by_title_namespace(&lock.0, &body.title, &body.namespace) {
-            Ok(Some(existing_id)) => {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(json!({
-                        "code": "CONFLICT",
-                        "error": format!(
-                            "memory with title '{}' already exists in namespace '{}'",
-                            body.title, body.namespace
-                        ),
-                        "existing_id": existing_id,
-                    })),
-                )
-                    .into_response();
-            }
-            Ok(None) => body.title.clone(),
+                .into_response()),
+            Ok(None) => Ok(body.title.clone()),
             Err(e) => {
                 tracing::error!("on_conflict lookup failed: {e}");
-                return (
+                Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"error": "conflict check failed"})),
                 )
-                    .into_response();
+                    .into_response())
             }
         },
-        "version" => match db::next_versioned_title(&lock.0, &body.title, &body.namespace) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::error!("on_conflict=version failed: {e}");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": "could not pick a versioned title"})),
-                )
-                    .into_response();
-            }
-        },
-        _ => body.title.clone(),
-    };
-
-    // v0.7.0 L5 — merge LLM-derived `auto_tags` with operator-supplied
-    // `body.tags`. Operator tags lead; auto-tag entries that duplicate
-    // an existing operator tag are dropped to avoid double-counting on
-    // FTS5 weighting downstream. `auto_tags` will be `Vec::new()` when
-    // the LLM hook was skipped (operator supplied tags, content too
-    // short, internal namespace, tier has no llm_model, Ollama
-    // unreachable) so the union is a no-op on the keyword/semantic path.
-    let mut merged_tags = body.tags.clone();
-    for t in &auto_tags {
-        if !merged_tags.iter().any(|existing| existing == t) {
-            merged_tags.push(t.clone());
-        }
+        "version" => db::next_versioned_title(conn, &body.title, &body.namespace).map_err(|e| {
+            tracing::error!("on_conflict=version failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "could not pick a versioned title"})),
+            )
+                .into_response()
+        }),
+        _ => Ok(body.title.clone()),
     }
+}
 
-    let mem = Memory {
-        id: Uuid::new_v4().to_string(),
-        tier: body.tier,
-        namespace: body.namespace,
-        title: resolved_title,
-        content: body.content,
-        tags: merged_tags,
-        priority: body.priority.clamp(1, 10),
-        confidence: body.confidence.clamp(0.0, 1.0),
-        source: body.source,
-        access_count: 0,
-        created_at: now.to_rfc3339(),
-        updated_at: now.to_rfc3339(),
-        last_accessed_at: None,
-        expires_at,
-        metadata,
-        reflection_depth: 0,
-        memory_kind: crate::models::MemoryKind::Observation,
-        entity_id: None,
-        persona_version: None,
-        citations: Vec::new(),
-        source_uri: None,
-        source_span: None,
-        confidence_source: ConfidenceSource::CallerProvided,
-        confidence_signals: None,
-        confidence_decayed_at: None,
+/// #866 stage 4 — substrate governance pre-write hook. Walks the
+/// inheritance chain via `db::enforce_governance` and either:
+///   - `Allow`: returns `Ok(())` to the orchestrator (caller proceeds
+///     to the insert stage).
+///   - `Deny`: short-circuits with 403 FORBIDDEN + the operator-
+///     authored reason verbatim.
+///   - `Pending`: queues the action in `pending_actions`, fires the
+///     K4 `approval_requested` webhook, then drops the lock and
+///     fans the pending row out to federation peers via
+///     `broadcast_pending_quorum`. Returns 202 ACCEPTED with the
+///     pending id so the caller can drive the consensus path through
+///     `POST /pending/{id}/approve`.
+///
+/// The Pending branch consumes the supplied `lock`; the orchestrator
+/// re-acquires `state.lock().await` AFTER an `Allow` return because
+/// the consume here is intentional (`drop(lock)` before the federation
+/// broadcast — keeping the DB lock across an async `await` is the
+/// regression #866 explicitly guards against).
+async fn enforce_create_governance<'a>(
+    app: &AppState,
+    lock: tokio::sync::MutexGuard<
+        'a,
+        (
+            rusqlite::Connection,
+            std::path::PathBuf,
+            crate::config::ResolvedTtl,
+            bool,
+        ),
+    >,
+    mem: &Memory,
+) -> Result<
+    tokio::sync::MutexGuard<
+        'a,
+        (
+            rusqlite::Connection,
+            std::path::PathBuf,
+            crate::config::ResolvedTtl,
+            bool,
+        ),
+    >,
+    axum::response::Response,
+> {
+    use crate::models::{GovernanceDecision, GovernedAction};
+    let agent_for_gov = mem
+        .metadata
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    // #869 — silently degrading to `Value::Null` would let the
+    // governance engine see a different payload than the one we
+    // were about to commit (rule predicates that key on memory
+    // fields would all evaluate against `null` and degenerate to
+    // either always-allow or always-deny depending on the rule
+    // semantics). Fail closed with a 500 instead.
+    let payload = match super::to_value_or_500("create_memory.governance.payload", mem) {
+        Ok(v) => v,
+        Err(resp) => return Err(resp),
     };
-
-    // Task 1.9: governance enforcement (store-side).
-    {
-        use crate::models::{GovernanceDecision, GovernedAction};
-        let agent_for_gov = mem
-            .metadata
-            .get("agent_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        // #869 — silently degrading to `Value::Null` would let the
-        // governance engine see a different payload than the one we
-        // were about to commit (rule predicates that key on memory
-        // fields would all evaluate against `null` and degenerate to
-        // either always-allow or always-deny depending on the rule
-        // semantics). Fail closed with a 500 instead.
-        let payload = match super::to_value_or_500("create_memory.governance.payload", &mem) {
-            Ok(v) => v,
-            Err(resp) => return resp,
-        };
-        match db::enforce_governance(
-            &lock.0,
-            GovernedAction::Store,
-            &mem.namespace,
-            &agent_for_gov,
-            None,
-            None,
-            &payload,
-        ) {
-            Ok(GovernanceDecision::Allow) => {}
-            Ok(GovernanceDecision::Deny(reason)) => {
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(json!({"error": format!("store denied by governance: {reason}")})),
-                )
-                    .into_response();
-            }
-            Ok(GovernanceDecision::Pending(pending_id)) => {
-                // v0.6.2 (S34): fan out the new pending row so peers can
-                // approve / reject / list it. Load the canonical row we
-                // just inserted and broadcast before responding.
-                let pending_row = db::get_pending_action(&lock.0, &pending_id).ok().flatten();
-                // v0.7.0 K4 — fire the `approval_requested` webhook
-                // event through the existing subscription dispatcher so
-                // K10's Approval API HTTP+SSE handler picks it up. Done
-                // BEFORE the lock drops so the subscriber list query has
-                // a connection; the actual HTTP POSTs spawn detached
-                // threads (fire-and-forget). Best-effort: a dispatch
-                // failure must not roll back the pending row.
-                crate::subscriptions::dispatch_approval_requested(&lock.0, &pending_id, &lock.1);
-                let namespace = mem.namespace.clone();
-                drop(lock);
-                if let (Some(pa), Some(fed)) = (pending_row.as_ref(), app.federation.as_ref()) {
-                    match crate::federation::broadcast_pending_quorum(fed, pa).await {
-                        Ok(tracker) => {
-                            if let Err(err) = crate::federation::finalise_quorum(&tracker) {
-                                let payload =
-                                    crate::federation::QuorumNotMetPayload::from_err(&err);
-                                return (
-                                    StatusCode::SERVICE_UNAVAILABLE,
-                                    [("Retry-After", "2")],
-                                    Json(serde_json::to_value(&payload).unwrap_or_default()),
-                                )
-                                    .into_response();
-                            }
-                        }
-                        Err(err) => {
+    match db::enforce_governance(
+        &lock.0,
+        GovernedAction::Store,
+        &mem.namespace,
+        &agent_for_gov,
+        None,
+        None,
+        &payload,
+    ) {
+        Ok(GovernanceDecision::Allow) => Ok(lock),
+        Ok(GovernanceDecision::Deny(reason)) => Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": format!("store denied by governance: {reason}")})),
+        )
+            .into_response()),
+        Ok(GovernanceDecision::Pending(pending_id)) => {
+            // v0.6.2 (S34): fan out the new pending row so peers can
+            // approve / reject / list it. Load the canonical row we
+            // just inserted and broadcast before responding.
+            let pending_row = db::get_pending_action(&lock.0, &pending_id).ok().flatten();
+            // v0.7.0 K4 — fire the `approval_requested` webhook event
+            // through the existing subscription dispatcher so K10's
+            // Approval API HTTP+SSE handler picks it up. Done BEFORE
+            // the lock drops so the subscriber list query has a
+            // connection; the actual HTTP POSTs spawn detached threads
+            // (fire-and-forget). Best-effort: a dispatch failure must
+            // not roll back the pending row.
+            crate::subscriptions::dispatch_approval_requested(&lock.0, &pending_id, &lock.1);
+            let namespace = mem.namespace.clone();
+            drop(lock);
+            if let (Some(pa), Some(fed)) = (pending_row.as_ref(), app.federation.as_ref()) {
+                match crate::federation::broadcast_pending_quorum(fed, pa).await {
+                    Ok(tracker) => {
+                        if let Err(err) = crate::federation::finalise_quorum(&tracker) {
                             let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
-                            return (
+                            return Err((
                                 StatusCode::SERVICE_UNAVAILABLE,
                                 [("Retry-After", "2")],
                                 Json(serde_json::to_value(&payload).unwrap_or_default()),
                             )
-                                .into_response();
+                                .into_response());
                         }
                     }
+                    Err(err) => {
+                        let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                        return Err((
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            [("Retry-After", "2")],
+                            Json(serde_json::to_value(&payload).unwrap_or_default()),
+                        )
+                            .into_response());
+                    }
                 }
-                return (
-                    StatusCode::ACCEPTED,
-                    Json(json!({
-                        "status": "pending",
-                        "pending_id": pending_id,
-                        "reason": "governance requires approval",
-                        "action": "store",
-                        "namespace": namespace,
-                    })),
-                )
-                    .into_response();
             }
-            Err(e) => {
-                tracing::error!("governance error: {e}");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": "governance check failed"})),
-                )
-                    .into_response();
-            }
+            Err((
+                StatusCode::ACCEPTED,
+                Json(json!({
+                    "status": "pending",
+                    "pending_id": pending_id,
+                    "reason": "governance requires approval",
+                    "action": "store",
+                    "namespace": namespace,
+                })),
+            )
+                .into_response())
+        }
+        Err(e) => {
+            tracing::error!("governance error: {e}");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "governance check failed"})),
+            )
+                .into_response())
         }
     }
+}
 
-    // Check for contradictions
-    let contradictions =
-        db::find_contradictions(&lock.0, &mem.title, &mem.namespace).unwrap_or_default();
-    let contradiction_ids: Vec<String> = contradictions
-        .iter()
-        .filter(|c| c.id != mem.id)
-        .map(|c| c.id.clone())
-        .collect();
-
+/// #866 stage 5 — quota check + `db::insert`. The quota gate mirrors
+/// the MCP path (`src/mcp.rs:1691`): `check_and_record` before the
+/// insert, refund on failure. The audit emit fires on success; the
+/// embedding write to `db::set_embedding` lights the HNSW index up
+/// after the row commits. Returns either the persisted row id (on
+/// success) or a pre-built error response (validation, quota, or
+/// substrate failure including the L1-6 substrate governance refusal
+/// which is mapped to 403 FORBIDDEN + `GOVERNANCE_REFUSED`).
+fn insert_create_with_quota(
+    lock: &tokio::sync::MutexGuard<
+        '_,
+        (
+            rusqlite::Connection,
+            std::path::PathBuf,
+            crate::config::ResolvedTtl,
+            bool,
+        ),
+    >,
+    mem: &Memory,
+    embedding: &Option<Vec<f32>>,
+) -> Result<String, axum::response::Response> {
     // v0.7.0 Round-2 F7 — per-agent quota gate. Round-1 evidence: 500
     // HTTP stores from a single agent_id incremented zero rows in
     // `agent_quotas` while the same agent's MCP-side stamp incremented
@@ -945,7 +708,7 @@ pub async fn create_memory(
             // `code: "QUOTA_EXCEEDED"` envelope so callers can switch
             // on the limit name. Substrate errors bubble up as 500
             // because the row was never written.
-            return match e {
+            return Err(match e {
                 crate::quotas::QuotaCheckError::Quota(qe) => (
                     StatusCode::TOO_MANY_REQUESTS,
                     Json(json!({
@@ -966,128 +729,24 @@ pub async fn create_memory(
                     )
                         .into_response()
                 }
-            };
+            });
         }
     }
 
-    match db::insert(&lock.0, &mem) {
+    match db::insert(&lock.0, mem) {
         Ok(actual_id) => {
-            // Issue #219: persist the embedding and warm the HNSW index so
-            // semantic recall can find this memory. Previously the HTTP path
-            // stored the row but never called `set_embedding`, silently
-            // excluding every HTTP-authored memory from semantic search.
-            if let Some(ref vec) = embedding
+            // Issue #219: persist the embedding into the connection so
+            // semantic recall can find this memory. Previously the HTTP
+            // path stored the row but never called `set_embedding`,
+            // silently excluding every HTTP-authored memory from
+            // semantic search. HNSW index warm-up happens after the
+            // lock drops in the orchestrator.
+            if let Some(vec) = embedding.as_ref()
                 && let Err(e) = db::set_embedding(&lock.0, &actual_id, vec)
             {
                 tracing::warn!("failed to store embedding for {actual_id}: {e}");
             }
-            // Drop the DB lock before taking the vector index lock.
-            drop(lock);
-            if let Some(vec) = embedding {
-                let mut idx_lock = app.vector_index.lock().await;
-                if let Some(idx) = idx_lock.as_mut() {
-                    idx.insert(actual_id.clone(), vec);
-                }
-            }
-            // #196: echo the resolved agent_id so callers don't need a follow-up get.
-            let resolved_agent_id = mem
-                .metadata
-                .get("agent_id")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            // PR-5 (issue #487): security audit trail for HTTP store.
-            crate::audit::emit(crate::audit::EventBuilder::new(
-                crate::audit::AuditAction::Store,
-                crate::audit::actor(
-                    resolved_agent_id.clone().unwrap_or_default(),
-                    "http_body",
-                    mem.metadata
-                        .get("scope")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                ),
-                crate::audit::target_memory(
-                    actual_id.clone(),
-                    mem.namespace.clone(),
-                    Some(mem.title.clone()),
-                    Some(mem.tier.to_string()),
-                    mem.metadata
-                        .get("scope")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                ),
-            ));
-            let mut response = json!({
-                "id": actual_id,
-                "tier": mem.tier,
-                "namespace": mem.namespace,
-                "title": mem.title,
-                "agent_id": resolved_agent_id,
-            });
-            if !contradiction_ids.is_empty() {
-                response["potential_contradictions"] = json!(contradiction_ids);
-            }
-            // v0.7.0 L5 — echo LLM-generated tags as a dedicated
-            // `auto_tags` field, matching MCP `handle_store`'s
-            // response at `src/mcp.rs:1909-1911`. Operator tags continue
-            // to round-trip through `tags`; clients that want to know
-            // which tags were LLM-derived inspect `auto_tags`.
-            if !auto_tags.is_empty() {
-                response["auto_tags"] = json!(auto_tags);
-            }
-            // v0.7.0 Round-2 F10 — surface embed_status to the caller
-            // when α's `embed_with_status` reported anything other than
-            // `Indexed` (skipped: oversized content / empty body, or
-            // failed: embedder timeout, ollama unreachable, model load
-            // failure, …). Indexed is intentionally NOT surfaced so
-            // the existing response shape is unchanged for the common
-            // case; the skip/fail signal is a positive presence marker
-            // rather than a free-form enum every client has to switch
-            // on.
-            if embed_status.is_degraded() {
-                response["embed_status"] = json!(embed_status.as_str());
-                let reason = embed_status.reason();
-                if !reason.is_empty() {
-                    response["embed_status_reason"] = json!(reason);
-                }
-            }
-            // v0.7 federation: fan out to peers when --quorum-writes is
-            // configured. The local commit already landed; if quorum
-            // is not met we return 503 but we do NOT roll back the
-            // local write — per ADR-0001, caller sees
-            // BackendUnavailable{quorum} and the sync-daemon's
-            // eventual-consistency loop catches straggling peers up.
-            if let Some(fed) = app.federation.as_ref() {
-                let mut mem_echo = mem.clone();
-                mem_echo.id = actual_id.clone();
-                match crate::federation::broadcast_store_quorum(fed, &mem_echo).await {
-                    Ok(tracker) => match crate::federation::finalise_quorum(&tracker) {
-                        Ok(got) => {
-                            response["quorum_acks"] = json!(got);
-                            return (StatusCode::CREATED, Json(response)).into_response();
-                        }
-                        Err(err) => {
-                            let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
-                            return (
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                [("Retry-After", "2")],
-                                Json(serde_json::to_value(&payload).unwrap_or_default()),
-                            )
-                                .into_response();
-                        }
-                    },
-                    Err(err) => {
-                        let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
-                        return (
-                            StatusCode::SERVICE_UNAVAILABLE,
-                            [("Retry-After", "2")],
-                            Json(serde_json::to_value(&payload).unwrap_or_default()),
-                        )
-                            .into_response();
-                    }
-                }
-            }
-            (StatusCode::CREATED, Json(response)).into_response()
+            Ok(actual_id)
         }
         Err(e) => {
             // v0.7.0 Round-2 F7 — insert failed AFTER we committed the
@@ -1116,23 +775,470 @@ pub async fn create_memory(
                     "create_memory refused by substrate governance: {}",
                     refusal.reason
                 );
-                return (
+                return Err((
                     StatusCode::FORBIDDEN,
                     Json(json!({
                         "code": "GOVERNANCE_REFUSED",
                         "error": refusal.reason,
                     })),
                 )
-                    .into_response();
+                    .into_response());
             }
             tracing::error!("handler error: {e}");
-            (
+            Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": "internal server error"})),
             )
-                .into_response()
+                .into_response())
         }
     }
+}
+
+/// #866 stage 6 — federation fanout + HNSW index warm-up + assembled
+/// CREATED response.
+///
+/// Per ADR-0001 the substrate does NOT roll back on quorum failure:
+/// the local commit has already landed when we reach this stage. A
+/// quorum miss surfaces 503 + `Retry-After: 2` and the sync-daemon's
+/// eventual-consistency loop catches stragglers up. A `Some(fed)` +
+/// `Ok(got)` path includes `quorum_acks: <count>` on the response.
+async fn fanout_and_assemble_create_response(
+    app: &AppState,
+    mem: &Memory,
+    actual_id: &str,
+    embedding: Option<Vec<f32>>,
+    auto_tags: &[String],
+    contradiction_ids: Vec<String>,
+    embed_status: EmbedStatus,
+) -> axum::response::Response {
+    // HNSW warm-up after the DB lock dropped (done by the caller).
+    if let Some(vec) = embedding {
+        let mut idx_lock = app.vector_index.lock().await;
+        if let Some(idx) = idx_lock.as_mut() {
+            idx.insert(actual_id.to_string(), vec);
+        }
+    }
+    // #196: echo the resolved agent_id so callers don't need a follow-up get.
+    let resolved_agent_id = mem
+        .metadata
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    // PR-5 (issue #487): security audit trail for HTTP store.
+    crate::audit::emit(crate::audit::EventBuilder::new(
+        crate::audit::AuditAction::Store,
+        crate::audit::actor(
+            resolved_agent_id.clone().unwrap_or_default(),
+            "http_body",
+            mem.metadata
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        ),
+        crate::audit::target_memory(
+            actual_id.to_string(),
+            mem.namespace.clone(),
+            Some(mem.title.clone()),
+            Some(mem.tier.to_string()),
+            mem.metadata
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        ),
+    ));
+    let mut response = json!({
+        "id": actual_id,
+        "tier": mem.tier,
+        "namespace": mem.namespace,
+        "title": mem.title,
+        "agent_id": resolved_agent_id,
+    });
+    if !contradiction_ids.is_empty() {
+        response["potential_contradictions"] = json!(contradiction_ids);
+    }
+    // v0.7.0 L5 — echo LLM-generated tags as a dedicated
+    // `auto_tags` field, matching MCP `handle_store`'s response.
+    if !auto_tags.is_empty() {
+        response["auto_tags"] = json!(auto_tags);
+    }
+    // v0.7.0 Round-2 F10 — surface embed_status to the caller when α's
+    // `embed_with_status` reported anything other than `Indexed`.
+    if embed_status.is_degraded() {
+        response["embed_status"] = json!(embed_status.as_str());
+        let reason = embed_status.reason();
+        if !reason.is_empty() {
+            response["embed_status_reason"] = json!(reason);
+        }
+    }
+    // v0.7 federation: fan out to peers when --quorum-writes is
+    // configured. Per ADR-0001 a failed quorum returns 503 but does
+    // NOT roll back the local write.
+    if let Some(fed) = app.federation.as_ref() {
+        let mut mem_echo = mem.clone();
+        mem_echo.id = actual_id.to_string();
+        match crate::federation::broadcast_store_quorum(fed, &mem_echo).await {
+            Ok(tracker) => match crate::federation::finalise_quorum(&tracker) {
+                Ok(got) => {
+                    response["quorum_acks"] = json!(got);
+                    return (StatusCode::CREATED, Json(response)).into_response();
+                }
+                Err(err) => {
+                    let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        [("Retry-After", "2")],
+                        Json(serde_json::to_value(&payload).unwrap_or_default()),
+                    )
+                        .into_response();
+                }
+            },
+            Err(err) => {
+                let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [("Retry-After", "2")],
+                    Json(serde_json::to_value(&payload).unwrap_or_default()),
+                )
+                    .into_response();
+            }
+        }
+    }
+    (StatusCode::CREATED, Json(response)).into_response()
+}
+
+/// #866 — postgres-backed daemon path for `create_memory`. The SAL
+/// trait's `store_with_embedding` writes the row and the embedding
+/// in a single call; the surrounding ceremony (auto_tag,
+/// governance, audit, federation) mirrors the sqlite stages above
+/// just without the shared `Mutex<Connection>` discipline (postgres
+/// connection-pooling owns its own concurrency).
+#[cfg(feature = "sal")]
+async fn create_memory_postgres(
+    app: &AppState,
+    body: &CreateMemory,
+    agent_id: &str,
+    metadata: serde_json::Value,
+) -> axum::response::Response {
+    let now = Utc::now();
+    // v0.7.0 L5 — fire the LLM `auto_tag` hook before assembling the
+    // canonical `Memory` row so the postgres `tags` column lands
+    // populated with LLM suggestions on the FIRST insert.
+    let auto_tags =
+        maybe_auto_tag(app, &body.title, &body.content, &body.tags, &body.namespace).await;
+    let mut final_tags = body.tags.clone();
+    for t in &auto_tags {
+        if !final_tags.iter().any(|existing| existing == t) {
+            final_tags.push(t.clone());
+        }
+    }
+    let mem = Memory {
+        id: Uuid::new_v4().to_string(),
+        tier: body.tier.clone(),
+        namespace: body.namespace.clone(),
+        title: body.title.clone(),
+        content: body.content.clone(),
+        tags: final_tags,
+        priority: body.priority,
+        confidence: body.confidence,
+        source: body.source.clone(),
+        access_count: 0,
+        created_at: now.to_rfc3339(),
+        updated_at: now.to_rfc3339(),
+        last_accessed_at: None,
+        expires_at: body.expires_at.clone(),
+        metadata,
+        reflection_depth: 0,
+        memory_kind: crate::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
+    };
+    let ctx = crate::store::CallerContext::for_agent(agent_id.to_string());
+
+    // v0.7.0 Wave-3 Continuation 5 (S18 / semantic recall) — embed
+    // before the SAL store so the postgres `embedding` column lands
+    // populated; otherwise `recall_hybrid` filters every row out via
+    // `WHERE embedding IS NOT NULL`.
+    let embedding_text = format!("{} {}", mem.title, mem.content);
+    let embedding: Option<Vec<f32>> = match app.embedder.as_ref().as_ref() {
+        None => None,
+        Some(emb) => emb.embed(&embedding_text).ok(),
+    };
+
+    // v0.7.0 Wave-3 Continuation 3 (Phase 20) — governance walk on
+    // writes. Postgres branch enforces the same inheritance chain +
+    // approver_type policy as sqlite. Approve → 202 Accepted + pending id.
+    let payload_for_pending = serde_json::to_value(&mem).unwrap_or_else(|_| json!({}));
+    match app
+        .store
+        .enforce_governance_action(
+            crate::store::GovernedAction::Store,
+            &mem.namespace,
+            agent_id,
+            None,
+            None,
+            &payload_for_pending,
+        )
+        .await
+    {
+        Ok(crate::models::GovernanceDecision::Allow) => {}
+        Ok(crate::models::GovernanceDecision::Deny(reason)) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": format!("denied: {reason}")})),
+            )
+                .into_response();
+        }
+        Ok(crate::models::GovernanceDecision::Pending(pending_id)) => {
+            return (
+                StatusCode::ACCEPTED,
+                Json(json!({
+                    "status": "pending",
+                    "pending_id": pending_id,
+                    "namespace": mem.namespace,
+                    "storage_backend": "postgres",
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => return store_err_to_response(e),
+    }
+
+    match app
+        .store
+        .store_with_embedding(&ctx, &mem, embedding.as_deref())
+        .await
+    {
+        Ok(id) => {
+            // v0.7.0 Wave-3 Continuation 2 Phase 9 — audit emit on
+            // postgres write.
+            if crate::audit::is_enabled() {
+                let scope = mem
+                    .metadata
+                    .get("scope")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                crate::audit::emit(crate::audit::EventBuilder::new(
+                    crate::audit::AuditAction::Store,
+                    crate::audit::actor(agent_id.to_string(), "http_body", scope.clone()),
+                    crate::audit::target_memory(
+                        id.clone(),
+                        mem.namespace.clone(),
+                        Some(mem.title.clone()),
+                        Some(mem.tier.to_string()),
+                        scope,
+                    ),
+                ));
+            }
+            // F-A2A1.6 (#700, S18) — postgres-branch federation fanout.
+            if let Some(fed) = app.federation.as_ref() {
+                let mut mem_echo = mem.clone();
+                mem_echo.id = id.clone();
+                match crate::federation::broadcast_store_quorum(fed, &mem_echo).await {
+                    Ok(tracker) => {
+                        if let Err(err) = crate::federation::finalise_quorum(&tracker) {
+                            let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                            return (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                [("Retry-After", "2")],
+                                Json(serde_json::to_value(&payload).unwrap_or_default()),
+                            )
+                                .into_response();
+                        }
+                    }
+                    Err(err) => {
+                        let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            [("Retry-After", "2")],
+                            Json(serde_json::to_value(&payload).unwrap_or_default()),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+            // #869 — typed serialise helper so a 201 + `{}` never masks
+            // a real encode failure.
+            let mut payload = match super::to_value_or_500("create_memory.postgres.response", &mem)
+            {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("id".to_string(), serde_json::Value::String(id));
+                if !auto_tags.is_empty() {
+                    obj.insert("auto_tags".to_string(), json!(auto_tags));
+                }
+            }
+            (StatusCode::CREATED, Json(payload)).into_response()
+        }
+        Err(e) => store_err_to_response(e),
+    }
+}
+
+pub async fn create_memory(
+    State(app): State<AppState>,
+    headers: HeaderMap,
+    JsonOrBadRequest(body): JsonOrBadRequest<CreateMemory>,
+) -> impl IntoResponse {
+    // Input validation (cheapest gate first).
+    if let Err(e) = validate::validate_create(&body) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response();
+    }
+
+    // Stage 1 — agent_id resolution (consumes `body.metadata`, returns
+    // canonical metadata). The `_agent_id` underscore-prefix silences
+    // the `unused_variables` warning on builds without `feature = "sal"`;
+    // the postgres branch below is the only consumer that needs the
+    // local binding — the sqlite path reads it back out of `metadata`.
+    let (_agent_id, metadata) = match resolve_create_agent_id(&headers, &body) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    // Postgres-backed daemons take a separate SAL-trait path with no
+    // shared `Mutex<Connection>`. Kept as a top-level helper so the
+    // sqlite stages below stay focused.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        return create_memory_postgres(&app, &body, &_agent_id, metadata).await;
+    }
+
+    // v0.7.0 L5 — fire the LLM `auto_tag` autonomy hook BEFORE the
+    // embedding pass + DB lock. Both LLM and embedder calls are
+    // network/CPU work that must not happen under the single shared
+    // `Mutex<Connection>` on a multi-agent daemon.
+    let auto_tags = maybe_auto_tag(
+        &app,
+        &body.title,
+        &body.content,
+        &body.tags,
+        &body.namespace,
+    )
+    .await;
+
+    // Stage 3 — embed-before-lock (issue #219). Computed BEFORE
+    // acquiring the DB lock so the 10-200 ms embedder run doesn't
+    // hold the single shared `Mutex<Connection>`.
+    let (embedding, embed_status) = embed_create_before_lock(&app, &body.title, &body.content);
+
+    // v0.6.3.1 P2 (G6) — resolve `on_conflict` policy. HTTP defaults to
+    // 'error'; callers that want the v0.6.3 silent-merge behaviour must
+    // pass on_conflict='merge'.
+    let on_conflict_mode = body.on_conflict.as_deref().unwrap_or("error");
+    if !matches!(on_conflict_mode, "error" | "merge" | "version") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!(
+                    "invalid on_conflict '{on_conflict_mode}' (expected error|merge|version)"
+                )
+            })),
+        )
+            .into_response();
+    }
+
+    let state = app.db.clone();
+    let now = Utc::now();
+    let lock = state.lock().await;
+    let expires_at = body.expires_at.clone().or_else(|| {
+        body.ttl_secs
+            .or(lock.2.ttl_for_tier(&body.tier))
+            .map(|s| (now + Duration::seconds(s)).to_rfc3339())
+    });
+
+    // Stage 2 — on_conflict resolution against the live connection.
+    let resolved_title = match resolve_create_conflict_title(&lock.0, &body, on_conflict_mode) {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+
+    // v0.7.0 L5 — merge LLM-derived `auto_tags` with operator-supplied
+    // `body.tags`. Operator tags lead; auto-tag entries that duplicate
+    // an existing operator tag are dropped to avoid double-counting on
+    // FTS5 weighting downstream.
+    let mut merged_tags = body.tags.clone();
+    for t in &auto_tags {
+        if !merged_tags.iter().any(|existing| existing == t) {
+            merged_tags.push(t.clone());
+        }
+    }
+
+    let mem = Memory {
+        id: Uuid::new_v4().to_string(),
+        tier: body.tier.clone(),
+        namespace: body.namespace.clone(),
+        title: resolved_title,
+        content: body.content.clone(),
+        tags: merged_tags,
+        priority: body.priority.clamp(1, 10),
+        confidence: body.confidence.clamp(0.0, 1.0),
+        source: body.source.clone(),
+        access_count: 0,
+        created_at: now.to_rfc3339(),
+        updated_at: now.to_rfc3339(),
+        last_accessed_at: None,
+        expires_at,
+        metadata,
+        reflection_depth: 0,
+        memory_kind: crate::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
+    };
+
+    // Stage 4 — governance pre-write hook. The helper either returns
+    // the original lock guard (Allow) or short-circuits with an error
+    // response (Deny / Pending / failure).
+    let lock = match enforce_create_governance(&app, lock, &mem).await {
+        Ok(lock) => lock,
+        Err(resp) => return resp,
+    };
+
+    // Contradiction probe — best-effort; never fails the parent store.
+    let contradictions =
+        db::find_contradictions(&lock.0, &mem.title, &mem.namespace).unwrap_or_default();
+    let contradiction_ids: Vec<String> = contradictions
+        .iter()
+        .filter(|c| c.id != mem.id)
+        .map(|c| c.id.clone())
+        .collect();
+
+    // Stage 5 — quota + insert.
+    let actual_id = match insert_create_with_quota(&lock, &mem, &embedding) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+
+    // Drop the DB lock before taking the vector index lock + running
+    // federation fanout (async work).
+    drop(lock);
+
+    // Stage 6 — HNSW warm-up + audit emit + federation fanout +
+    // assembled CREATED response.
+    fanout_and_assemble_create_response(
+        &app,
+        &mem,
+        &actual_id,
+        embedding,
+        &auto_tags,
+        contradiction_ids,
+        embed_status,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
