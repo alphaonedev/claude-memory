@@ -55,6 +55,7 @@ dependencies = [
  "ed25519-dalek",
  "futures-core",
  "gethostname",
+ "hex",
  "hf-hub",
  "http-body-util",
  "instant-distance",

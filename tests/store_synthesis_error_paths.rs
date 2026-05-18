@@ -398,7 +398,7 @@ fn synthesis_update_envelope_carries_synthesis_decisions_block() {
         &db_path,
         Some(&llm),
         None,
-        false,
+        true, // autonomous_hooks=true required to enable the synthesis path
         json!({
             "title": "rolling deploy notes envelope v2",
             "content": BASE_CONTENT,
@@ -436,9 +436,23 @@ fn synthesis_delete_only_verdict_drives_pre_insert_delete_loop() {
     let (conn, db_path) = open_db();
     let ns = "ns-delete-only-batch";
 
-    // Seed two delete victims so the loop body iterates twice.
-    let v1 = seed_existing(&conn, "delete-victim-A envelope", "doomed A body", ns);
-    let v2 = seed_existing(&conn, "delete-victim-B envelope", "doomed B body", ns);
+    // Seed two delete victims so the loop body iterates twice. The
+    // titles share the "envelope batch incoming" keyword bag with the
+    // incoming title below — without overlap, FTS5
+    // `find_contradictions` returns empty and the synthesis path is
+    // never entered (the regression that masked this test pre-fix).
+    let v1 = seed_existing(
+        &conn,
+        "envelope batch incoming victim A",
+        "doomed A body",
+        ns,
+    );
+    let v2 = seed_existing(
+        &conn,
+        "envelope batch incoming victim B",
+        "doomed B body",
+        ns,
+    );
 
     // We need the per-call delete cap to permit 2 deletes. The
     // default is 1 (most conservative). Install a permissive policy.
@@ -459,7 +473,7 @@ fn synthesis_delete_only_verdict_drives_pre_insert_delete_loop() {
         &db_path,
         Some(&llm),
         None,
-        false,
+        true, // autonomous_hooks=true required to enable the synthesis path
         json!({
             "title": "delete-only batch incoming",
             "content": BASE_CONTENT,
@@ -488,69 +502,25 @@ fn synthesis_delete_only_verdict_drives_pre_insert_delete_loop() {
 }
 
 // ---------------------------------------------------------------------------
-// L716-721 (synthesis delete warn-arm) — verdict with a deletion verb
-// pointing at an id that does NOT exist. `db::delete` returns Ok for
-// missing ids (no error), so the warn-arm requires a substrate-level
-// failure. The closest reachable proxy is a delete batch where one id
-// references a row already removed inside the same handler call by
-// the substrate's K9 recheck — not directly forceable from this test
-// surface. We pin the OBSERVABLE: a hallucinated delete-id is dropped
-// silently, no panic, no ghost row.
+// L716-721 (synthesis delete warn-arm) — NOTE: removed in this revision.
+//
+// The original test in this position
+// (`synthesis_delete_only_with_hallucinated_id_skips_silently`) was
+// based on an incorrect premise: it expected the substrate to *silently
+// drop* a hallucinated delete id from a verdict batch, leaving the real
+// victim deleted. In fact `synthesis::parse_response` (src/synthesis/
+// mod.rs L387-391) REJECTS the entire batch as soon as any verdict
+// references an id NOT in the candidate set — there is no
+// "drop-the-ghost-and-keep-going" path inside the synthesis layer.
+// The substrate-side defensive arm at handle_store L623-628 ("update
+// target not found in candidate set") is therefore unreachable from
+// external input: by the time the verdicts list enters that loop, the
+// parser has already proven every id is a real candidate.
+//
+// Action: documented as **dead defensive arm** rather than papered over
+// with a dummy test. The lines remain in place as defence-in-depth in
+// case the parser invariant ever weakens.
 // ---------------------------------------------------------------------------
-
-#[test]
-fn synthesis_delete_only_with_hallucinated_id_skips_silently() {
-    let (conn, db_path) = open_db();
-    let ns = "ns-delete-hallu";
-    let v1 = seed_existing(&conn, "real-delete-victim envelope", "real body", ns);
-    let ghost = "ffffffff-ffff-ffff-ffff-ffffffffffff";
-
-    install_permissive_synthesis_policy(&conn, ns, Some(5));
-
-    let verdict = json!({
-        "verdicts": [
-            {"candidate_id": v1, "verb": "delete"},
-            {"candidate_id": ghost, "verb": "delete"},
-        ]
-    });
-    let server = shared_mock_with_autotag(verdict);
-    let uri = server.uri();
-    let llm = OllamaClient::new_with_url(&uri, "test-model").expect("mock client");
-
-    let resp = run_store(
-        &conn,
-        &db_path,
-        Some(&llm),
-        None,
-        false,
-        json!({
-            "title": "delete-only hallucinated batch",
-            "content": BASE_CONTENT,
-            "namespace": ns,
-            "on_conflict": "version",
-        }),
-    )
-    .expect("store ok with hallucinated delete id");
-    assert!(resp["id"].as_str().is_some(), "fresh row missing: {resp}");
-    // Real victim removed.
-    let exists: bool = conn
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?1)",
-            [&v1],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert!(!exists, "real victim must be removed");
-    // Ghost never materialised.
-    let ghost_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM memories WHERE id = ?1",
-            [ghost],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(ghost_count, 0);
-}
 
 // ---------------------------------------------------------------------------
 // L958-985 — autonomy hooks fire and update metadata. Path:
@@ -692,7 +662,16 @@ fn install_permissive_synthesis_policy(
 fn synthesis_failed_without_update_carries_flag_on_insert_envelope() {
     let (conn, db_path) = open_db();
     let ns = "ns-failed-no-update";
-    let _ = seed_existing(&conn, "existing for failure flag", "earlier body", ns);
+    // Seed title and incoming title MUST share FTS5 keywords so
+    // `find_contradictions` returns a non-empty candidate set —
+    // otherwise the synthesis branch returns an empty verdict list
+    // (no error) and the `synthesis_failed_reason` path never fires.
+    let _ = seed_existing(
+        &conn,
+        "failed-no-update existing earlier body",
+        "earlier body",
+        ns,
+    );
 
     let server = shared_mock_synthesis_error_with_autotag();
     let uri = server.uri();
@@ -703,9 +682,9 @@ fn synthesis_failed_without_update_carries_flag_on_insert_envelope() {
         &db_path,
         Some(&llm),
         None,
-        false,
+        true, // autonomous_hooks=true required to enable the synthesis path
         json!({
-            "title": "failed-no-update incoming",
+            "title": "failed-no-update incoming earlier body",
             "content": BASE_CONTENT,
             "namespace": ns,
             "on_conflict": "version",
