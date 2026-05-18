@@ -112,13 +112,15 @@ pub const MIN_SUPPORTED_SCHEMA: u32 = 16;
 /// polish PERF-8 (#781) — auto-persona indexed entity-id column
 /// (`memories.mentioned_entity_id TEXT` + partial index) replacing the
 /// content `LIKE '%entity_X%'` full-table scan in the auto-persona
-/// matcher, and v43 from issue #810 / #813 — atomic
+/// matcher, v43 from issue #810 / #813 — atomic
 /// `(attest_level, signature)` invariant on `memory_links` enforced
-/// by a `BEFORE INSERT/UPDATE` trigger pair. When a DB's
+/// by a `BEFORE INSERT/UPDATE` trigger pair, and v44 from issue #228
+/// — the additive `memories.encrypted_envelope BLOB NULL` column
+/// backing the E2E content encryption substrate. When a DB's
 /// `schema_version` exceeds this, the binary is too old for a newer
 /// DB and we surface a warning. v0.6.3.1 (PR-9h / issue #487 PR #497
 /// req #72).
-pub const MAX_SUPPORTED_SCHEMA: u32 = 43;
+pub const MAX_SUPPORTED_SCHEMA: u32 = 44;
 
 /// Pure boundary check: `true` when `v` lies within
 /// `[MIN_SUPPORTED_SCHEMA, MAX_SUPPORTED_SCHEMA]`. Extracted so the

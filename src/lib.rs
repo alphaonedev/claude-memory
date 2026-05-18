@@ -51,6 +51,11 @@ pub mod storage;
 #[allow(dead_code)]
 pub use storage as db;
 pub mod embeddings;
+// v0.7.0 (issue #228) — E2E memory content encryption at rest.
+// Per-agent X25519 keypair + ChaCha20-Poly1305 AEAD. Gated behind
+// `[encryption].at_rest = true` in config OR
+// `AI_MEMORY_ENCRYPT_AT_REST=1`. See `src/encryption/mod.rs`.
+pub mod encryption;
 pub mod errors;
 pub mod federation;
 // v0.7.0 L2-5 (issue #670) — forensic evidence bundle assembly +

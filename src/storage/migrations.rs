@@ -7,7 +7,7 @@
 //! constant, and the `migrate` function out of `src/db.rs` into
 //! this sub-module. Pure refactor — semantics unchanged. The
 //! `MAX_SUPPORTED_SCHEMA` constant in `cli::boot` must still bump
-//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 43).
+//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 44).
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
@@ -98,7 +98,18 @@ CREATE TABLE IF NOT EXISTS memories (
     -- / reflection mentions). Legacy rows default to NULL; the
     -- migration ladder backfills from metadata+title at v42 apply
     -- time.
-    mentioned_entity_id   TEXT
+    mentioned_entity_id   TEXT,
+    -- v0.7.0 (issue #228, schema v44) — E2E memory content encryption
+    -- at rest. When non-NULL, this BLOB carries the
+    -- `src/encryption::Envelope::to_bytes()` payload (X25519 ephemeral
+    -- pubkey + ChaCha20-Poly1305 nonce + AEAD-sealed ciphertext) for
+    -- the memory's plaintext `content`. The `content` column then
+    -- carries a placeholder marker rather than plaintext. NULL on
+    -- every legacy row and on every row written under the default
+    -- (encryption disabled) configuration. Gated on
+    -- `[encryption].at_rest = true` or
+    -- `AI_MEMORY_ENCRYPT_AT_REST=1`.
+    encrypted_envelope    BLOB
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_tier ON memories(tier);
@@ -435,7 +446,7 @@ CREATE INDEX IF NOT EXISTS idx_signed_events_dlq_agent
 //       column (which is reserved for Persona-row attribution); PERF-8
 //       reads the OPPOSITE direction (the entity an observation /
 //       reflection MENTIONS).
-const CURRENT_SCHEMA_VERSION: i64 = 43;
+const CURRENT_SCHEMA_VERSION: i64 = 44;
 
 /// v0.7.0 refactor PR-1 (#793) — schema-pins SSOT.
 ///
@@ -1777,6 +1788,38 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             // uses `DROP TRIGGER IF EXISTS` followed by `CREATE
             // TRIGGER` — fully replay-safe.
             conn.execute_batch(MIGRATION_V43_SQLITE)?;
+        }
+
+        if version < 44 {
+            // v0.7.0 (issue #228) — E2E memory content encryption
+            // at rest. Adds the `encrypted_envelope BLOB NULL`
+            // column on `memories`. When set, the column carries the
+            // `src/encryption::Envelope::to_bytes()` payload (X25519
+            // ephemeral pubkey + ChaCha20-Poly1305 nonce +
+            // AEAD-sealed ciphertext); `content` then stores a
+            // placeholder marker rather than plaintext. Pure
+            // additive — non-encrypted memories leave the column at
+            // NULL and read back exactly as before.
+            //
+            // ALTER TABLE done inline (SQLite has no
+            // `ADD COLUMN IF NOT EXISTS`). The column-existence
+            // probe gates the ALTER so replay on a database that
+            // already ran this migration is a no-op.
+            let mut has_envelope = false;
+            let mut stmt = conn.prepare("PRAGMA table_info(memories)")?;
+            let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            for col in cols {
+                if col?.as_str() == "encrypted_envelope" {
+                    has_envelope = true;
+                }
+            }
+            drop(stmt);
+            if !has_envelope {
+                conn.execute(
+                    "ALTER TABLE memories ADD COLUMN encrypted_envelope BLOB",
+                    [],
+                )?;
+            }
         }
 
         conn.execute("DELETE FROM schema_version", [])?;

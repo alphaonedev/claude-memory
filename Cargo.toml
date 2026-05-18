@@ -113,6 +113,17 @@ base64 = "0.22"
 # transitively via the candle stack — promoted to a direct dep here
 # so `src/identity/sign.rs` can rely on a stable version pin.
 ciborium = "0.2"
+# v0.7.0 (issue #228) — E2E memory-content encryption at rest. X25519
+# provides the per-agent ECDH keypair (recipient pubkey + sender
+# ephemeral); ChaCha20-Poly1305 is the AEAD that wraps the plaintext
+# content under the derived shared key. Both are RustCrypto crates
+# (pure-Rust, no C deps) so they coexist cleanly with the existing
+# Ed25519 / sha2 / hkdf stack already pulled in for the H-track
+# attestation work. The encryption is gated behind `[encryption]
+# at_rest = true` in config OR `AI_MEMORY_ENCRYPT_AT_REST=1`; default
+# off so single-node deployments see zero behaviour change.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
 # v0.7.0 L1-5 — SKILL.md YAML frontmatter parsing for the Agent Skills
 # substrate. `serde_yaml` is the de-facto `serde`-native YAML backend;
 # version 0.9 compiles to pure Rust (no C libyaml), making it compatible

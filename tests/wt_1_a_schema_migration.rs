@@ -151,12 +151,15 @@ fn test_migration_v36_applies_cleanly() {
     //   → v41 (Cluster G shadow-retention denormalised column + compound index)
     //   → v42 (Polish #781 PERF-8 auto_persona mentioned_entity_id column)
     //   → v43 (Persona Signing Pipeline #813 atomicity triggers on
-    //          memory_links.(attest_level, signature)).
+    //          memory_links.(attest_level, signature))
+    //   → v44 (#228 — E2E content encryption: additive
+    //          memories.encrypted_envelope BLOB NULL column).
     // When CURRENT_SCHEMA_VERSION bumps, update this assertion in lockstep.
     assert_eq!(
-        v, 43,
-        "v36→v43: schema_version must be stamped at CURRENT_SCHEMA_VERSION \
-         (migration ladder passes through v36 on its way to v43)"
+        v,
+        ai_memory::db::current_schema_version_for_tests(),
+        "v36→current: schema_version must be stamped at CURRENT_SCHEMA_VERSION \
+         (migration ladder passes through v36 on its way to the current head)"
     );
 }
 
