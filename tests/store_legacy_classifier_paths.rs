@@ -251,6 +251,84 @@ fn install_legacy_classifier_policy(conn: &Connection, ns: &str) {
 }
 
 // ---------------------------------------------------------------------------
+// #838 final residuum — L751/L760-761 — dedup-merge embedder retry path
+// with `vector_index = Some`. The existing residuum suites cover the
+// dedup-merge path with `vector_index = None` (embed lands but the
+// index removal/insert is skipped); the lines 757-760 false-arm of
+// `if let Some(idx) = vector_index` close only when a `Some` index is
+// threaded through AND content actually changes during the merge so
+// the inner `embed().is_ok()` branch fires.
+// ---------------------------------------------------------------------------
+
+/// Tiny in-test embedder: returns a deterministic 4-d vector derived
+/// from the input length so the dedup-merge embed retry path can be
+/// exercised without pulling in HuggingFace model loading.
+struct LenEmbedder;
+
+impl ai_memory::embeddings::Embed for LenEmbedder {
+    fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        let n = text.len() as f32;
+        let mag = (n * n + 4.0).sqrt();
+        Ok(vec![n / mag, 1.0 / mag, 1.0 / mag, 1.0 / mag])
+    }
+
+    fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        texts.iter().map(|t| self.embed(t)).collect()
+    }
+}
+
+#[test]
+fn dedup_merge_embed_retry_with_vector_index_some() {
+    use ai_memory::hnsw::VectorIndex;
+
+    let (conn, db_path) = open_db();
+    let ns = "ns-dedup-merge-idx";
+    let seed_id = seed_existing(
+        &conn,
+        "dedup-merge-target",
+        "seed body content with substantial length for stable diffing",
+        ns,
+    );
+
+    let vector_index = VectorIndex::empty();
+    let embedder = LenEmbedder;
+    let ttl = ResolvedTtl::default();
+    let params = json!({
+        "title": "dedup-merge-target",
+        "content": "incoming body content with DIFFERENT words so content_changed is true",
+        "namespace": ns,
+        "on_conflict": "merge",
+    });
+
+    let resp = ai_memory::mcp::tools::handle_store_for_tests(
+        &conn,
+        &db_path,
+        &params,
+        Some(&embedder as &dyn ai_memory::embeddings::Embed),
+        None,
+        Some(&vector_index),
+        &ttl,
+        false,
+        None,
+        None,
+    )
+    .expect("merge upsert with embed must succeed");
+
+    assert_eq!(
+        resp["id"].as_str(),
+        Some(seed_id.as_str()),
+        "dedup-merge must reuse seed id, got: {resp}"
+    );
+    assert_eq!(resp["duplicate"].as_bool(), Some(true));
+
+    let hits = vector_index.search(&[0.5, 0.5, 0.5, 0.5], 5);
+    assert!(
+        hits.iter().any(|h| h.id == seed_id),
+        "vector_index must contain merged row after embed retry, got: {hits:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // L924-925 — auto_tag Err arm. The existing in-module
 // `legacy_classifier_handles_no_and_error_responses` exercises the
 // `detect_contradiction` Err arm; this pins the symmetric `auto_tag` Err
