@@ -5,7 +5,8 @@
 
 use crate::embeddings::Embed;
 use crate::hnsw::VectorIndex;
-use crate::models::Tier;
+use crate::models::{EditSource, Tier};
+use crate::storage::VersionConflict;
 use crate::{db, validate};
 use serde_json::{Value, json};
 pub(super) fn handle_update(
@@ -39,6 +40,21 @@ pub(super) fn handle_update(
         .map(|p| i32::try_from(p).unwrap_or(i32::MAX));
     let confidence = params["confidence"].as_f64();
     let expires_at = params["expires_at"].as_str();
+    // v0.7.0 Provenance Gap 1 (#884) — optimistic-concurrency
+    // `expected_version` param. When supplied + non-null, the
+    // underlying storage::update_with_expected_version refuses the
+    // mutation with a typed VersionConflict envelope if the stored
+    // row's `version` no longer matches.
+    let expected_version = params["expected_version"].as_i64();
+    // v0.7.0 Provenance Gap 5 (#888) — typed `edit_source`
+    // discriminator. Default `Human` preserves the in-place v0.6.x
+    // mutation contract; `Llm` and `Hook` route through the
+    // append-and-archive path so the pre-edit content is preserved
+    // in `archived_memories` for rewind via `memory_archive_list`.
+    let edit_source = params["edit_source"]
+        .as_str()
+        .and_then(EditSource::from_str)
+        .unwrap_or_default();
 
     if let Some(t) = title {
         validate::validate_title(t).map_err(|e| e.to_string())?;
@@ -76,7 +92,54 @@ pub(super) fn handle_update(
         None
     };
 
-    let (found, content_changed) = db::update(
+    // v0.7.0 Provenance Gap 5 (#888) — append-and-archive branch.
+    // When `edit_source` is `Llm` or `Hook`, we archive the OLD row
+    // with `archive_reason='superseded'`, then mint a NEW row
+    // carrying the patched content + a `supersedes` link new→old.
+    // Caller's `expected_version` is still honored as the gate.
+    if edit_source.appends_and_archives() {
+        let result = db::update_with_archive_on_supersede(
+            conn,
+            &resolved_id,
+            title,
+            content,
+            tier.as_ref(),
+            namespace,
+            tags.as_ref(),
+            priority,
+            confidence,
+            expires_at,
+            metadata.as_ref(),
+            expected_version,
+            edit_source,
+        )
+        .map_err(|e| conflict_or_string(&e))?;
+        // Re-embed the NEW row when content changed.
+        if let Some(emb) = embedder {
+            let new_id = &result.new_id;
+            let mem = db::get(conn, new_id).map_err(|e| e.to_string())?;
+            if let Some(ref m) = mem {
+                let text = format!("{} {}", m.title, m.content);
+                if let Ok(embedding) = emb.embed(&text) {
+                    let _ = db::set_embedding(conn, new_id, &embedding);
+                    if let Some(idx) = vector_index {
+                        idx.remove(new_id);
+                        idx.insert(new_id.clone(), embedding);
+                    }
+                }
+            }
+        }
+        let new_mem = db::get(conn, &result.new_id).map_err(|e| e.to_string())?;
+        return Ok(json!({
+            "updated": true,
+            "edit_source": edit_source.as_str(),
+            "memory": new_mem,
+            "superseded_id": result.archived_id,
+            "new_id": result.new_id,
+        }));
+    }
+
+    let (found, content_changed) = db::update_with_expected_version(
         conn,
         &resolved_id,
         title,
@@ -88,8 +151,9 @@ pub(super) fn handle_update(
         confidence,
         expires_at,
         metadata.as_ref(),
+        expected_version,
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| conflict_or_string(&e))?;
 
     if !found {
         return Err("memory not found".into());
@@ -111,7 +175,30 @@ pub(super) fn handle_update(
     }
 
     let mem = db::get(conn, &resolved_id).map_err(|e| e.to_string())?;
-    Ok(json!({"updated": true, "memory": mem}))
+    Ok(json!({
+        "updated": true,
+        "edit_source": edit_source.as_str(),
+        "memory": mem,
+    }))
+}
+
+/// v0.7.0 Provenance Gap 1 (#884) — emit a structured CONFLICT
+/// envelope as a JSON string when the underlying storage layer
+/// returns a typed [`VersionConflict`]. Other errors stringify
+/// verbatim so existing callers and tests continue to see the
+/// historic error text.
+fn conflict_or_string(e: &anyhow::Error) -> String {
+    if let Some(vc) = e.downcast_ref::<VersionConflict>() {
+        json!({
+            "status": "conflict",
+            "id": vc.id,
+            "expected_version": vc.expected,
+            "current_version": vc.current,
+        })
+        .to_string()
+    } else {
+        e.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -163,6 +250,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 

@@ -86,6 +86,7 @@ fn mem_with_citations(ns: &str, title: &str, content: &str, citations: Vec<Citat
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 

@@ -114,6 +114,7 @@ fn seed_existing(conn: &Connection, title: &str, content: &str, namespace: &str)
         confidence_source: ai_memory::models::ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(conn, &mem).expect("seed insert")
 }
@@ -425,6 +426,7 @@ fn synthesis_parse_response_round_trips() {
         confidence_source: ai_memory::models::ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }];
     let raw = r#"{"verdicts":[{"candidate_id":"c1","verb":"delete","reason":"stale"}]}"#;
     let cands_ref: Vec<&Memory> = cands.iter().collect();
@@ -549,6 +551,7 @@ fn install_synthesis_policy(
         confidence_source: ai_memory::models::ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let sid = db::insert(conn, &standard).expect("insert std");
     db::set_namespace_standard(conn, ns, &sid, None).expect("set std");
@@ -776,6 +779,7 @@ fn synthesis_prompt_truncates_candidate_content_at_cap() {
         confidence_source: ai_memory::models::ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
 
     let cap = 200_usize;
@@ -964,6 +968,7 @@ fn synthesis_prompt_format_reuse_byte_identical() {
             confidence_source: ai_memory::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 

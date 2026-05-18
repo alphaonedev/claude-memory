@@ -159,6 +159,7 @@ pub fn run(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
 
     // W5b/C5: governance enforcement routes through `cli::governance::enforce`

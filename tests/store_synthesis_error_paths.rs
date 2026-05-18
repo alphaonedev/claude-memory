@@ -140,6 +140,7 @@ fn seed_existing(conn: &Connection, title: &str, content: &str, namespace: &str)
         confidence_source: ai_memory::models::ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(conn, &mem).expect("seed insert")
 }
@@ -641,6 +642,7 @@ fn install_permissive_synthesis_policy(
         confidence_source: ai_memory::models::ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let sid = db::insert(conn, &standard).expect("insert standard");
     db::set_namespace_standard(conn, ns, &sid, None).expect("set standard");

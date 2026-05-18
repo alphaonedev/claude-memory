@@ -72,6 +72,7 @@ pub(crate) fn handle_notify(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let actual_id = db::insert(conn, &mem).map_err(|e| e.to_string())?;
 

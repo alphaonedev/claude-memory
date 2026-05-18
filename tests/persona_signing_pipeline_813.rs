@@ -103,6 +103,7 @@ fn seed_two_alice_reflections(conn: &Connection, namespace: &str) -> Vec<String>
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         ids.push(db::insert(conn, &mem).unwrap());
     }
@@ -152,6 +153,7 @@ fn issue_810_check_trigger_refuses_phantom_self_signed_insert() {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(&conn, &mk("813-a-src")).unwrap();
     db::insert(&conn, &mk("813-a-tgt")).unwrap();

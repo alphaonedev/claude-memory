@@ -575,6 +575,7 @@ fn persist_rollback_entry(conn: &Connection, entry: &RollbackEntry) -> Result<()
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(conn, &mem)?;
     Ok(())
@@ -638,6 +639,7 @@ pub fn persist_self_report(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(conn, &mem)?;
     Ok(())
@@ -817,6 +819,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 

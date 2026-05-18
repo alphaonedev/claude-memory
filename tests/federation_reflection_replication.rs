@@ -146,6 +146,7 @@ fn seed_policy(conn: &Connection, namespace: &str, policy: &GovernancePolicy) {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let standard_id = db::insert(conn, &standard).expect("insert standard");
     db::set_namespace_standard(conn, namespace, &standard_id, None).expect("set standard");
@@ -183,6 +184,7 @@ fn observation(namespace: &str, title: &str, depth: i32, agent_id: &str) -> Memo
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 

@@ -82,6 +82,7 @@ fn insert_mem(conn: &rusqlite::Connection, ns: &str, depth: i32, kind: MemoryKin
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(conn, &mem).expect("insert");
     id
@@ -163,6 +164,7 @@ fn set_cap(conn: &rusqlite::Connection, ns: &str, cap: u32) {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let id = db::insert(conn, &std_mem).expect("insert std");
     db::set_namespace_standard(conn, ns, &id, None).expect("set std");

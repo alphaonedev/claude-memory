@@ -95,6 +95,7 @@ fn insert_memory(conn: &Connection, namespace: &str, title: &str) -> String {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(conn, &mem).expect("insert memory")
 }
@@ -509,6 +510,7 @@ fn handle_kg_invalidate_dispatches_event_with_owner_agent_id_from_metadata() {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let src_id = db::insert(&conn, &src_mem).unwrap();
     let dst_id = insert_memory(&conn, ns, "dst");

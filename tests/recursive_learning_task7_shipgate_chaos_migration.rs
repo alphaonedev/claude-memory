@@ -104,6 +104,7 @@ fn make_memory(namespace: &str, title: &str, reflection_depth: i32) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 
@@ -779,6 +780,7 @@ async fn federation_apply_remote_memory_round_trips_reflection_depth() {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let id = store
         .apply_remote_memory(&ctx, &mem)

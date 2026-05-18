@@ -644,6 +644,7 @@ async fn create_memory_postgres(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let ctx = crate::store::CallerContext::for_agent(agent_id.to_string());
 
@@ -876,6 +877,7 @@ pub async fn create_memory(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
 
     // Stage 4 — governance pre-write hook. The helper either returns

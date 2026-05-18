@@ -218,7 +218,41 @@ pub async fn search_memories(
     // v0.6.2 (S40): mirror the `list_memories` ceiling raise so search
     // over a bulk-populated namespace isn't also capped at 200.
     let limit = p.limit.unwrap_or(20).min(MAX_BULK_SIZE);
-    match db::search(
+    // v0.7.0 Provenance Gap 6 (#889) — `?source_uri=X` reciprocal
+    // filter. Composes with `?q=…`; when `q` is empty + `source_uri`
+    // is set, routes through the index-only `list_by_source_uri`
+    // path so callers can ask "give me every memory from this
+    // document" without typing a search query.
+    let source_uri = p
+        .source_uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(uri) = source_uri {
+        if let Err(e) = validate::validate_source_uri(uri) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid source_uri filter: {e}")})),
+            )
+                .into_response();
+        }
+        if p.q.trim().is_empty() {
+            return match db::list_by_source_uri(&lock.0, uri, p.namespace.as_deref(), Some(limit)) {
+                Ok(r) => {
+                    Json(json!({"results": r, "count": r.len(), "source_uri": uri})).into_response()
+                }
+                Err(e) => {
+                    tracing::error!("handler error: {e}");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": "internal server error"})),
+                    )
+                        .into_response()
+                }
+            };
+        }
+    }
+    match db::search_with_source_uri(
         &lock.0,
         &p.q,
         p.namespace.as_deref(),
@@ -231,6 +265,7 @@ pub async fn search_memories(
         p.agent_id.as_deref(),
         p.as_agent.as_deref(),
         false,
+        source_uri,
     ) {
         Ok(r) => Json(json!({"results": r, "count": r.len(), "query": p.q})).into_response(),
         Err(e) => {
@@ -403,6 +438,7 @@ pub async fn bulk_create(
                 confidence_source: ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
 
             // F-A2A1.5 (#705) — governance enforcement on the postgres
@@ -522,6 +558,7 @@ pub async fn bulk_create(
                 confidence_source: ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             match db::insert(&lock.0, &mem) {
                 Ok(_) => created_mems.push(mem),

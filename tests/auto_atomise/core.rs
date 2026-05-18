@@ -304,6 +304,7 @@ fn insert_memory(conn: &Connection, ns: &str, content: &str) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let id = db::insert(conn, &mem).expect("insert");
     Memory { id, ..mem }
@@ -734,6 +735,7 @@ fn test_auto_atomise_refused_memory_not_atomised() {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
 
     let insert_result = db::insert(&conn, &mem);

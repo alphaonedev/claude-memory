@@ -365,6 +365,7 @@ impl<'a> CompactionPass for ReflectionPass<'a> {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         })
     }
 
@@ -911,6 +912,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 
@@ -1157,6 +1159,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         crate::db::insert(conn, &mem).unwrap()
     }
@@ -1453,6 +1456,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = crate::db::insert(&conn, &m).unwrap();
         let err = pass.verify(id).unwrap_err().to_string();
@@ -1579,6 +1583,7 @@ mod tests {
                 confidence_source: ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             crate::db::insert(&conn, &m).unwrap();
         }

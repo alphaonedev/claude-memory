@@ -6727,6 +6727,7 @@ impl MemoryStore for PostgresStore {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
 
         self.store(ctx, &mem).await.map(|_| ())
@@ -7250,6 +7251,7 @@ impl MemoryStore for PostgresStore {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         self.store(ctx, &mem).await
     }
@@ -9274,6 +9276,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 

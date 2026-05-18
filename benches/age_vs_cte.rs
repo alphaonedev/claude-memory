@@ -551,6 +551,7 @@ async fn insert_fixture(
             confidence_source: ai_memory::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         store.store(&ctx, &mem).await?;
     }

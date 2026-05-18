@@ -131,6 +131,7 @@ fn make_memory(id: &str, namespace: &str, title: &str, content: &str) -> Memory 
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 

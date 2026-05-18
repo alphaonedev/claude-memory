@@ -482,6 +482,87 @@ pub struct Memory {
     /// never touched by the decay updater.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence_decayed_at: Option<String>,
+    /// v0.7.0 Provenance Gap 1 (issue #884, schema v45 sqlite) —
+    /// optimistic-concurrency counter. Bumped on every mutation by
+    /// `storage::update`. Two callers writing against the same
+    /// `expected_version` race exactly one winner; the loser receives
+    /// a typed `CONFLICT` envelope naming the current stored
+    /// version. Legacy rows land at `version = 1` via the SQL DEFAULT
+    /// clause. `#[serde(default = "default_memory_version")]` keeps
+    /// pre-v45 federation peers / JSON payloads deserialising cleanly.
+    #[serde(default = "default_memory_version")]
+    pub version: i64,
+}
+
+/// Default for [`Memory::version`] on rows that pre-date schema v45
+/// (or JSON payloads from clients that haven't learned about the
+/// column yet). Matches the SQL DEFAULT clause on the column.
+#[must_use]
+pub fn default_memory_version() -> i64 {
+    1
+}
+
+/// v0.7.0 Provenance Gap 5 (issue #888) — typed edit-source
+/// discriminator gating the `storage::update` write-path branch.
+///
+/// * [`EditSource::Human`] (default) — direct in-place mutation, the
+///   v0.6.x / pre-Gap-5 behaviour. Content is overwritten; the row's
+///   `version` is bumped; no archive is created.
+/// * [`EditSource::Llm`] / [`EditSource::Hook`] — append-and-archive.
+///   A NEW memory row is minted carrying the patched content; a
+///   `supersedes` link is written pointing new→old; the OLD row is
+///   archived with `archive_reason = 'superseded'` so callers can
+///   rewind via `memory_archive_list` to read the pre-edit state.
+///
+/// The split exists so caller intent (human-typed correction vs.
+/// curator/LLM rewrite) is preserved in the audit trail. Mem9's
+/// pattern: in-place for human edits, append-and-archive for
+/// programmatic rewrites where the new content semantically replaces
+/// the old.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EditSource {
+    /// Direct in-place mutation of the existing row. Default.
+    #[default]
+    Human,
+    /// Append-and-archive: mint a NEW row + supersedes link + archive
+    /// the OLD row with `archive_reason='superseded'`.
+    Llm,
+    /// Append-and-archive: same shape as [`EditSource::Llm`] but
+    /// records that a substrate hook triggered the rewrite.
+    Hook,
+}
+
+impl EditSource {
+    /// Column-wire string used in audit log entries + the archive
+    /// row's `archive_reason`-adjacent metadata.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Llm => "llm",
+            Self::Hook => "hook",
+        }
+    }
+
+    /// Parse the column-wire string. Returns `None` on unrecognised
+    /// values so callers can fall back to [`EditSource::Human`].
+    #[must_use]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "human" => Some(Self::Human),
+            "llm" => Some(Self::Llm),
+            "hook" => Some(Self::Hook),
+            _ => None,
+        }
+    }
+
+    /// `true` when the edit-source semantics call for the
+    /// append-and-archive write path (vs. in-place mutation).
+    #[must_use]
+    pub fn appends_and_archives(&self) -> bool {
+        matches!(self, Self::Llm | Self::Hook)
+    }
 }
 
 /// v0.7.0 Form 4 (issue #757) — fact-provenance citation envelope.
@@ -525,6 +606,97 @@ pub struct SourceSpan {
     pub end: usize,
 }
 
+/// v0.7.0 Gap 4 (issue #887) — derived enum partitioning the
+/// `confidence` real into operator-meaningful buckets so callers
+/// (especially read-side reviewers) can filter by tier instead of
+/// re-deriving thresholds at every site.
+///
+/// Thresholds are stable and load-bearing — operators have wired
+/// dashboards / human-review queues against them and a change here
+/// is a wire-level break. Bumping a threshold is therefore a
+/// schema-bump-class decision, NOT a code-tuning decision.
+///
+/// - [`ConfidenceTier::Confirmed`] — `>= 0.95`. High-confidence
+///   substrate-curated atoms, typically calibrated by the Form 5
+///   pipeline or asserted by a trusted upstream.
+/// - [`ConfidenceTier::Likely`] — `0.7 ..= 0.949…`. Default
+///   caller-provided observations sit here.
+/// - [`ConfidenceTier::Ambiguous`] — `< 0.7`. The human-review
+///   queue: the caller themselves flagged uncertainty (or the
+///   decay updater walked the value down). Operators commonly
+///   filter their review tool against this tier.
+///
+/// Surfaced to MCP callers via the `confidence_calibration.tier_thresholds`
+/// block on `memory_capabilities` (Gap 4 read-path closeout).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfidenceTier {
+    Confirmed,
+    Likely,
+    Ambiguous,
+}
+
+impl ConfidenceTier {
+    /// Inclusive lower bound for [`ConfidenceTier::Confirmed`]. Above
+    /// this is a high-confidence observation / calibration result.
+    pub const CONFIRMED_MIN: f64 = 0.95;
+    /// Inclusive lower bound for [`ConfidenceTier::Likely`]. Below
+    /// this is the human-review tier ([`ConfidenceTier::Ambiguous`]).
+    pub const LIKELY_MIN: f64 = 0.7;
+
+    /// Bucket a raw confidence value. NaN is conservatively mapped
+    /// to [`ConfidenceTier::Ambiguous`] so a corrupt input lands in
+    /// the human-review queue rather than masquerading as confirmed.
+    #[must_use]
+    pub fn from_confidence(c: f64) -> Self {
+        if c.is_nan() {
+            return Self::Ambiguous;
+        }
+        if c >= Self::CONFIRMED_MIN {
+            Self::Confirmed
+        } else if c >= Self::LIKELY_MIN {
+            Self::Likely
+        } else {
+            Self::Ambiguous
+        }
+    }
+
+    /// Wire string for this tier. Matches the serde `rename_all =
+    /// "snake_case"` derive above so the JSON and the unstructured
+    /// helper agree.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Confirmed => "confirmed",
+            Self::Likely => "likely",
+            Self::Ambiguous => "ambiguous",
+        }
+    }
+
+    /// Parse a wire string back into the enum. Returns `None` on
+    /// unrecognised input so callers can decide whether to error or
+    /// fall through to "no filter".
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "confirmed" => Some(Self::Confirmed),
+            "likely" => Some(Self::Likely),
+            "ambiguous" => Some(Self::Ambiguous),
+            _ => None,
+        }
+    }
+}
+
+impl Memory {
+    /// v0.7.0 Gap 4 (#887) — derived [`ConfidenceTier`] for this
+    /// memory's `confidence` value. Stable mapping; see
+    /// [`ConfidenceTier::from_confidence`] for the thresholds.
+    #[must_use]
+    pub fn confidence_tier(&self) -> ConfidenceTier {
+        ConfidenceTier::from_confidence(self.confidence)
+    }
+}
+
 impl Default for Memory {
     /// All-zero / empty defaults. Useful as a base for ad-hoc test fixtures
     /// — `Memory { id: ..., title: ..., ..Default::default() }` — and for
@@ -557,6 +729,7 @@ impl Default for Memory {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: default_memory_version(),
         }
     }
 }
@@ -688,6 +861,13 @@ pub struct SearchQuery {
     /// When set, results are filtered per `metadata.scope` rules.
     #[serde(default)]
     pub as_agent: Option<String>,
+    /// v0.7.0 Provenance Gap 6 (#889) — reciprocal source filter.
+    /// When `source_uri=X` is supplied, the result set is narrowed
+    /// to memories whose `source_uri` column equals X verbatim. The
+    /// partial `idx_memories_source_uri` index (v38) covers the
+    /// lookup so the query is O(log N).
+    #[serde(default)]
+    pub source_uri: Option<String>,
 }
 
 #[allow(clippy::unnecessary_wraps)]

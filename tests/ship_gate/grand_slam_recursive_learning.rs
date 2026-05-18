@@ -134,6 +134,7 @@ fn make_observation(namespace: &str, topic: &str, idx: usize) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 
@@ -176,6 +177,7 @@ fn seed_policy(conn: &Connection, namespace: &str, policy: &GovernancePolicy) {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let std_id = db::insert(conn, &standard).expect("seed_policy insert");
     db::set_namespace_standard(conn, namespace, &std_id, None).expect("set_namespace_standard");
@@ -213,6 +215,7 @@ fn seed_governance_json(conn: &Connection, namespace: &str, governance: &serde_j
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let std_id = db::insert(conn, &standard).expect("seed_governance_json insert");
     db::set_namespace_standard(conn, namespace, &std_id, None).expect("set_namespace_standard");

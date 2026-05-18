@@ -70,6 +70,7 @@ fn make_mem(namespace: &str, title: &str, content: &str, kind: MemoryKind) -> Me
         confidence_source: ai_memory::models::ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 

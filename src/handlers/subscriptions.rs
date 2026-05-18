@@ -363,6 +363,7 @@ pub async fn subscribe(
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let ctx = crate::store::CallerContext::for_agent(&caller);
         let stored_id = match app.store.store(&ctx, &mem).await {

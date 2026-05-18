@@ -111,6 +111,7 @@ async fn seed_two_memories(db: &ai_memory::handlers::Db) -> (String, String) {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let tgt = ai_memory::models::Memory {
         id: uuid::Uuid::new_v4().to_string(),
@@ -138,6 +139,7 @@ async fn seed_two_memories(db: &ai_memory::handlers::Db) -> (String, String) {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let src_id = ai_memory::db::insert(&lock.0, &src).expect("insert src");
     let tgt_id = ai_memory::db::insert(&lock.0, &tgt).expect("insert tgt");

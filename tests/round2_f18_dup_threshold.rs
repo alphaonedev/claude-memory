@@ -68,6 +68,7 @@ fn seed_with_embedding(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let stored_id = db::insert(conn, &mem).expect("db::insert");
     db::set_embedding(conn, &stored_id, embedding).expect("db::set_embedding");

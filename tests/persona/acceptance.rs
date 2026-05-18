@@ -104,6 +104,7 @@ fn seed_reflection_for_entity(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(conn, &mem).unwrap()
 }

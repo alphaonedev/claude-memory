@@ -226,6 +226,7 @@ pub(super) fn parse_and_build_memory(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
 
     Ok((mem, on_conflict, agent_id, explicit_scope))

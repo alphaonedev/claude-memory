@@ -122,6 +122,7 @@ fn insert_long_source(conn: &rusqlite::Connection, ns: &str) -> String {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(conn, &mem).expect("seed source")
 }
@@ -428,6 +429,7 @@ fn test_cli_atomise_source_too_small_returns_informational() {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&conn, &mem).expect("seed tiny")
     };

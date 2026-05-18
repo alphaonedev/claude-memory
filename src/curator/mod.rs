@@ -613,6 +613,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         assert!(!needs_curation(&mem, &CuratorConfig::default()));
     }
@@ -645,6 +646,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         assert!(!needs_curation(&mem, &CuratorConfig::default()));
     }
@@ -677,6 +679,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         assert!(!needs_curation(&mem, &CuratorConfig::default()));
     }
@@ -709,6 +712,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let mut cfg = CuratorConfig {
             include_namespaces: vec!["other".to_string()],
@@ -747,6 +751,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let cfg = CuratorConfig {
             exclude_namespaces: vec!["noisy".to_string()],
@@ -806,6 +811,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 
@@ -1028,6 +1034,7 @@ mod tests {
                 confidence_source: crate::models::ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             db::insert(&conn, &mem).unwrap();
         }
@@ -1315,6 +1322,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 
@@ -1681,6 +1689,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let m_b = Memory {
             id: "smart-b".to_string(),
@@ -1929,6 +1938,7 @@ fn apply_rollback_handles_storage_error() {
         confidence_source: crate::models::ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
 
     // Insert the memory so it exists
@@ -1988,6 +1998,7 @@ fn consolidate_pair_skips_when_namespaces_disagree() {
         confidence_source: crate::models::ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
 
     let mem2 = Memory {
@@ -2016,6 +2027,7 @@ fn consolidate_pair_skips_when_namespaces_disagree() {
         confidence_source: crate::models::ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
 
     db::insert(&conn, &mem1).unwrap();

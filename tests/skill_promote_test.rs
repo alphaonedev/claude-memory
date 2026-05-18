@@ -69,6 +69,7 @@ fn insert_observation(conn: &rusqlite::Connection, title: &str, ns: &str, body: 
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(conn, &m).expect("insert observation")
 }
@@ -190,6 +191,7 @@ fn refuses_depth_zero_reflection() {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let id = db::insert(&conn, &m).expect("insert");
 
@@ -266,6 +268,7 @@ fn threshold_configurable_via_namespace_governance() {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let std_id = db::insert(&conn, &std_mem).expect("insert standard");
     db::set_namespace_standard(&conn, "ns-strict", &std_id, None).expect("set standard");

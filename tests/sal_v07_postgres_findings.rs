@@ -61,6 +61,7 @@ fn fresh_memory(title: &str, namespace: &str) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 

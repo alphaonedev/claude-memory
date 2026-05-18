@@ -125,6 +125,7 @@ async fn seed(db: &ai_memory::handlers::Db, ns: &str, title: &str) {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     ai_memory::db::insert(&lock.0, &mem).expect("seed insert");
 }

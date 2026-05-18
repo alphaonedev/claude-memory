@@ -1283,6 +1283,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 
@@ -1838,6 +1839,7 @@ mod tests {
                     confidence_source: crate::models::ConfidenceSource::CallerProvided,
                     confidence_signals: None,
                     confidence_decayed_at: None,
+                    version: 1,
                 },
                 0.6,
             ),
@@ -1868,6 +1870,7 @@ mod tests {
                     confidence_source: crate::models::ConfidenceSource::CallerProvided,
                     confidence_signals: None,
                     confidence_decayed_at: None,
+                    version: 1,
                 },
                 0.4,
             ),
@@ -1998,6 +2001,7 @@ mod mock_tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 

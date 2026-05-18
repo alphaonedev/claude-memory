@@ -319,6 +319,7 @@ async fn set_namespace_standard_inner(
                     confidence_source: ConfidenceSource::CallerProvided,
                     confidence_signals: None,
                     confidence_decayed_at: None,
+                    version: 1,
                 };
                 match app.store.store(&ctx, &placeholder).await {
                     Ok(id) => id,
@@ -459,6 +460,7 @@ async fn set_namespace_standard_inner(
                 confidence_source: ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             match db::insert(&lock.0, &placeholder) {
                 Ok(id) => id,

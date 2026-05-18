@@ -9,6 +9,44 @@ pub(super) fn handle_kg_query(
     conn: &rusqlite::Connection,
     params: &Value,
 ) -> Result<Value, String> {
+    // v0.7.0 Provenance Gap 6 (#889) — reciprocal "subgraph rooted at
+    // every memory sharing source_uri" entrypoint. When
+    // `by_source_uri` is supplied, every memory carrying that URI is
+    // returned alongside its outbound links so callers see the full
+    // forest rooted at the document. The traversal is unbounded (one
+    // hop, since the goal is "what else is from this document") and
+    // bypasses the `source_id`-required argument check.
+    let by_source_uri = params["by_source_uri"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(uri) = by_source_uri {
+        validate::validate_source_uri(uri).map_err(|e| e.to_string())?;
+        let namespace = params["namespace"].as_str();
+        let limit = params["limit"]
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok());
+        let roots =
+            db::list_by_source_uri(conn, uri, namespace, limit).map_err(|e| e.to_string())?;
+        let memories_json: Vec<Value> = roots
+            .iter()
+            .map(|m| {
+                json!({
+                    "target_id": m.id,
+                    "title": m.title,
+                    "target_namespace": m.namespace,
+                    "depth": 0,
+                    "source_uri": m.source_uri,
+                })
+            })
+            .collect();
+        return Ok(json!({
+            "by_source_uri": uri,
+            "memories": memories_json,
+            "count": roots.len(),
+        }));
+    }
+
     let source_id = params["source_id"]
         .as_str()
         .ok_or("source_id is required")?;

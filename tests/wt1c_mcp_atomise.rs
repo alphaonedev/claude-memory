@@ -202,6 +202,7 @@ fn insert_long_source(conn: &Connection, ns: &str) -> String {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     storage::insert(conn, &mem).expect("seed long source")
 }
@@ -234,6 +235,7 @@ fn insert_short_source(conn: &Connection, ns: &str) -> String {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     storage::insert(conn, &mem).expect("seed short source")
 }

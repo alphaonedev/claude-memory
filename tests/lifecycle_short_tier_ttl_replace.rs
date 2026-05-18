@@ -47,6 +47,7 @@ fn make_short_memory(expires_at: Option<String>) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 

@@ -68,6 +68,7 @@ fn make_memory(namespace: &str, title: &str, depth: i32) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 
@@ -127,6 +128,7 @@ fn seed_governance_json(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let std_id = db::insert(conn, &standard).unwrap();
     db::set_namespace_standard(conn, namespace, &std_id, None).unwrap();

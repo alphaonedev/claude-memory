@@ -67,6 +67,7 @@ fn seed_memory(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(conn, &m).expect("insert memory")
 }

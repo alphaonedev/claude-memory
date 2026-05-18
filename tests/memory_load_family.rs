@@ -65,6 +65,7 @@ fn seed_family_memory(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let _ = models::default_metadata(); // keep the import live for parity with sibling tests
     db::insert(conn, &mem).expect("db::insert")

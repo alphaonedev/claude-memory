@@ -120,6 +120,7 @@ fn make_observation(ns: &str, topic: &str, idx: usize) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 
@@ -409,6 +410,7 @@ fn set_namespace_max_reflection_depth(conn: &rusqlite::Connection, namespace: &s
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let _ = db::insert(conn, &mem); // best-effort; substrate uses
     // resolve_governance_policy which

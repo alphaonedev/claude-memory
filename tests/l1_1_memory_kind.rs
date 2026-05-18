@@ -62,6 +62,7 @@ fn make_obs(namespace: &str, title: &str) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 
@@ -162,6 +163,7 @@ fn memory_kind_serde_roundtrip_reflection() {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
 
     let json = serde_json::to_string(&mem).expect("serialize");

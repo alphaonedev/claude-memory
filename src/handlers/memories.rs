@@ -102,6 +102,7 @@ pub async fn get_memory(State(app): State<AppState>, Path(id): Path<String>) -> 
 pub async fn update_memory(
     State(app): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<UpdateMemory>,
 ) -> impl IntoResponse {
     let state = app.db.clone();
@@ -119,6 +120,22 @@ pub async fn update_memory(
         )
             .into_response();
     }
+    // v0.7.0 Provenance Gap 1 (#884) — `If-Match: <version>` opt-in
+    // optimistic-concurrency gate. When the header is supplied with
+    // a parseable integer, the storage::update_with_expected_version
+    // path refuses the mutation with a 409 CONFLICT envelope carrying
+    // both expected + current versions when the stored row has
+    // drifted. When the header is absent or unparseable, the legacy
+    // last-write-wins behaviour is preserved.
+    let if_match_version: Option<i64> = headers
+        .get("if-match")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| {
+            // Allow both bare integers and quoted ETag-style values
+            // ("42" or 42).
+            let trimmed = s.trim().trim_matches('"');
+            trimmed.parse::<i64>().ok()
+        });
 
     // v0.7.0 Wave-3 — Postgres-backed daemons take the SAL trait
     // dispatch path. The trait's `update` accepts an `UpdatePatch`
@@ -182,7 +199,7 @@ pub async fn update_memory(
         );
         crate::identity::preserve_agent_id(&existing_meta, new_meta)
     });
-    match db::update(
+    match db::update_with_expected_version(
         &lock.0,
         &resolved_id,
         body.title.as_deref(),
@@ -194,6 +211,7 @@ pub async fn update_memory(
         body.confidence,
         body.expires_at.as_deref(),
         preserved_metadata.as_ref(),
+        if_match_version,
     ) {
         Ok((true, _)) => {
             let mem = db::get(&lock.0, &resolved_id).ok().flatten();
@@ -247,6 +265,23 @@ pub async fn update_memory(
             (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response()
         }
         Err(e) => {
+            // v0.7.0 Provenance Gap 1 (#884) — typed VersionConflict
+            // surfaces as 409 with a structured envelope naming both
+            // expected + current versions so callers can re-read and
+            // retry with the fresh version.
+            if let Some(vc) = e.downcast_ref::<crate::storage::VersionConflict>() {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "status": "conflict",
+                        "id": vc.id,
+                        "expected_version": vc.expected,
+                        "current_version": vc.current,
+                        "error": e.to_string(),
+                    })),
+                )
+                    .into_response();
+            }
             let msg = e.to_string();
             if msg.contains("already exists in namespace") {
                 return (StatusCode::CONFLICT, Json(json!({"error": msg}))).into_response();

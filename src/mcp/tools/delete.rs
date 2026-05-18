@@ -203,6 +203,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 
@@ -475,6 +476,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let sid = db::insert(conn, &standard).expect("insert standard");
         db::set_namespace_standard(conn, ns, &sid, None).expect("set standard");

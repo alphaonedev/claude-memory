@@ -177,8 +177,8 @@ fn cap_v3_summary_core_profile_counts_and_names_recovery_paths() {
     // bumped via v0.7.0 L1-5 5×memory_skill_* + v0.7.0 L2-7
     // memory_skill_compositional_context).
     assert!(
-        summary.starts_with("7 of 71 memory tools"),
-        "core profile summary should open with \"7 of 71 memory tools\" (Round-2 F13; \
+        summary.starts_with("7 of 73 memory tools"),
+        "core profile summary should open with \"7 of 73 memory tools\" (Round-2 F13; \
          v0.7.0 issues #224 + #311 added memory_share to Family::Power, \
          pulled forward from v0.8 Phase 3 Memory Sharing & Sync RFC per \
          operator directive `28860423-d12c-4959-bc8b-8fa9a94a33d9` — \
@@ -186,8 +186,8 @@ fn cap_v3_summary_core_profile_counts_and_names_recovery_paths() {
     );
     assert!(summary.contains("(core)"), "must label the profile as core");
     assert!(
-        summary.contains("64 are listed in this manifest"),
-        "core profile must report 64 unloaded (71 - 7); got: {summary}"
+        summary.contains("66 are listed in this manifest"),
+        "core profile must report 66 unloaded (73 - 7); got: {summary}"
     );
 
     // Three named recovery paths must all appear (verbatim names — these
@@ -224,8 +224,8 @@ fn cap_v3_summary_full_profile_reports_all_visible() {
     // 5 memory_skill_* tools to Family::Other, bumping the substantive
     // total from 51 to 56.
     assert!(
-        summary.starts_with("71 of 71 memory tools"),
-        "full profile summary should open with \"71 of 71 memory tools\" (Round-2 F13; \
+        summary.starts_with("73 of 73 memory tools"),
+        "full profile summary should open with \"73 of 73 memory tools\" (Round-2 F13; \
          v0.7.0 issues #224 + #311 added memory_share to Family::Power, \
          pulled forward from v0.8 Phase 3 RFC); got: {summary}"
     );
@@ -969,6 +969,7 @@ fn seed_governance_policy(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let standard_id = ai_memory::db::insert(conn, &standard).unwrap();
     ai_memory::db::set_namespace_standard(conn, namespace, &standard_id, None).unwrap();

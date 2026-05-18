@@ -225,6 +225,7 @@ pub async fn entity_register(
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         // F-A2A1.5 (#705) — governance enforcement on the postgres
         // entity-register path. Mirrors the F-A2A1.2 delete/promote gates

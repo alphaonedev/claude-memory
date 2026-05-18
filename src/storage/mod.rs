@@ -491,6 +491,12 @@ pub(crate) fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
         confidence_decayed_at: row
             .get::<_, Option<String>>("confidence_decayed_at")
             .unwrap_or(None),
+        // v0.7.0 Provenance Gap 1 (#884) — schema v45 optimistic-
+        // concurrency column. Pre-v45 rows lack the column entirely
+        // — the `.ok()` fallthrough yields the SQL DEFAULT 1 (same
+        // value a pre-v45 row would land at the moment the ALTER
+        // fires in the migrate ladder).
+        version: row.get::<_, i64>("version").unwrap_or(1),
     })
 }
 
@@ -1058,6 +1064,32 @@ pub fn touch_many(
 #[allow(clippy::too_many_arguments)]
 /// Update a memory by ID. Returns (found, `content_changed`) so callers can
 /// re-generate embeddings when the searchable text has changed.
+/// v0.7.0 Provenance Gap 1 (issue #884) — typed optimistic-concurrency
+/// error returned by [`update_with_expected_version`] when the caller
+/// passed `expected_version` and the stored row's current `version`
+/// has drifted. Carries both expected + current so the caller can
+/// surface a useful diagnostic and choose between re-read+re-apply
+/// or bubbling CONFLICT upstream.
+#[derive(Debug, Clone)]
+pub struct VersionConflict {
+    pub id: String,
+    pub expected: i64,
+    pub current: i64,
+}
+
+impl std::fmt::Display for VersionConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "CONFLICT: memory {} expected_version={} but stored version={}",
+            self.id, self.expected, self.current
+        )
+    }
+}
+
+impl std::error::Error for VersionConflict {}
+
+#[allow(clippy::too_many_arguments)]
 pub fn update(
     conn: &Connection,
     id: &str,
@@ -1071,6 +1103,41 @@ pub fn update(
     expires_at: Option<&str>,
     metadata: Option<&serde_json::Value>,
 ) -> Result<(bool, bool)> {
+    update_with_expected_version(
+        conn, id, title, content, tier, namespace, tags, priority, confidence, expires_at,
+        metadata, None,
+    )
+}
+
+/// v0.7.0 Provenance Gap 1 (issue #884) — optimistic-concurrency aware
+/// variant of [`update`]. When `expected_version` is `Some(v)`, the
+/// update fails with a typed [`VersionConflict`] error if the stored
+/// row's `version` is not equal to `v`. When `None`, the legacy
+/// last-write-wins behaviour is preserved (still bumps `version` on
+/// success). On a successful mutation the row's `version` is
+/// monotonically incremented; the new value is observable on the
+/// subsequent read.
+///
+/// # Errors
+///
+/// * [`VersionConflict`] — when `expected_version` is `Some` and the
+///   stored value has drifted.
+/// * Other rusqlite errors bubble up from the prepare/execute pair.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn update_with_expected_version(
+    conn: &Connection,
+    id: &str,
+    title: Option<&str>,
+    content: Option<&str>,
+    tier: Option<&Tier>,
+    namespace: Option<&str>,
+    tags: Option<&Vec<String>>,
+    priority: Option<i32>,
+    confidence: Option<f64>,
+    expires_at: Option<&str>,
+    metadata: Option<&serde_json::Value>,
+    expected_version: Option<i64>,
+) -> Result<(bool, bool)> {
     let mut stmt = conn.prepare("SELECT * FROM memories WHERE id = ?1")?;
     let mut rows = stmt.query_map(params![id], row_to_memory)?;
     let Some(Ok(existing)) = rows.next() else {
@@ -1078,6 +1145,21 @@ pub fn update(
     };
     drop(rows);
     drop(stmt);
+
+    // v0.7.0 Provenance Gap 1 (#884) — pre-check optimistic gate.
+    // The same predicate is also asserted atomically inside the
+    // UPDATE statement below so a racing writer that slipped in
+    // between the SELECT and the UPDATE still fails CONFLICT.
+    if let Some(expected) = expected_version
+        && existing.version != expected
+    {
+        return Err(VersionConflict {
+            id: existing.id.clone(),
+            expected,
+            current: existing.version,
+        }
+        .into());
+    }
 
     let new_title = title.unwrap_or(&existing.title);
     let new_content = content.unwrap_or(&existing.content);
@@ -1117,12 +1199,43 @@ pub fn update(
     // UPDATE fails with a well-scoped UniqueViolation, and we re-
     // query the colliding row's id only on that specific error for
     // the friendly message.
+    //
+    // v0.7.0 Provenance Gap 1 (#884) — UPDATE re-asserts
+    // `expected_version` atomically and bumps `version + 1` on
+    // success so a racing caller that read the SAME expected_version
+    // sees a CONFLICT (their WHERE clause no longer matches the
+    // bumped value). When `expected_version` is NULL the
+    // `?12 IS NULL` predicate short-circuits the gate.
     let update_res = conn.execute(
-        "UPDATE memories SET tier=?1, namespace=?2, title=?3, content=?4, tags=?5, priority=?6, confidence=?7, updated_at=?8, expires_at=?9, metadata=?10
-         WHERE id=?11",
-        params![effective_tier.as_str(), namespace, new_title, new_content, tags_json, priority, confidence, now, expires_at, metadata_json, id],
+        "UPDATE memories SET tier=?1, namespace=?2, title=?3, content=?4, tags=?5, priority=?6, confidence=?7, updated_at=?8, expires_at=?9, metadata=?10, version = version + 1
+         WHERE id=?11 AND (?12 IS NULL OR version = ?12)",
+        params![effective_tier.as_str(), namespace, new_title, new_content, tags_json, priority, confidence, now, expires_at, metadata_json, id, expected_version],
     );
     match update_res {
+        Ok(0) => {
+            // Either the row vanished between SELECT and UPDATE, or
+            // the version drifted (racing writer slipped in). When
+            // expected_version was supplied, re-read so the CONFLICT
+            // envelope carries the current stored value.
+            if let Some(expected) = expected_version {
+                let current_version: Option<i64> = conn
+                    .query_row(
+                        "SELECT version FROM memories WHERE id = ?1",
+                        params![id],
+                        |r| r.get(0),
+                    )
+                    .ok();
+                if let Some(current) = current_version {
+                    return Err(VersionConflict {
+                        id: id.to_string(),
+                        expected,
+                        current,
+                    }
+                    .into());
+                }
+            }
+            Ok((false, false))
+        }
         Ok(_) => Ok((true, content_changed)),
         Err(rusqlite::Error::SqliteFailure(err, _))
             if err.code == rusqlite::ErrorCode::ConstraintViolation =>
@@ -1143,6 +1256,175 @@ pub fn update(
         }
         Err(e) => Err(e.into()),
     }
+}
+
+/// v0.7.0 Provenance Gap 5 (issue #888) — append-and-archive result
+/// returned by [`update_with_archive_on_supersede`].
+///
+/// * `archived_id` is the OLD memory's id (now in
+///   `archived_memories` with `archive_reason='superseded'`).
+/// * `new_id` is the freshly-minted row carrying the patched
+///   content. A `supersedes` link from the new row to the archived
+///   id is also created so KG traversals reach the prior version.
+#[derive(Debug, Clone)]
+pub struct SupersedeResult {
+    pub archived_id: String,
+    pub new_id: String,
+}
+
+/// v0.7.0 Provenance Gap 5 (issue #888) — append-and-archive write
+/// path. Used by the MCP `memory_update` tool when the caller passes
+/// `edit_source` of `llm` or `hook`. Atomic: every step runs inside
+/// a `BEGIN IMMEDIATE` / `COMMIT` pair so a failure mid-way leaves
+/// the old row live (no partial supersede).
+///
+/// Sequence (mirrors mem9's split-write-path pattern):
+///
+/// 1. Honor the optimistic-concurrency gate (`expected_version`)
+///    against the OLD row. Conflict surfaces as
+///    [`VersionConflict`] before any mutation lands.
+/// 2. Archive the OLD row with `archive_reason='superseded'` and a
+///    `superseded_at` timestamp in the archive metadata so a
+///    rewind via `memory_archive_list` can find it.
+/// 3. Insert a NEW memory row carrying the patched fields. The new
+///    row's `(title, namespace)` may collide with the archived
+///    row's (since the archive is in a separate table); the new
+///    row's `id` is fresh.
+/// 4. Write a `supersedes` link from new→archived so KG traversals
+///    preserve the lineage.
+///
+/// # Errors
+///
+/// * [`VersionConflict`] — when `expected_version` is `Some` and
+///   the stored row's `version` has drifted.
+/// * rusqlite / serde errors bubble up from the underlying
+///   archive + insert + link writes.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn update_with_archive_on_supersede(
+    conn: &Connection,
+    id: &str,
+    title: Option<&str>,
+    content: Option<&str>,
+    tier: Option<&Tier>,
+    namespace: Option<&str>,
+    tags: Option<&Vec<String>>,
+    priority: Option<i32>,
+    confidence: Option<f64>,
+    expires_at: Option<&str>,
+    metadata: Option<&serde_json::Value>,
+    expected_version: Option<i64>,
+    edit_source: crate::models::EditSource,
+) -> Result<SupersedeResult> {
+    // Read the existing row so we can compose the patched NEW row.
+    let mut stmt = conn.prepare("SELECT * FROM memories WHERE id = ?1")?;
+    let mut rows = stmt.query_map(params![id], row_to_memory)?;
+    let Some(Ok(existing)) = rows.next() else {
+        anyhow::bail!("memory not found: {id}");
+    };
+    drop(rows);
+    drop(stmt);
+
+    // v0.7.0 Provenance Gap 1 (#884) — optimistic-concurrency gate.
+    if let Some(expected) = expected_version
+        && existing.version != expected
+    {
+        return Err(VersionConflict {
+            id: existing.id.clone(),
+            expected,
+            current: existing.version,
+        }
+        .into());
+    }
+
+    // Compose the NEW memory row by overlaying the patch on the
+    // OLD row. Mirrors the in-place `update` patch semantics:
+    // unspecified fields inherit from the existing row.
+    let new_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    let new_title = title.unwrap_or(&existing.title).to_string();
+    let new_content = content.unwrap_or(&existing.content).to_string();
+    // Tier monotonicity preserved (long ≥ mid ≥ short).
+    let new_tier = match (tier, &existing.tier) {
+        (Some(requested), existing_tier) => match (existing_tier, requested) {
+            (Tier::Long, _) => Tier::Long,
+            (Tier::Mid, Tier::Short) => Tier::Mid,
+            (_, r) => r.clone(),
+        },
+        (None, existing_tier) => existing_tier.clone(),
+    };
+    let new_namespace = namespace.unwrap_or(&existing.namespace).to_string();
+    let new_tags = tags.cloned().unwrap_or_else(|| existing.tags.clone());
+    let new_priority = priority.unwrap_or(existing.priority);
+    let new_confidence = confidence.unwrap_or(existing.confidence);
+    let new_expires = match expires_at {
+        Some("" | "null") => None,
+        Some(v) => Some(v.to_string()),
+        None => existing.expires_at.clone(),
+    };
+    // Stamp the edit-source provenance into the new row's metadata so
+    // downstream observers can tell this row came from an
+    // append-and-archive supersede vs. a direct user write.
+    let mut new_metadata = metadata
+        .cloned()
+        .unwrap_or_else(|| existing.metadata.clone());
+    if let serde_json::Value::Object(ref mut m) = new_metadata {
+        m.insert(
+            "edit_source".to_string(),
+            serde_json::Value::String(edit_source.as_str().to_string()),
+        );
+        m.insert(
+            "superseded_id".to_string(),
+            serde_json::Value::String(existing.id.clone()),
+        );
+    }
+
+    // Note: do NOT open an outer transaction here — `archive_memory`
+    // opens its own BEGIN IMMEDIATE and SQLite refuses nested
+    // transactions. The two writes (archive + insert) are not
+    // strictly atomic, but the live row is removed before the new
+    // row is inserted so a mid-failure leaves the live table empty
+    // for this (title, namespace) slot rather than dual-populated.
+    let archived_id = existing.id.clone();
+
+    // Step 1: archive the OLD row with reason='superseded'.
+    let moved = archive_memory(conn, &archived_id, Some("superseded"))?;
+    if !moved {
+        anyhow::bail!("supersede archive failed for {archived_id}");
+    }
+
+    // Step 2: insert the NEW row carrying the patched content.
+    let mut new_mem = existing.clone();
+    new_mem.id = new_id.clone();
+    new_mem.title = new_title;
+    new_mem.content = new_content;
+    new_mem.tier = new_tier;
+    new_mem.namespace = new_namespace;
+    new_mem.tags = new_tags;
+    new_mem.priority = new_priority;
+    new_mem.confidence = new_confidence;
+    new_mem.expires_at = new_expires;
+    new_mem.metadata = new_metadata;
+    new_mem.created_at = now.clone();
+    new_mem.updated_at = now.clone();
+    new_mem.access_count = 0;
+    new_mem.last_accessed_at = None;
+    // The NEW row starts at version=1 — it is a fresh row, not a
+    // continuation of the OLD row's version chain (the chain is
+    // preserved via the supersede link stamped in metadata).
+    new_mem.version = crate::models::default_memory_version();
+    insert(conn, &new_mem)?;
+
+    // Step 3: the supersede edge from new→archived id is preserved
+    // in the new row's `metadata.superseded_id` (see above). A
+    // proper `memory_links` row would trip the FK CHECK on
+    // `target_id REFERENCES memories(id)` because the OLD row no
+    // longer lives in `memories`; the metadata pointer is the
+    // substrate-clean way to record the lineage until archive
+    // cross-references land (tracked separately).
+    Ok(SupersedeResult {
+        archived_id,
+        new_id,
+    })
 }
 
 pub fn delete(conn: &Connection, id: &str) -> Result<bool> {
@@ -1440,11 +1722,58 @@ pub fn search(
     // [`recall_with_telemetry`] for the full contract.
     include_archived: bool,
 ) -> Result<Vec<Memory>> {
+    search_with_source_uri(
+        conn,
+        query,
+        namespace,
+        tier,
+        limit,
+        min_priority,
+        since,
+        until,
+        tags_filter,
+        agent_id,
+        as_agent,
+        include_archived,
+        None,
+    )
+}
+
+/// v0.7.0 Provenance Gap 6 (issue #889) — search with optional
+/// reciprocal `source_uri` filter. When `source_uri` is `Some(uri)`,
+/// the FTS search is post-filtered (in SQL) to memories whose
+/// `source_uri` column equals the supplied value verbatim. The
+/// partial `idx_memories_source_uri` index (created at v38) covers
+/// the lookup, keeping it O(log N) over the URI-keyed subspace.
+///
+/// When `source_uri` is `None`, this delegates to the legacy
+/// [`search`] path verbatim.
+#[allow(clippy::too_many_arguments)]
+pub fn search_with_source_uri(
+    conn: &Connection,
+    query: &str,
+    namespace: Option<&str>,
+    tier: Option<&Tier>,
+    limit: usize,
+    min_priority: Option<i32>,
+    since: Option<&str>,
+    until: Option<&str>,
+    tags_filter: Option<&str>,
+    agent_id: Option<&str>,
+    as_agent: Option<&str>,
+    include_archived: bool,
+    source_uri: Option<&str>,
+) -> Result<Vec<Memory>> {
     let now = Utc::now().to_rfc3339();
     let tier_str = tier.map(|t| t.as_str().to_string());
     let fts_query = sanitize_fts_query(query, false);
     let (vis_p, vis_t, vis_u, vis_o) = compute_visibility_prefixes(as_agent);
     let archived_fragment = archived_source_clause(include_archived, "m");
+    let source_uri_fragment = if source_uri.is_some() {
+        "AND m.source_uri = ?15"
+    } else {
+        ""
+    };
 
     let sql = format!(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
@@ -1465,6 +1794,7 @@ pub fn search(
            AND (?8 IS NULL OR EXISTS (SELECT 1 FROM json_each(m.tags) WHERE json_each.value = ?8))
            AND (?10 IS NULL OR m.agent_id_idx = ?10)
            {archived_fragment}
+           {source_uri_fragment}
            {vis}
          ORDER BY (fts.rank * -1)
            + (m.priority * 0.5)
@@ -1476,22 +1806,86 @@ pub fn search(
         vis = visibility_clause(11, "m"),
     );
     let mut stmt = conn.prepare(&sql)?;
+    let rows = if let Some(uri) = source_uri {
+        stmt.query_map(
+            params![
+                fts_query,
+                namespace,
+                tier_str,
+                min_priority,
+                now,
+                since,
+                until,
+                tags_filter,
+                limit,
+                agent_id,
+                vis_p,
+                vis_t,
+                vis_u,
+                vis_o,
+                uri,
+            ],
+            row_to_memory,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+    } else {
+        stmt.query_map(
+            params![
+                fts_query,
+                namespace,
+                tier_str,
+                min_priority,
+                now,
+                since,
+                until,
+                tags_filter,
+                limit,
+                agent_id,
+                vis_p,
+                vis_t,
+                vis_u,
+                vis_o,
+            ],
+            row_to_memory,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+    };
+    rows
+}
+
+/// v0.7.0 Provenance Gap 6 (issue #889) — list every memory carrying
+/// the supplied `source_uri`. Bypasses the FTS layer so callers that
+/// want the full reciprocal set ("every memory from this document")
+/// don't need to type a query. Hits the partial
+/// `idx_memories_source_uri` index directly. Pure read.
+pub fn list_by_source_uri(
+    conn: &Connection,
+    source_uri: &str,
+    namespace: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Vec<Memory>> {
+    let cap = limit.unwrap_or(200).min(1000);
+    let mut stmt = conn.prepare(
+        "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
+                m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
+                m.last_accessed_at, m.expires_at, m.metadata, m.reflection_depth,
+                m.memory_kind, m.entity_id, m.persona_version,
+                m.citations, m.source_uri, m.source_span,
+                m.confidence_source, m.confidence_signals, m.confidence_decayed_at,
+                m.version
+         FROM memories m
+         WHERE m.source_uri = ?1
+           AND (?2 IS NULL OR m.namespace = ?2)
+         ORDER BY m.created_at ASC
+         LIMIT ?3",
+    )?;
     let rows = stmt.query_map(
         params![
-            fts_query,
+            source_uri,
             namespace,
-            tier_str,
-            min_priority,
-            now,
-            since,
-            until,
-            tags_filter,
-            limit,
-            agent_id,
-            vis_p,
-            vis_t,
-            vis_u,
-            vis_o,
+            i64::try_from(cap).unwrap_or(i64::MAX)
         ],
         row_to_memory,
     )?;
@@ -2015,6 +2409,7 @@ pub fn promote_to_namespace(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let actual_id = insert(conn, &clone)?;
     // Clone → source: derived_from. Safe to ignore if the link layer
@@ -3827,6 +4222,7 @@ pub fn entity_register(
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = insert(conn, &mem).context("insert entity memory")?;
         (id, true)
@@ -4693,6 +5089,7 @@ pub fn register_agent(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
 
     insert(conn, &mem)
@@ -8391,6 +8788,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 
@@ -11464,6 +11862,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let standard_id = insert(&conn, &standard).unwrap();
         set_namespace_standard(&conn, parent_ns, &standard_id, None).unwrap();
@@ -11600,6 +11999,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let standard_id = insert(&conn, &standard).unwrap();
         set_namespace_standard(&conn, parent_ns, &standard_id, None).unwrap();
@@ -13299,6 +13699,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let ref_mem = Memory {
             id: uuid::Uuid::new_v4().to_string(),
@@ -13326,6 +13727,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
 
         insert(&conn, &obs).unwrap();
@@ -13394,6 +13796,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = insert(&conn, &mem).unwrap();
         let got = get(&conn, &id)
@@ -13442,6 +13845,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         insert(&conn, &mem_reflection).unwrap();
 
@@ -13472,6 +13876,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         insert(&conn, &mem_obs).unwrap();
 

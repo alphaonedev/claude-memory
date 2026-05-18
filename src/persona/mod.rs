@@ -397,6 +397,7 @@ impl<'a> PersonaGenerator<'a> {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
 
         let persona_id = db::insert(self.conn, &persona_mem)
@@ -917,6 +918,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(conn, &mem).unwrap()
     }
@@ -1006,6 +1008,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&conn, &mem).unwrap();
         assert_eq!(next_version(&conn, "alice", "team/alpha").unwrap(), 2);
@@ -1095,6 +1098,7 @@ mod tests {
                 confidence_source: ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             ids.push(db::insert(conn, &mem).unwrap());
         }
