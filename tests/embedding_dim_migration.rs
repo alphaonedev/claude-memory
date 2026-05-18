@@ -14,7 +14,7 @@
 //! daemon-bootstrap entry point that detects the dim mismatch and runs
 //! the destructive `migrate_embedding_dim` in-place. The daemon
 //! `bootstrap_serve` path resolves the configured embedder dim from the
-//! same ladder `build_embedder` uses (app_config override > tier preset)
+//! same ladder `build_embedder` uses (`app_config` override > tier preset)
 //! and threads it through `build_store_handle` → the new auto-migrate
 //! entry point so a misaligned-dim schema is healed before the first
 //! write hits the wire.

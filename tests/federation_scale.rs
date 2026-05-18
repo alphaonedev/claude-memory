@@ -11,7 +11,7 @@
 //! ## What this test asserts
 //!
 //! 1. **No deadlocks.** 100 agents each running 50 concurrent
-//!    `check_and_record` quota calls against a shared SQLite connection
+//!    `check_and_record` quota calls against a shared `SQLite` connection
 //!    converge in under 30 s wall-clock (generous; in practice ~3-5 s
 //!    on M4). A deadlock would manifest as the harness hanging on
 //!    `join_all` rather than the per-call timeout.

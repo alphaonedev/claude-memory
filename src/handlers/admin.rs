@@ -15,10 +15,13 @@ use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
+#[cfg(feature = "sal")]
 use uuid::Uuid;
 
 use crate::db;
-use crate::models::{ConfidenceSource, Memory, MemoryLink, RegisterAgentBody, Tier};
+#[cfg(feature = "sal")]
+use crate::models::{ConfidenceSource, Tier};
+use crate::models::{Memory, MemoryLink, RegisterAgentBody};
 use crate::validate;
 
 use super::AppState;

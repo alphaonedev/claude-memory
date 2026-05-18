@@ -762,10 +762,709 @@ fn lookup_namespace_standard(conn: &rusqlite::Connection, namespace: &str) -> Op
     serde_json::to_value(&mem).ok()
 }
 
+// ---------------------------------------------------------------------------
+// #867 — `tools/call` dispatch as a registry table.
+//
+// The legacy `handle_request` carried a 72-arm `match tool_name { ... }`
+// block that grew linearly with every new MCP tool (each new tool meant
+// a central-file edit). The dispatch surface is now driven by
+// [`TOOL_DISPATCH_TABLE`], a `&'static [(&str, DispatchFn)]` registry
+// keyed by tool name. The legacy match is gone; new tools land by
+// adding a thin `dispatch_<tool>` wrapper next to their handler module
+// and registering it through [`register_mcp_tool!`].
+//
+// All wrappers share the same shape:
+//
+// ```ignore
+// fn dispatch_foo(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+//     foo_module::handle_foo(ctx.conn, ctx.arguments, ...)
+// }
+// ```
+//
+// Behaviour is byte-for-byte identical to the pre-refactor code path:
+// the same handler functions run in the same order with the same
+// arguments. The wrappers only un-bundle the `ToolDispatchCtx` back
+// into the positional arguments each handler expects.
+//
+// `O(N)` lookup is fine — N is ~70 and the table is iterated once per
+// `tools/call` dispatch (every ~50ms recall budget); the `&str`
+// comparison is a no-alloc memcmp. A `phf_map!` / `HashMap<&'static
+// str, _>` would be a micro-optimisation and is the obvious next
+// step if the table grows past several hundred entries.
+// ---------------------------------------------------------------------------
+
+/// Bundle of all per-request inputs every MCP tool dispatch fn might
+/// need. Centralising these lets every entry in [`TOOL_DISPATCH_TABLE`]
+/// share the same signature: `fn(&ToolDispatchCtx<'_>) ->
+/// Result<Value, String>`.
+///
+/// Not all wrappers consume every field — `memory_search` only uses
+/// `conn` + `arguments`; `memory_store` uses most of them. The unused
+/// references are zero-cost so collapsing the signature into a single
+/// `&ctx` form is the right trade-off for a registry table.
+pub(crate) struct ToolDispatchCtx<'a> {
+    pub conn: &'a rusqlite::Connection,
+    pub db_path: &'a Path,
+    pub arguments: &'a Value,
+    pub embedder: Option<&'a dyn Embed>,
+    pub llm: Option<&'a OllamaClient>,
+    pub reranker: Option<&'a BatchedReranker>,
+    pub tier_config: &'a TierConfig,
+    pub vector_index: Option<&'a VectorIndex>,
+    pub resolved_ttl: &'a crate::config::ResolvedTtl,
+    pub resolved_scoring: &'a crate::config::ResolvedScoring,
+    pub archive_on_gc: bool,
+    pub autonomous_hooks: bool,
+    pub mcp_client: Option<&'a str>,
+    pub profile: &'a crate::profile::Profile,
+    pub mcp_config: Option<&'a crate::config::McpConfig>,
+    pub active_keypair: Option<&'a crate::identity::keypair::AgentKeypair>,
+    pub harness: Option<&'a crate::harness::Harness>,
+    pub federation_forward_url: Option<&'a str>,
+    pub recall_scope: Option<&'a crate::config::RecallScope>,
+    pub atomise_handler: Option<&'a atomise::AtomiseToolHandler>,
+    pub ingest_multistep_handler: Option<&'a ingest_multistep::IngestMultistepHandler>,
+}
+
+/// Uniform signature for every entry in [`TOOL_DISPATCH_TABLE`]. Each
+/// tool gets a thin wrapper that un-bundles a [`ToolDispatchCtx`] back
+/// into the positional arguments its underlying handler expects.
+pub(crate) type DispatchFn = fn(&ToolDispatchCtx<'_>) -> Result<Value, String>;
+
+/// Registry-registration macro. Today this expands to a plain
+/// `(literal, fn)` tuple suitable for the `TOOL_DISPATCH_TABLE` array
+/// literal, but the indirection lets future refactors swap to
+/// `inventory::submit!` (cross-module collect) without touching every
+/// call site.
+///
+/// ```ignore
+/// register_mcp_tool!("memory_search", dispatch_memory_search),
+/// ```
+macro_rules! register_mcp_tool {
+    ($name:literal, $f:path) => {
+        ($name, $f as DispatchFn)
+    };
+}
+
+// --- per-tool dispatch wrappers --------------------------------------------
+//
+// Each wrapper is named `dispatch_<tool>` and forwards to the
+// underlying `handle_<tool>` (or equivalent) with the exact arguments
+// the pre-refactor match arm passed. Keep the wrappers minimal — any
+// logic that belongs at dispatch time (agent_id resolution for
+// `memory_offload`/`memory_deref`, the capabilities `family` branch,
+// etc.) lives here in this section so the underlying handler stays
+// free of dispatch-shape concerns.
+
+fn dispatch_memory_store(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_store(
+        ctx.conn,
+        ctx.db_path,
+        ctx.arguments,
+        ctx.embedder,
+        ctx.llm,
+        ctx.vector_index,
+        ctx.resolved_ttl,
+        ctx.autonomous_hooks,
+        ctx.mcp_client,
+        ctx.federation_forward_url,
+    )
+}
+
+fn dispatch_memory_recall(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_recall(
+        ctx.conn,
+        ctx.arguments,
+        ctx.embedder,
+        ctx.vector_index,
+        ctx.reranker,
+        ctx.archive_on_gc,
+        ctx.resolved_ttl,
+        ctx.resolved_scoring,
+        ctx.recall_scope,
+    )
+}
+
+fn dispatch_memory_search(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_search(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_list(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_list(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_load_family(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_load_family(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_smart_load(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_smart_load(ctx.conn, ctx.arguments, ctx.embedder)
+}
+
+fn dispatch_memory_get_taxonomy(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_get_taxonomy(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_check_duplicate(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_check_duplicate(ctx.conn, ctx.arguments, ctx.embedder)
+}
+
+fn dispatch_memory_entity_register(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_entity_register(ctx.conn, ctx.arguments, ctx.mcp_client)
+}
+
+fn dispatch_memory_entity_get_by_alias(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_entity_get_by_alias(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_kg_timeline(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_kg_timeline(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_kg_invalidate(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_kg_invalidate(ctx.conn, ctx.db_path, ctx.arguments)
+}
+
+fn dispatch_memory_kg_query(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_kg_query(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_find_paths(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_find_paths(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_delete(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_delete(
+        ctx.conn,
+        ctx.db_path,
+        ctx.arguments,
+        ctx.vector_index,
+        ctx.mcp_client,
+    )
+}
+
+fn dispatch_memory_promote(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_promote(ctx.conn, ctx.db_path, ctx.arguments, ctx.mcp_client)
+}
+
+fn dispatch_memory_pending_list(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_pending_list(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_pending_approve(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_pending_approve(ctx.conn, ctx.arguments, ctx.mcp_client)
+}
+
+fn dispatch_memory_pending_reject(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_pending_reject(ctx.conn, ctx.arguments, ctx.mcp_client)
+}
+
+fn dispatch_memory_forget(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_forget(ctx.conn, ctx.arguments, ctx.archive_on_gc)
+}
+
+fn dispatch_memory_stats(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_stats(ctx.conn, ctx.db_path)
+}
+
+fn dispatch_memory_update(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_update(ctx.conn, ctx.arguments, ctx.embedder, ctx.vector_index)
+}
+
+fn dispatch_memory_get(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_get(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_link(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_link(ctx.conn, ctx.db_path, ctx.arguments, ctx.active_keypair)
+}
+
+fn dispatch_memory_get_links(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_get_links(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_verify(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_verify(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_replay(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_replay(ctx.conn, ctx.arguments, ctx.mcp_client)
+}
+
+fn dispatch_memory_consolidate(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_consolidate(
+        ctx.conn,
+        ctx.db_path,
+        ctx.arguments,
+        ctx.llm,
+        ctx.embedder,
+        ctx.vector_index,
+        ctx.mcp_client,
+    )
+}
+
+fn dispatch_memory_atomise(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_atomise(
+        ctx.conn,
+        ctx.arguments,
+        ctx.atomise_handler,
+        ctx.tier_config.tier,
+        ctx.mcp_client,
+    )
+}
+
+fn dispatch_memory_ingest_multistep(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_ingest_multistep(
+        ctx.arguments,
+        ctx.ingest_multistep_handler,
+        ctx.tier_config.tier,
+    )
+}
+
+fn dispatch_memory_reflect(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_reflect(
+        ctx.conn,
+        ctx.db_path,
+        ctx.arguments,
+        ctx.embedder,
+        ctx.vector_index,
+        ctx.mcp_client,
+        ctx.active_keypair,
+    )
+}
+
+/// `memory_capabilities` dispatch — branches on the optional `family`
+/// argument. Pre-refactor this lived inline as ~165 LOC inside the
+/// match arm; here it is unchanged behaviour, just routed through the
+/// uniform `ToolDispatchCtx` shape.
+fn dispatch_memory_capabilities(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    let arguments = ctx.arguments;
+    if let Some(fam_name) = arguments.get("family").and_then(Value::as_str) {
+        let include_schema = arguments
+            .get("include_schema")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let verbose = arguments
+            .get("verbose")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let aid = arguments
+            .get("agent_id")
+            .and_then(Value::as_str)
+            .or(ctx.mcp_client);
+        return handle_capabilities_family(
+            fam_name,
+            include_schema,
+            verbose,
+            ctx.profile,
+            ctx.mcp_config,
+            aid,
+            Some(ctx.conn),
+        );
+    }
+
+    let accept = arguments
+        .get("accept")
+        .and_then(Value::as_str)
+        .map_or(CapabilitiesAccept::V3, CapabilitiesAccept::parse);
+    let top_verbose = arguments
+        .get("verbose")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let top_include_schema = arguments
+        .get("include_schema")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let v3_aid = arguments
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .or(ctx.mcp_client);
+    let runtime_tier = effective_tier_label(
+        ctx.llm.is_some(),
+        ctx.embedder.is_some(),
+        ctx.reranker.is_some(),
+    );
+    let result = match accept {
+        CapabilitiesAccept::V3 => handle_capabilities_with_conn_v3(
+            ctx.tier_config,
+            ctx.reranker,
+            ctx.embedder.is_some(),
+            Some(ctx.conn),
+            ctx.profile,
+            ctx.mcp_config,
+            v3_aid,
+            ctx.harness,
+        ),
+        _ => handle_capabilities_with_conn(
+            ctx.tier_config,
+            ctx.reranker,
+            ctx.embedder.is_some(),
+            Some(ctx.conn),
+            accept,
+        ),
+    };
+    let profile = ctx.profile;
+    result.map(|mut value| {
+        if matches!(accept, CapabilitiesAccept::V2 | CapabilitiesAccept::V3) {
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("families".to_string(), families_overview(profile));
+            }
+        }
+        if matches!(accept, CapabilitiesAccept::V1)
+            && let Some(obj) = value.as_object_mut()
+            && !obj.contains_key("schema_version")
+        {
+            obj.insert("schema_version".to_string(), Value::String("1".to_string()));
+        }
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("tier".to_string(), Value::String(runtime_tier.to_string()));
+        }
+        if (top_include_schema || top_verbose)
+            && matches!(accept, CapabilitiesAccept::V2 | CapabilitiesAccept::V3)
+            && let Some(obj) = value.as_object_mut()
+        {
+            overlay_tool_payloads(obj, profile, top_include_schema, top_verbose);
+        }
+        value
+    })
+}
+
+fn dispatch_memory_expand_query(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_expand_query(ctx.llm, ctx.arguments)
+}
+
+fn dispatch_memory_auto_tag(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_auto_tag(ctx.conn, ctx.llm, ctx.arguments)
+}
+
+fn dispatch_memory_detect_contradiction(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_detect_contradiction(ctx.conn, ctx.llm, ctx.arguments)
+}
+
+fn dispatch_memory_archive_list(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_archive_list(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_archive_restore(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_archive_restore(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_archive_purge(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_archive_purge(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_archive_stats(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_archive_stats(ctx.conn)
+}
+
+fn dispatch_memory_gc(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_gc(ctx.conn, ctx.arguments, ctx.archive_on_gc)
+}
+
+fn dispatch_memory_session_start(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_session_start(ctx.conn, ctx.arguments, ctx.llm)
+}
+
+fn dispatch_memory_namespace_set_standard(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_namespace_set_standard(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_namespace_get_standard(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_namespace_get_standard(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_namespace_clear_standard(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_namespace_clear_standard(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_agent_register(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_agent_register(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_agent_list(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_agent_list(ctx.conn)
+}
+
+fn dispatch_memory_notify(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_notify(ctx.conn, ctx.arguments, ctx.resolved_ttl, ctx.mcp_client)
+}
+
+fn dispatch_memory_inbox(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_inbox(ctx.conn, ctx.arguments, ctx.mcp_client)
+}
+
+fn dispatch_memory_subscribe(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_subscribe(ctx.conn, ctx.arguments, ctx.mcp_client)
+}
+
+fn dispatch_memory_unsubscribe(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_unsubscribe(ctx.conn, ctx.arguments, ctx.mcp_client)
+}
+
+fn dispatch_memory_list_subscriptions(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_list_subscriptions(ctx.conn, ctx.mcp_client)
+}
+
+fn dispatch_memory_subscription_replay(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_subscription_replay(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_subscription_dlq_list(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_subscription_dlq_list(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_quota_status(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_quota_status(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_check_agent_action(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_check_agent_action(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_rule_list(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_rule_list(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_reflection_origin(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_reflection_origin(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_export_reflection(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_export_reflection(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_persona(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_persona(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_persona_generate(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_persona_generate(
+        ctx.conn,
+        ctx.arguments,
+        ctx.llm.map(|c| c as &dyn crate::autonomy::AutonomyLlm),
+        ctx.tier_config.tier,
+        ctx.active_keypair,
+    )
+}
+
+fn dispatch_memory_calibrate_confidence(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_calibrate_confidence(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_dependents_of_invalidated(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_dependents_of_invalidated(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_skill_register(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_skill_register(ctx.conn, ctx.arguments, ctx.active_keypair)
+}
+
+fn dispatch_memory_skill_list(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_skill_list(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_skill_get(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_skill_get(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_skill_resource(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_skill_resource(ctx.conn, ctx.arguments)
+}
+
+fn dispatch_memory_skill_export(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_skill_export(ctx.conn, ctx.arguments, ctx.active_keypair)
+}
+
+fn dispatch_memory_skill_promote_from_reflection(
+    ctx: &ToolDispatchCtx<'_>,
+) -> Result<Value, String> {
+    handle_skill_promote_from_reflection(ctx.conn, ctx.arguments, ctx.active_keypair)
+}
+
+fn dispatch_memory_skill_compositional_context(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_skill_compositional_context(ctx.conn, ctx.arguments)
+}
+
+/// `memory_offload` dispatch — resolves caller's agent_id through the
+/// same NHI precedence chain `memory_store` uses
+/// (explicit > metadata.agent_id > `mcp_client` > host fallback) so
+/// the substrate row is correctly attributed.
+fn dispatch_memory_offload(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    let explicit_agent_id = ctx
+        .arguments
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            ctx.arguments
+                .get("metadata")
+                .and_then(|m| m.get("agent_id"))
+                .and_then(Value::as_str)
+        });
+    match crate::identity::resolve_agent_id(explicit_agent_id, ctx.mcp_client) {
+        Ok(agent_id) => offload::handle_offload(ctx.conn, ctx.arguments, &agent_id),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// `memory_deref` dispatch — SEC-4 (Cluster D, issue #767) resolves
+/// caller's authenticated agent_id so the deref ownership gate can
+/// refuse cross-agent leaks (NotFound, leak-resistant). Mirrors the
+/// `memory_offload` shape.
+fn dispatch_memory_deref(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    let explicit_agent_id = ctx
+        .arguments
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            ctx.arguments
+                .get("metadata")
+                .and_then(|m| m.get("agent_id"))
+                .and_then(Value::as_str)
+        });
+    match crate::identity::resolve_agent_id(explicit_agent_id, ctx.mcp_client) {
+        Ok(agent_id) => offload::handle_deref(ctx.conn, ctx.arguments, &agent_id),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// The canonical `tools/call` dispatch table. Keyed by MCP tool name;
+/// each entry's `DispatchFn` un-bundles a [`ToolDispatchCtx`] back
+/// into the positional arguments its handler expects.
+///
+/// New tools land by adding a `dispatch_<tool>` wrapper above and an
+/// entry here via [`register_mcp_tool!`].
+pub(crate) static TOOL_DISPATCH_TABLE: &[(&str, DispatchFn)] = &[
+    register_mcp_tool!("memory_store", dispatch_memory_store),
+    register_mcp_tool!("memory_recall", dispatch_memory_recall),
+    register_mcp_tool!("memory_search", dispatch_memory_search),
+    register_mcp_tool!("memory_list", dispatch_memory_list),
+    register_mcp_tool!("memory_load_family", dispatch_memory_load_family),
+    register_mcp_tool!("memory_smart_load", dispatch_memory_smart_load),
+    register_mcp_tool!("memory_get_taxonomy", dispatch_memory_get_taxonomy),
+    register_mcp_tool!("memory_check_duplicate", dispatch_memory_check_duplicate),
+    register_mcp_tool!("memory_entity_register", dispatch_memory_entity_register),
+    register_mcp_tool!(
+        "memory_entity_get_by_alias",
+        dispatch_memory_entity_get_by_alias
+    ),
+    register_mcp_tool!("memory_kg_timeline", dispatch_memory_kg_timeline),
+    register_mcp_tool!("memory_kg_invalidate", dispatch_memory_kg_invalidate),
+    register_mcp_tool!("memory_kg_query", dispatch_memory_kg_query),
+    register_mcp_tool!("memory_find_paths", dispatch_memory_find_paths),
+    register_mcp_tool!("memory_delete", dispatch_memory_delete),
+    register_mcp_tool!("memory_promote", dispatch_memory_promote),
+    register_mcp_tool!("memory_pending_list", dispatch_memory_pending_list),
+    register_mcp_tool!("memory_pending_approve", dispatch_memory_pending_approve),
+    register_mcp_tool!("memory_pending_reject", dispatch_memory_pending_reject),
+    register_mcp_tool!("memory_forget", dispatch_memory_forget),
+    register_mcp_tool!("memory_stats", dispatch_memory_stats),
+    register_mcp_tool!("memory_update", dispatch_memory_update),
+    register_mcp_tool!("memory_get", dispatch_memory_get),
+    register_mcp_tool!("memory_link", dispatch_memory_link),
+    register_mcp_tool!("memory_get_links", dispatch_memory_get_links),
+    register_mcp_tool!("memory_verify", dispatch_memory_verify),
+    register_mcp_tool!("memory_replay", dispatch_memory_replay),
+    register_mcp_tool!("memory_consolidate", dispatch_memory_consolidate),
+    register_mcp_tool!("memory_atomise", dispatch_memory_atomise),
+    register_mcp_tool!("memory_ingest_multistep", dispatch_memory_ingest_multistep),
+    register_mcp_tool!("memory_reflect", dispatch_memory_reflect),
+    register_mcp_tool!("memory_capabilities", dispatch_memory_capabilities),
+    register_mcp_tool!("memory_expand_query", dispatch_memory_expand_query),
+    register_mcp_tool!("memory_auto_tag", dispatch_memory_auto_tag),
+    register_mcp_tool!(
+        "memory_detect_contradiction",
+        dispatch_memory_detect_contradiction
+    ),
+    register_mcp_tool!("memory_archive_list", dispatch_memory_archive_list),
+    register_mcp_tool!("memory_archive_restore", dispatch_memory_archive_restore),
+    register_mcp_tool!("memory_archive_purge", dispatch_memory_archive_purge),
+    register_mcp_tool!("memory_archive_stats", dispatch_memory_archive_stats),
+    register_mcp_tool!("memory_gc", dispatch_memory_gc),
+    register_mcp_tool!("memory_session_start", dispatch_memory_session_start),
+    register_mcp_tool!(
+        "memory_namespace_set_standard",
+        dispatch_memory_namespace_set_standard
+    ),
+    register_mcp_tool!(
+        "memory_namespace_get_standard",
+        dispatch_memory_namespace_get_standard
+    ),
+    register_mcp_tool!(
+        "memory_namespace_clear_standard",
+        dispatch_memory_namespace_clear_standard
+    ),
+    register_mcp_tool!("memory_agent_register", dispatch_memory_agent_register),
+    register_mcp_tool!("memory_agent_list", dispatch_memory_agent_list),
+    register_mcp_tool!("memory_notify", dispatch_memory_notify),
+    register_mcp_tool!("memory_inbox", dispatch_memory_inbox),
+    register_mcp_tool!("memory_subscribe", dispatch_memory_subscribe),
+    register_mcp_tool!("memory_unsubscribe", dispatch_memory_unsubscribe),
+    register_mcp_tool!(
+        "memory_list_subscriptions",
+        dispatch_memory_list_subscriptions
+    ),
+    register_mcp_tool!(
+        "memory_subscription_replay",
+        dispatch_memory_subscription_replay
+    ),
+    register_mcp_tool!(
+        "memory_subscription_dlq_list",
+        dispatch_memory_subscription_dlq_list
+    ),
+    register_mcp_tool!("memory_quota_status", dispatch_memory_quota_status),
+    register_mcp_tool!(
+        "memory_check_agent_action",
+        dispatch_memory_check_agent_action
+    ),
+    register_mcp_tool!("memory_rule_list", dispatch_memory_rule_list),
+    register_mcp_tool!(
+        "memory_reflection_origin",
+        dispatch_memory_reflection_origin
+    ),
+    register_mcp_tool!(
+        "memory_export_reflection",
+        dispatch_memory_export_reflection
+    ),
+    register_mcp_tool!("memory_persona", dispatch_memory_persona),
+    register_mcp_tool!("memory_persona_generate", dispatch_memory_persona_generate),
+    register_mcp_tool!(
+        "memory_calibrate_confidence",
+        dispatch_memory_calibrate_confidence
+    ),
+    register_mcp_tool!(
+        "memory_dependents_of_invalidated",
+        dispatch_memory_dependents_of_invalidated
+    ),
+    register_mcp_tool!("memory_skill_register", dispatch_memory_skill_register),
+    register_mcp_tool!("memory_skill_list", dispatch_memory_skill_list),
+    register_mcp_tool!("memory_skill_get", dispatch_memory_skill_get),
+    register_mcp_tool!("memory_skill_resource", dispatch_memory_skill_resource),
+    register_mcp_tool!("memory_skill_export", dispatch_memory_skill_export),
+    register_mcp_tool!(
+        "memory_skill_promote_from_reflection",
+        dispatch_memory_skill_promote_from_reflection
+    ),
+    register_mcp_tool!(
+        "memory_skill_compositional_context",
+        dispatch_memory_skill_compositional_context
+    ),
+    register_mcp_tool!("memory_offload", dispatch_memory_offload),
+    register_mcp_tool!("memory_deref", dispatch_memory_deref),
+];
+
+/// Linear-scan lookup against [`TOOL_DISPATCH_TABLE`]. Returns the
+/// matching `DispatchFn` or `None` if the tool is unknown. The caller
+/// (`handle_request`'s `tools/call` branch) maps `None` to the
+/// JSON-RPC `-32601` "method not found" envelope.
+pub(crate) fn lookup_dispatch(tool_name: &str) -> Option<DispatchFn> {
+    TOOL_DISPATCH_TABLE
+        .iter()
+        .find(|(name, _)| *name == tool_name)
+        .map(|(_, f)| *f)
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn handle_request(
     conn: &rusqlite::Connection,
     db_path: &Path,
@@ -902,390 +1601,47 @@ fn handle_request(
                 &empty_obj
             };
 
-            let result = match tool_name {
-                "memory_store" => handle_store(
-                    conn,
-                    db_path,
-                    arguments,
-                    embedder,
-                    llm,
-                    vector_index,
-                    resolved_ttl,
-                    autonomous_hooks,
-                    mcp_client,
-                    federation_forward_url,
-                ),
-                "memory_recall" => handle_recall(
-                    conn,
-                    arguments,
-                    embedder,
-                    vector_index,
-                    reranker,
-                    archive_on_gc,
-                    resolved_ttl,
-                    resolved_scoring,
-                    recall_scope,
-                ),
-                "memory_search" => handle_search(conn, arguments),
-                "memory_list" => handle_list(conn, arguments),
-                "memory_load_family" => handle_load_family(conn, arguments),
-                "memory_smart_load" => handle_smart_load(conn, arguments, embedder),
-                "memory_get_taxonomy" => handle_get_taxonomy(conn, arguments),
-                "memory_check_duplicate" => handle_check_duplicate(conn, arguments, embedder),
-                "memory_entity_register" => handle_entity_register(conn, arguments, mcp_client),
-                "memory_entity_get_by_alias" => handle_entity_get_by_alias(conn, arguments),
-                "memory_kg_timeline" => handle_kg_timeline(conn, arguments),
-                "memory_kg_invalidate" => handle_kg_invalidate(conn, db_path, arguments),
-                "memory_kg_query" => handle_kg_query(conn, arguments),
-                "memory_find_paths" => handle_find_paths(conn, arguments),
-                "memory_delete" => {
-                    handle_delete(conn, db_path, arguments, vector_index, mcp_client)
-                }
-                "memory_promote" => handle_promote(conn, db_path, arguments, mcp_client),
-                "memory_pending_list" => handle_pending_list(conn, arguments),
-                "memory_pending_approve" => handle_pending_approve(conn, arguments, mcp_client),
-                "memory_pending_reject" => handle_pending_reject(conn, arguments, mcp_client),
-                "memory_forget" => handle_forget(conn, arguments, archive_on_gc),
-                "memory_stats" => handle_stats(conn, db_path),
-                "memory_update" => handle_update(conn, arguments, embedder, vector_index),
-                "memory_get" => handle_get(conn, arguments),
-                "memory_link" => handle_link(conn, db_path, arguments, active_keypair),
-                "memory_get_links" => handle_get_links(conn, arguments),
-                "memory_verify" => handle_verify(conn, arguments),
-                "memory_replay" => handle_replay(conn, arguments, mcp_client),
-                "memory_consolidate" => handle_consolidate(
-                    conn,
-                    db_path,
-                    arguments,
-                    llm,
-                    embedder,
-                    vector_index,
-                    mcp_client,
-                ),
-                // v0.7.0 WT-1-C — curator-pass atomisation tool. Wraps
-                // the WT-1-B Atomiser engine; tier-gates to smart+ via
-                // the handler's `tier` field. See
-                // `crate::mcp::tools::atomise` for the error mapping.
-                "memory_atomise" => handle_atomise(
-                    conn,
-                    arguments,
-                    atomise_handler,
-                    tier_config.tier,
-                    mcp_client,
-                ),
-                // v0.7.0 Form 3 (issue #756) — multi-step ingest
-                // orchestrator. Tier-gated to smart+; the keyword tier
-                // short-circuits with the standard advisory envelope.
-                "memory_ingest_multistep" => {
-                    handle_ingest_multistep(arguments, ingest_multistep_handler, tier_config.tier)
-                }
-                // v0.7.0 Task 4/8 (recursive learning, issue #655) —
-                // substrate-native reflection primitive. See
-                // `handle_reflect` for the contract.
-                "memory_reflect" => handle_reflect(
-                    conn,
-                    db_path,
-                    arguments,
-                    embedder,
-                    vector_index,
-                    mcp_client,
-                    active_keypair,
-                ),
-                "memory_capabilities" => {
-                    // v0.6.4-006 — runtime expansion via family enumeration.
-                    // When `family` is set, route to the family-listing path
-                    // and short-circuit the global capabilities document.
-                    if let Some(fam_name) = arguments.get("family").and_then(Value::as_str) {
-                        let include_schema = arguments
-                            .get("include_schema")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false);
-                        // v0.7 C2 + C4 — `verbose=true` opts the caller into
-                        // BOTH the long-form `docs` field on each tool entry
-                        // (C2) AND the full inputSchema with every optional
-                        // param (C4). Default is `false`, which strips `docs`
-                        // and trims optionals so the family drilldown matches
-                        // the shrunken `tools/list` shape.
-                        let verbose = arguments
-                            .get("verbose")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false);
-                        // v0.6.4-008 — agent_id resolution for the
-                        // allowlist gate. Caller's explicit
-                        // `arguments.agent_id` wins; otherwise fall
-                        // back to the MCP `clientInfo.name` captured
-                        // at initialize time.
-                        let aid = arguments
-                            .get("agent_id")
-                            .and_then(Value::as_str)
-                            .or(mcp_client);
-                        handle_capabilities_family(
-                            fam_name,
-                            include_schema,
-                            verbose,
-                            profile,
-                            mcp_config,
-                            aid,
-                            Some(conn),
-                        )
-                    } else {
-                        // P1 honesty patch: optional `accept` argument lets MCP
-                        // clients opt into the legacy v1 shape, mirroring the
-                        // HTTP `Accept-Capabilities` header. v0.7.0 A5 makes
-                        // v3 the default (additive over v2); explicit
-                        // `accept="v2"` keeps the v2 wire shape unchanged
-                        // for clients that pin it.
-                        let accept = arguments
-                            .get("accept")
-                            .and_then(Value::as_str)
-                            .map_or(CapabilitiesAccept::V3, CapabilitiesAccept::parse);
-                        // Round-2 F13 — top-level `verbose` and
-                        // `include_schema` were declared in the
-                        // inputSchema but inert when no family was
-                        // specified. Make them functional:
-                        // `verbose=true` overlays per-tool
-                        // `docstring`s into `tools[]`;
-                        // `include_schema=true` overlays per-tool
-                        // `inputSchema`s into `tools[]`.
-                        let top_verbose = arguments
-                            .get("verbose")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false);
-                        let top_include_schema = arguments
-                            .get("include_schema")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false);
-                        // v0.6.4-006 — when no family is requested, augment
-                        // the v2/v3 response with a top-level `families` field
-                        // describing the family taxonomy and which families
-                        // the active profile loads. Backward-compat: v1
-                        // shape never gets the families overlay.
-                        // v0.7.0 A3 — agent_id resolution mirrors the
-                        // family-listing path's resolution: caller's
-                        // explicit `arguments.agent_id` wins; otherwise
-                        // fall back to the MCP `clientInfo.name`
-                        // captured at initialize time. Threaded into v3
-                        // for per-tool `callable_now` calculation.
-                        let v3_aid = arguments
-                            .get("agent_id")
-                            .and_then(Value::as_str)
-                            .or(mcp_client);
-                        // Round-2 F13 — runtime-effective tier (matches
-                        // the `serve_mcp` boot banner). Used to
-                        // overlay the top-level `tier` field so the
-                        // capabilities response and the daemon log
-                        // converge on a single tier source-of-truth.
-                        let runtime_tier = effective_tier_label(
-                            llm.is_some(),
-                            embedder.is_some(),
-                            reranker.is_some(),
-                        );
-                        let result = match accept {
-                            CapabilitiesAccept::V3 => handle_capabilities_with_conn_v3(
-                                tier_config,
-                                reranker,
-                                embedder.is_some(),
-                                Some(conn),
-                                profile,
-                                mcp_config,
-                                v3_aid,
-                                // v0.7.0 B4 — pass the detected
-                                // harness through so the response
-                                // surfaces
-                                // `your_harness_supports_deferred_registration`.
-                                harness,
-                            ),
-                            _ => handle_capabilities_with_conn(
-                                tier_config,
-                                reranker,
-                                embedder.is_some(),
-                                Some(conn),
-                                accept,
-                            ),
-                        };
-                        result.map(|mut value| {
-                            if matches!(accept, CapabilitiesAccept::V2 | CapabilitiesAccept::V3) {
-                                if let Some(obj) = value.as_object_mut() {
-                                    obj.insert("families".to_string(), families_overview(profile));
-                                }
-                            }
-                            // Round-2 F13 — keep `schema_version`
-                            // present on every accept variant. v1's
-                            // `to_v1()` drops the field at the struct
-                            // boundary because the v1 shape predates
-                            // schema_version; a v1 client still needs
-                            // the discriminator to detect that it's
-                            // looking at v1. Inject it on the wire.
-                            if matches!(accept, CapabilitiesAccept::V1)
-                                && let Some(obj) = value.as_object_mut()
-                                && !obj.contains_key("schema_version")
-                            {
-                                obj.insert(
-                                    "schema_version".to_string(),
-                                    Value::String("1".to_string()),
-                                );
-                            }
-                            // Round-2 F13 — overlay the runtime-
-                            // effective tier so the top-level `tier`
-                            // field reflects what the daemon is
-                            // actually doing, not what
-                            // `tier_config.tier.as_str()` was at
-                            // build/config time. v1, v2, v3 all carry
-                            // `tier`.
-                            if let Some(obj) = value.as_object_mut() {
-                                obj.insert(
-                                    "tier".to_string(),
-                                    Value::String(runtime_tier.to_string()),
-                                );
-                            }
-                            // Round-2 F13 — when `include_schema=true`
-                            // and/or `verbose=true` is set with no
-                            // family, overlay per-tool `inputSchema`
-                            // and/or `docstring` into the v3 `tools[]`
-                            // array. Sourced from `tool_definitions()`.
-                            if (top_include_schema || top_verbose)
-                                && matches!(accept, CapabilitiesAccept::V2 | CapabilitiesAccept::V3)
-                                && let Some(obj) = value.as_object_mut()
-                            {
-                                overlay_tool_payloads(
-                                    obj,
-                                    profile,
-                                    top_include_schema,
-                                    top_verbose,
-                                );
-                            }
-                            value
-                        })
-                    }
-                }
-                "memory_expand_query" => handle_expand_query(llm, arguments),
-                "memory_auto_tag" => handle_auto_tag(conn, llm, arguments),
-                "memory_detect_contradiction" => handle_detect_contradiction(conn, llm, arguments),
-                "memory_archive_list" => handle_archive_list(conn, arguments),
-                "memory_archive_restore" => handle_archive_restore(conn, arguments),
-                "memory_archive_purge" => handle_archive_purge(conn, arguments),
-                "memory_archive_stats" => handle_archive_stats(conn),
-                "memory_gc" => handle_gc(conn, arguments, archive_on_gc),
-                "memory_session_start" => handle_session_start(conn, arguments, llm),
-                "memory_namespace_set_standard" => handle_namespace_set_standard(conn, arguments),
-                "memory_namespace_get_standard" => handle_namespace_get_standard(conn, arguments),
-                "memory_namespace_clear_standard" => {
-                    handle_namespace_clear_standard(conn, arguments)
-                }
-                "memory_agent_register" => handle_agent_register(conn, arguments),
-                "memory_agent_list" => handle_agent_list(conn),
-                "memory_notify" => handle_notify(conn, arguments, resolved_ttl, mcp_client),
-                "memory_inbox" => handle_inbox(conn, arguments, mcp_client),
-                "memory_subscribe" => handle_subscribe(conn, arguments, mcp_client),
-                "memory_unsubscribe" => handle_unsubscribe(conn, arguments, mcp_client),
-                "memory_list_subscriptions" => handle_list_subscriptions(conn, mcp_client),
-                "memory_subscription_replay" => handle_subscription_replay(conn, arguments),
-                "memory_subscription_dlq_list" => handle_subscription_dlq_list(conn, arguments),
-                "memory_quota_status" => handle_quota_status(conn, arguments),
-                // v0.7.0 (issue #691) — substrate-level agent-action
-                // rules engine. Read-only over MCP; mutation lives
-                // on CLI / HTTP.
-                "memory_check_agent_action" => handle_check_agent_action(conn, arguments),
-                "memory_rule_list" => handle_rule_list(conn, arguments),
-                // v0.7.0 L2-2 (S6-M1) — cross-peer reflection provenance.
-                "memory_reflection_origin" => handle_reflection_origin(conn, arguments),
-                // v0.7.0 QW-1 — render a single reflection memory's
-                // markdown / JSON envelope. Agent-side formatting
-                // only; the substrate never writes to the filesystem
-                // from this path (capability isolation — see
-                // `mcp::tools::export_reflection` module doc).
-                "memory_export_reflection" => handle_export_reflection(conn, arguments),
-                // v0.7.0 QW-2 — Persona-as-artifact surface. Read-only
-                // `memory_persona` does an indexed lookup; the write
-                // surface `memory_persona_generate` refuses below
-                // smart tier (curator needs the LLM trait wired).
-                "memory_persona" => handle_persona(conn, arguments),
-                "memory_persona_generate" => handle_persona_generate(
-                    conn,
-                    arguments,
-                    llm.map(|c| c as &dyn crate::autonomy::AutonomyLlm),
-                    tier_config.tier,
-                    active_keypair,
-                ),
-                // v0.7.0 Form 5 (issue #758) — calibration sweep over
-                // the shadow-mode observation table. Pure read-only;
-                // the report renders per-(namespace, source) baselines
-                // for operator review before persisting into a
-                // calibration store.
-                "memory_calibrate_confidence" => handle_calibrate_confidence(conn, arguments),
-                // v0.7.0 L2-3 (issue #668) — read-side surface for the
-                // dependents of an invalidated reflection. Pure
-                // read-only — the walker itself fires from the
-                // memory_link Reflection→Reflection supersedes path.
-                "memory_dependents_of_invalidated" => {
-                    handle_dependents_of_invalidated(conn, arguments)
-                }
-                // v0.7.0 L1-5 — Agent Skills ingestion substrate (Pillar 1.5).
-                "memory_skill_register" => handle_skill_register(conn, arguments, active_keypair),
-                "memory_skill_list" => handle_skill_list(conn, arguments),
-                "memory_skill_get" => handle_skill_get(conn, arguments),
-                "memory_skill_resource" => handle_skill_resource(conn, arguments),
-                "memory_skill_export" => handle_skill_export(conn, arguments, active_keypair),
-                // v0.7.0 L2-6 (issue #671) — closing the loop: reflections
-                // become skills become reusable knowledge.
-                "memory_skill_promote_from_reflection" => {
-                    handle_skill_promote_from_reflection(conn, arguments, active_keypair)
-                }
-                // v0.7.0 L2-7 (issue #672) — reflection-skill composition.
-                "memory_skill_compositional_context" => {
-                    handle_skill_compositional_context(conn, arguments)
-                }
-                // v0.7.0 QW-3 follow-up — context-offload substrate
-                // primitive. `memory_offload` accepts verbatim content
-                // and returns a ref_id; `memory_deref` round-trips the
-                // body. agent_id is resolved through the same NHI
-                // precedence chain memory_store uses
-                // (explicit > metadata > mcp_client > host fallback)
-                // so the substrate row is correctly attributed.
-                "memory_offload" => {
-                    let explicit_agent_id = arguments
-                        .get("agent_id")
-                        .and_then(Value::as_str)
-                        .or_else(|| {
-                            arguments
-                                .get("metadata")
-                                .and_then(|m| m.get("agent_id"))
-                                .and_then(Value::as_str)
-                        });
-                    match crate::identity::resolve_agent_id(explicit_agent_id, mcp_client) {
-                        Ok(agent_id) => offload::handle_offload(conn, arguments, &agent_id),
-                        Err(e) => Err(e.to_string()),
-                    }
-                }
-                "memory_deref" => {
-                    // SEC-4 (Cluster D, issue #767) — resolve caller's
-                    // authenticated agent_id so deref's ownership gate
-                    // can refuse cross-agent leaks (NotFound, leak-
-                    // resistant). Mirror the `memory_offload` shape.
-                    let explicit_agent_id = arguments
-                        .get("agent_id")
-                        .and_then(Value::as_str)
-                        .or_else(|| {
-                            arguments
-                                .get("metadata")
-                                .and_then(|m| m.get("agent_id"))
-                                .and_then(Value::as_str)
-                        });
-                    match crate::identity::resolve_agent_id(explicit_agent_id, mcp_client) {
-                        Ok(agent_id) => offload::handle_deref(conn, arguments, &agent_id),
-                        Err(e) => Err(e.to_string()),
-                    }
-                }
+            // #867 — registry-driven dispatch. The legacy 72-arm match
+            // is gone; every tool now resolves through
+            // [`TOOL_DISPATCH_TABLE`] which keys on `tool_name` and
+            // returns a `DispatchFn` that un-bundles the
+            // `ToolDispatchCtx` back into the underlying handler's
+            // positional arguments. New tools register via
+            // `register_mcp_tool!` next to their module instead of
+            // editing this central dispatcher.
+            let ctx = ToolDispatchCtx {
+                conn,
+                db_path,
+                arguments,
+                embedder,
+                llm,
+                reranker,
+                tier_config,
+                vector_index,
+                resolved_ttl,
+                resolved_scoring,
+                archive_on_gc,
+                autonomous_hooks,
+                mcp_client,
+                profile,
+                mcp_config,
+                active_keypair,
+                harness,
+                federation_forward_url,
+                recall_scope,
+                atomise_handler,
+                ingest_multistep_handler,
+            };
+            let Some(dispatch) = lookup_dispatch(tool_name) else {
                 // Ultrareview #349: unknown tool is a JSON-RPC 2.0
                 // "method not found" condition — return -32601, not
                 // an ok_response with `isError: true`. Clients that
                 // switch on error code can then misroute / retry
                 // correctly. We surface the tool name in `data` so
                 // clients can log it without parsing the message.
-                unknown => {
-                    return err_response(id, -32601, format!("unknown tool: {unknown}"));
-                }
+                return err_response(id, -32601, format!("unknown tool: {tool_name}"));
             };
+            let result = dispatch(&ctx);
 
             // Outcome + elapsed reported under the `mcp_tool_call` span so
             // exporters can chart per-tool p95/p99 against PERFORMANCE.md
@@ -2092,30 +2448,17 @@ mod tests {
     }
 
     #[test]
-    fn tool_definitions_for_profile_full_registers_51() {
+    fn tool_definitions_for_profile_full_registers_72() {
         let defs = tool_definitions_for_profile(&crate::profile::Profile::full());
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            71,
-            "full profile = v0.6.3 surface (43) + v0.7.0 I4 memory_replay (1) + \
-             v0.7 H4 memory_verify (1) + v0.7 B1 memory_load_family (1) + \
-             v0.7 B2 memory_smart_load (1) + \
-             v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list (2) + \
-             v0.7 J7 memory_find_paths (1) + v0.7 K8 memory_quota_status (1) + \
-             v0.7.0 Task 4/8 memory_reflect (1) + \
-             v0.7.0 L2-2 memory_reflection_origin (1) + \
-             v0.7.0 L2-3 memory_dependents_of_invalidated (1) + \
-             v0.7.0 (issue #691) memory_check_agent_action + memory_rule_list (2) + \
-             v0.7.0 L1-5 5×memory_skill_* (5) + \
-             v0.7.0 L2-6 memory_skill_promote_from_reflection (1) + \
-             v0.7.0 L2-7 memory_skill_compositional_context (1) + \
-             v0.7.0 QW-1 memory_export_reflection (1) + \
-             v0.7.0 QW-3 follow-up memory_offload + memory_deref (2) + \
-             v0.7.0 WT-1-C memory_atomise (1) + \
-             v0.7.0 QW-2 memory_persona + memory_persona_generate (2) + \
-             v0.7.0 Form 3 memory_ingest_multistep (1) + \
-             v0.7.0 Form 5 memory_calibrate_confidence (1) = 71"
+            crate::profile::Profile::full().expected_tool_count(),
+            "full profile registration count must match \
+             `Profile::full().expected_tool_count()` = 72 at v0.7.0 \
+             (issues #224 + #311 pulled memory_share forward from v0.8 \
+             Phase 3 Memory Sharing & Sync RFC per operator directive \
+             `28860423-d12c-4959-bc8b-8fa9a94a33d9`)"
         );
     }
 
