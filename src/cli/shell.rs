@@ -39,10 +39,7 @@ pub fn handle_command(parts: &[&str], conn: &Connection, out: &mut CliOutput<'_>
             let _ = writeln!(out.stdout, "  search <query>      — keyword search");
             let _ = writeln!(out.stdout, "  list [namespace]    — list memories");
             let _ = writeln!(out.stdout, "  get <id>            — show memory details");
-            let _ = writeln!(
-                out.stdout,
-                "  update <id> <field>=<value> [field=value]…"
-            );
+            let _ = writeln!(out.stdout, "  update <id> <field>=<value> [field=value]…");
             let _ = writeln!(
                 out.stdout,
                 "                       — mutate one or more fields (issue #653: full-profile parity)"
@@ -227,9 +224,8 @@ pub fn handle_command(parts: &[&str], conn: &Connection, out: &mut CliOutput<'_>
                     "tier" => match models::Tier::from_str(v) {
                         Some(t) => tier = Some(t),
                         None => {
-                            parse_err = Some(format!(
-                                "invalid tier '{v}' (expected short/mid/long)"
-                            ));
+                            parse_err =
+                                Some(format!("invalid tier '{v}' (expected short/mid/long)"));
                             break;
                         }
                     },
@@ -326,11 +322,7 @@ pub fn handle_command(parts: &[&str], conn: &Connection, out: &mut CliOutput<'_>
                 None,
             ) {
                 Ok((true, _)) => {
-                    let _ = writeln!(
-                        out.stdout,
-                        "  updated: {}",
-                        color::cyan(&resolved_id)
-                    );
+                    let _ = writeln!(out.stdout, "  updated: {}", color::cyan(&resolved_id));
                 }
                 Ok((false, _)) => {
                     let _ = writeln!(out.stderr, "  not found");
@@ -1094,11 +1086,7 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
-        handle_command(
-            &["update", "bad\x07id", "namespace=foo"],
-            &conn,
-            &mut out,
-        );
+        handle_command(&["update", "bad\x07id", "namespace=foo"], &conn, &mut out);
         let stderr_str = String::from_utf8(stderr).unwrap();
         assert!(stderr_str.contains("invalid id"), "stderr: {stderr_str}");
     }
