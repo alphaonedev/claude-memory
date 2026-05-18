@@ -383,12 +383,18 @@ async fn bucket_b_subscriptions_persist() {
     let bob = format!("bucket-b-bob-{}", &uuid::Uuid::new_v4().to_string()[..8]);
     let target_ns = format!("bucket-b-target-{}", uuid::Uuid::new_v4());
 
+    // R3-S1.HMAC (2026-05-13 fix campaign): unsigned subscription
+    // dispatch was disabled — subscribe requires either per-sub `secret`
+    // in the body OR a server-wide `[security] hmac_secret`. Test
+    // attaches a per-sub secret so it doesn't depend on process-wide
+    // env state.
     let resp = client
         .post(format!("{base}/api/v1/subscriptions"))
         .header("x-agent-id", &bob)
         .json(&json!({
             "agent_id": bob,
             "namespace": target_ns,
+            "secret": "bucket-b-test-secret",
         }))
         .send()
         .await
@@ -1164,6 +1170,11 @@ async fn cont6_find_paths_returns_chain() {
 }
 
 /// S65: invalid `source_id` -> 400.
+///
+/// Validator note: `validate::is_clean_string` only rejects control
+/// characters (and permits spaces), so "bad id with space" actually
+/// passes validate_id. To trigger the reject path the test sends an
+/// explicit null-byte-bearing id, which `is_clean_string` does reject.
 #[tokio::test(flavor = "multi_thread")]
 async fn cont6_find_paths_rejects_invalid_id() {
     let Some(url) = postgres_url() else {
@@ -1175,8 +1186,8 @@ async fn cont6_find_paths_rejects_invalid_id() {
     let resp = client
         .post(format!("{base}/api/v1/kg/find_paths"))
         .json(&json!({
-            "source_id": "bad id with space",
-            "target_id": "another bad",
+            "source_id": "bad\x00id",
+            "target_id": "another\x00bad",
         }))
         .send()
         .await
