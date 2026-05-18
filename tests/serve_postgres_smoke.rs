@@ -174,7 +174,7 @@ async fn serve_postgres_smoke_round_trip() {
             "tags": ["smoke", "wave3"],
             "priority": 7,
             "confidence": 0.95,
-            "source": "smoke-test",
+            "source": "import",
             "metadata": {}
         }))
         .send()
@@ -269,7 +269,7 @@ async fn serve_postgres_smoke_round_trip() {
             "tags": [],
             "priority": 5,
             "confidence": 1.0,
-            "source": "smoke-test",
+            "source": "import",
             "metadata": {}
         }))
         .send()
