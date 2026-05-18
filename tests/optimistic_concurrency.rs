@@ -225,6 +225,169 @@ fn two_concurrent_updates_produce_exactly_one_winner() {
 }
 
 #[test]
+fn expected_version_against_missing_row_returns_not_found_not_conflict() {
+    // Acceptance pin: when the row vanished entirely (id never existed
+    // or was deleted), the gate must NOT manufacture a VersionConflict
+    // with `current=0`. The contract is `(found=false, _)` so callers
+    // can distinguish "race" (CONFLICT) from "404" (NOT_FOUND). The
+    // 404 path is what the HTTP layer maps to StatusCode::NOT_FOUND
+    // (see src/handlers/memories.rs line ~264 `Ok((false, _))` arm).
+    let conn = open_test_db();
+    let (found, changed) = db::update_with_expected_version(
+        &conn,
+        "11111111-2222-3333-4444-555555555555",
+        None,
+        Some("body"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(1),
+    )
+    .expect("missing row must be Ok((false, _)), not a CONFLICT error");
+    assert!(!found, "missing row reports found=false");
+    assert!(!changed);
+}
+
+#[test]
+fn version_conflict_display_message_carries_all_three_identifiers() {
+    // The 409 envelope in src/handlers/memories.rs surfaces the three
+    // fields (id, expected_version, current_version). The Display impl
+    // is also used in audit-log records and tracing — pin the format
+    // so a refactor that drops one identifier is loud.
+    let vc = VersionConflict {
+        id: "abc-123".to_string(),
+        expected: 4,
+        current: 7,
+    };
+    let s = format!("{vc}");
+    assert!(s.contains("abc-123"), "id present: {s}");
+    assert!(s.contains("expected_version=4"), "expected present: {s}");
+    assert!(s.contains("version=7"), "current present: {s}");
+    assert!(
+        s.starts_with("CONFLICT"),
+        "must begin with CONFLICT verdict so log scrapers can grep: {s}"
+    );
+}
+
+#[test]
+fn version_field_is_clone_and_debug_for_audit_pipeline() {
+    // The audit log clones the conflict envelope into a serialised
+    // record. Pin the Clone + Debug impls.
+    let vc = VersionConflict {
+        id: "row-1".to_string(),
+        expected: 1,
+        current: 2,
+    };
+    let cloned = vc.clone();
+    assert_eq!(cloned.id, vc.id);
+    assert_eq!(cloned.expected, vc.expected);
+    assert_eq!(cloned.current, vc.current);
+    let dbg = format!("{vc:?}");
+    assert!(dbg.contains("VersionConflict"));
+    assert!(dbg.contains("expected"));
+}
+
+#[test]
+fn version_conflict_is_downcastable_from_anyhow_chain() {
+    // Both src/handlers/memories.rs and src/mcp/tools/update.rs rely
+    // on `e.downcast_ref::<VersionConflict>()` to surface the typed
+    // 409 envelope. Pin that the conversion `.into()` keeps the
+    // typed identity reachable through the anyhow chain.
+    let conn = open_test_db();
+    let mem = make_memory("downcast-pin");
+    let id = db::insert(&conn, &mem).expect("insert");
+    db::update_with_expected_version(
+        &conn,
+        &id,
+        None,
+        Some("first"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(1),
+    )
+    .expect("first wins");
+    let err = db::update_with_expected_version(
+        &conn,
+        &id,
+        None,
+        Some("second"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(1),
+    )
+    .expect_err("stale expected_version");
+    let vc = err
+        .downcast_ref::<VersionConflict>()
+        .expect("VersionConflict must be downcast-reachable through anyhow chain");
+    assert_eq!(vc.expected, 1);
+    assert_eq!(vc.current, 2);
+}
+
+#[test]
+fn legacy_update_helper_still_bumps_version_so_followup_gate_observes_it() {
+    // The `db::update` alias preserves the v0.6.x signature but MUST
+    // still bump the row's version on every mutation. This pin
+    // matters because a CALLER that mixes legacy `update` calls with
+    // gated `update_with_expected_version` calls must see the version
+    // advance after every write — otherwise the gate would always
+    // pass with `expected_version=1`.
+    let conn = open_test_db();
+    let mem = make_memory("legacy-bumps");
+    let id = db::insert(&conn, &mem).expect("insert");
+    db::update(
+        &conn,
+        &id,
+        None,
+        Some("first"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("legacy update");
+    let after_legacy = db::get(&conn, &id).expect("get").expect("present");
+    assert_eq!(after_legacy.version, 2, "legacy update still bumps version");
+    // Now the gate at expected_version=1 (stale read) must fail:
+    let err = db::update_with_expected_version(
+        &conn,
+        &id,
+        None,
+        Some("racing"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(1),
+    )
+    .expect_err("gate must reject stale expected_version");
+    let vc = err
+        .downcast_ref::<VersionConflict>()
+        .expect("VersionConflict envelope");
+    assert_eq!(vc.expected, 1);
+    assert_eq!(vc.current, 2);
+}
+
+#[test]
 fn no_expected_version_preserves_last_write_wins_legacy_contract() {
     // Pre-Gap-1 callers that never pass expected_version still get
     // the historical in-place mutation semantics — the gate is

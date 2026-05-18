@@ -175,6 +175,114 @@ fn v46_backfill_lifts_first_citation_uri() {
 }
 
 #[test]
+fn insert_with_source_uri_persists_to_column_not_metadata() {
+    // AC pin: `storage::insert` writes the `Memory.source_uri` field
+    // into the first-class column, not metadata.source_uri. This is
+    // the "new write path" half of #885; the v46 backfill covers the
+    // legacy half.
+    let conn = open_test_db();
+    let mem = make_memory_with_uri("first-class-write", Some("doc:fresh-write"));
+    let id = db::insert(&conn, &mem).expect("insert");
+    // Verify directly via SQL — the column carries the value.
+    let col: Option<String> = conn
+        .query_row(
+            "SELECT source_uri FROM memories WHERE id = ?1",
+            params![&id],
+            |r| r.get(0),
+        )
+        .expect("read column");
+    assert_eq!(col.as_deref(), Some("doc:fresh-write"));
+    // And via the typed accessor.
+    let stored = db::get(&conn, &id).expect("get").expect("present");
+    assert_eq!(stored.source_uri.as_deref(), Some("doc:fresh-write"));
+}
+
+#[test]
+fn insert_without_source_uri_leaves_column_null() {
+    // AC pin: `insert` does NOT manufacture a source_uri value when
+    // the field is None. The substrate-side "null column" is the
+    // signal the v46 backfill needs to know it should attempt to
+    // promote from metadata or citations.
+    let conn = open_test_db();
+    let mem = make_memory_with_uri("no-source", None);
+    let id = db::insert(&conn, &mem).expect("insert");
+    let col: Option<String> = conn
+        .query_row(
+            "SELECT source_uri FROM memories WHERE id = ?1",
+            params![&id],
+            |r| r.get(0),
+        )
+        .expect("read column");
+    assert!(col.is_none(), "no source_uri ⇒ NULL column");
+}
+
+#[test]
+fn list_by_source_uri_returns_zero_rows_for_unknown_uri() {
+    // AC pin: passing a URI no row carries must return empty — NOT
+    // silently fall back to "list all memories" (which would be a
+    // catastrophic data-exfiltration bug).
+    let conn = open_test_db();
+    for i in 0..5 {
+        let mem = make_memory_with_uri(&format!("present-{i}"), Some("doc:present"));
+        db::insert(&conn, &mem).expect("insert");
+    }
+    let hits = db::list_by_source_uri(&conn, "doc:does-not-exist", None, None).expect("list");
+    assert!(hits.is_empty(), "unknown URI ⇒ zero rows, not fallback-all");
+}
+
+#[test]
+fn list_by_source_uri_respects_limit_param() {
+    // AC pin: the `limit` arg is honored; without it the default cap
+    // (200) applies. Both branches matter — the MCP search tool clamps
+    // and the HTTP query handler passes `limit` through.
+    let conn = open_test_db();
+    for i in 0..10 {
+        let mem = make_memory_with_uri(&format!("lim-{i}"), Some("doc:lim"));
+        db::insert(&conn, &mem).expect("insert");
+    }
+    let three = db::list_by_source_uri(&conn, "doc:lim", None, Some(3)).expect("list");
+    assert_eq!(three.len(), 3, "limit=3 caps the response");
+    let unlimited = db::list_by_source_uri(&conn, "doc:lim", None, None).expect("list");
+    assert_eq!(unlimited.len(), 10, "no limit ⇒ default cap is high enough");
+}
+
+#[test]
+fn v46_backfill_is_idempotent_under_replay() {
+    // AC pin: the v46 backfill SQL is idempotent — re-applying it on
+    // a row that already carries a source_uri column value must NOT
+    // overwrite it with `metadata.source_uri`. The WHERE clause
+    // `source_uri IS NULL` is the load-bearing predicate.
+    let conn = open_test_db();
+    let mem = make_memory_with_uri("idem", Some("doc:already-set"));
+    let id = db::insert(&conn, &mem).expect("insert");
+    // Stamp a DIFFERENT URI under metadata.source_uri to prove the
+    // backfill does not clobber the existing column value.
+    conn.execute(
+        "UPDATE memories SET metadata = ?1 WHERE id = ?2",
+        params![
+            r#"{"agent_id":"ai:test","source_uri":"doc:wrong-value-should-not-be-promoted"}"#,
+            &id
+        ],
+    )
+    .expect("stamp metadata");
+    conn.execute_batch(
+        "UPDATE memories
+            SET source_uri = json_extract(metadata, '$.source_uri')
+          WHERE source_uri IS NULL
+            AND json_valid(metadata) = 1
+            AND json_extract(metadata, '$.source_uri') IS NOT NULL
+            AND length(json_extract(metadata, '$.source_uri')) > 0;",
+    )
+    .expect("v46 backfill replay");
+    let stored = db::get(&conn, &id).expect("get").expect("present");
+    assert_eq!(
+        stored.source_uri.as_deref(),
+        Some("doc:already-set"),
+        "idempotent backfill must NOT clobber populated column"
+    );
+}
+
+#[test]
 fn migration_ladder_reaches_at_least_v46_on_fresh_db() {
     let conn = open_test_db();
     let v: i64 = conn

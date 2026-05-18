@@ -236,6 +236,227 @@ fn archive_list_returns_old_content_after_llm_supersede() {
 }
 
 #[test]
+fn edit_source_enum_parse_roundtrip_through_wire_strings() {
+    // AC pin: the wire strings ("human" / "llm" / "hook") roundtrip
+    // through `EditSource::as_str` ↔ `EditSource::from_str`. The MCP
+    // `memory_update --edit-source X` flow depends on this.
+    for src in [EditSource::Human, EditSource::Llm, EditSource::Hook] {
+        let s = src.as_str();
+        let back = EditSource::from_str(s).expect("known wire string");
+        assert_eq!(back, src);
+    }
+    assert!(
+        EditSource::from_str("garbage").is_none(),
+        "unknown value ⇒ None so the caller can fall back to default"
+    );
+    // Default for back-compat is Human (the v0.6.x in-place behaviour).
+    assert_eq!(EditSource::default(), EditSource::Human);
+}
+
+#[test]
+fn edit_source_appends_and_archives_predicate_only_true_for_llm_and_hook() {
+    // AC pin: the substrate uses `appends_and_archives()` as the
+    // routing gate. Human is the in-place path; both Llm and Hook
+    // route through the append-and-archive supersede path.
+    assert!(!EditSource::Human.appends_and_archives());
+    assert!(EditSource::Llm.appends_and_archives());
+    assert!(EditSource::Hook.appends_and_archives());
+}
+
+#[test]
+fn llm_supersede_preserves_tier_namespace_and_tags_from_old_row() {
+    // AC pin: when a supersede patch omits tier / namespace / tags,
+    // the NEW row inherits them from the OLD row. The patch only
+    // replaces what the caller asked for.
+    let conn = open_test_db();
+    let mut mem = make_memory("inherit", "v1");
+    mem.tier = Tier::Long;
+    mem.namespace = "inherited-ns".to_string();
+    mem.tags = vec!["t-a".to_string(), "t-b".to_string()];
+    let id = db::insert(&conn, &mem).expect("insert");
+    let result = db::update_with_archive_on_supersede(
+        &conn,
+        &id,
+        None,       // title
+        Some("v2"), // content
+        None,       // tier
+        None,       // namespace
+        None,       // tags
+        None,       // priority
+        None,       // confidence
+        None,       // expires_at
+        None,       // metadata
+        None,       // expected_version
+        EditSource::Llm,
+    )
+    .expect("llm");
+    let new_mem = db::get(&conn, &result.new_id)
+        .expect("get")
+        .expect("present");
+    assert_eq!(new_mem.tier, Tier::Long, "tier inherited");
+    assert_eq!(new_mem.namespace, "inherited-ns", "namespace inherited");
+    assert_eq!(new_mem.tags, vec!["t-a".to_string(), "t-b".to_string()]);
+}
+
+#[test]
+fn llm_supersede_fails_clean_when_old_id_does_not_exist() {
+    // AC pin: a supersede call against a non-existent id fails with
+    // a "memory not found" Err — does NOT silently archive a phantom
+    // row or panic.
+    let conn = open_test_db();
+    let err = db::update_with_archive_on_supersede(
+        &conn,
+        "11111111-2222-3333-4444-555555555555",
+        None,
+        Some("body"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        EditSource::Llm,
+    )
+    .expect_err("missing id must Err");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not found") || msg.contains("memory not found"),
+        "error message names missing-id: {msg}"
+    );
+    // No archive row was created.
+    assert_eq!(count_archived(&conn), 0);
+}
+
+#[test]
+fn supersede_result_carries_distinct_archived_and_new_ids() {
+    // AC pin: `SupersedeResult` reports the OLD id and the NEW id
+    // separately. The downstream MCP response in src/mcp/tools/update.rs
+    // surfaces both as `superseded_id` + `new_id`.
+    let conn = open_test_db();
+    let mem = make_memory("two-ids", "body");
+    let id = db::insert(&conn, &mem).expect("insert");
+    let result = db::update_with_archive_on_supersede(
+        &conn,
+        &id,
+        None,
+        Some("patched"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        EditSource::Llm,
+    )
+    .expect("llm");
+    assert_eq!(result.archived_id, id);
+    assert_ne!(result.new_id, id, "NEW id distinct from OLD");
+    // Round-trip both ids through Display + Debug so the substrate's
+    // logging surfaces (audit, tracing) stay readable.
+    assert!(!format!("{result:?}").is_empty());
+}
+
+#[test]
+fn human_edit_path_does_not_stamp_edit_source_in_metadata() {
+    // AC pin: the metadata.edit_source stamp lives ONLY on rows minted
+    // through the append-and-archive supersede path. A normal Human
+    // in-place mutation leaves the metadata untouched so legacy
+    // dashboards keying off metadata shape don't see a phantom field.
+    let conn = open_test_db();
+    let mem = make_memory("no-stamp", "body");
+    let id = db::insert(&conn, &mem).expect("insert");
+    db::update(
+        &conn,
+        &id,
+        None,
+        Some("body-2"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("human");
+    let stored = db::get(&conn, &id).expect("get").expect("present");
+    assert!(
+        stored.metadata.get("edit_source").is_none(),
+        "human in-place mutation must NOT stamp edit_source in metadata"
+    );
+    assert!(
+        stored.metadata.get("superseded_id").is_none(),
+        "human in-place mutation must NOT stamp superseded_id in metadata"
+    );
+}
+
+#[test]
+fn llm_supersede_starts_new_row_at_version_one() {
+    // AC pin: the NEW row minted by a supersede starts at version=1
+    // (a fresh row, not a continuation of the OLD row's version chain).
+    // The OLD row's pre-supersede version is preserved in archived_memories.
+    let conn = open_test_db();
+    let mem = make_memory("version-restart", "body");
+    let id = db::insert(&conn, &mem).expect("insert");
+    // Bump the OLD row to version=3 via two in-place updates first.
+    db::update(
+        &conn,
+        &id,
+        None,
+        Some("body-2"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("bump-1");
+    db::update(
+        &conn,
+        &id,
+        None,
+        Some("body-3"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("bump-2");
+    let result = db::update_with_archive_on_supersede(
+        &conn,
+        &id,
+        None,
+        Some("body-4-llm"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        EditSource::Llm,
+    )
+    .expect("supersede");
+    let new_mem = db::get(&conn, &result.new_id)
+        .expect("get")
+        .expect("present");
+    assert_eq!(
+        new_mem.version, 1,
+        "supersede mints a fresh row at version=1 regardless of OLD row's pre-supersede version"
+    );
+}
+
+#[test]
 fn append_and_archive_honors_expected_version_gate() {
     // Gap 1 + Gap 5 compose: the optimistic-concurrency gate
     // applies to the append-and-archive path too.

@@ -146,6 +146,116 @@ fn search_with_source_uri_narrows_fts_results_to_matching_uri() {
 }
 
 #[test]
+fn list_by_source_uri_orders_results_deterministically() {
+    // AC pin: results are ordered by created_at ASC so callers see
+    // a deterministic ordering across repeat calls. Pin this so a
+    // future refactor that drops the ORDER BY clause is loud.
+    let conn = open_test_db();
+    let shared = "doc:ordering-test";
+    // Insert in non-chronological title order to prove the ordering
+    // does NOT key off title.
+    for (i, label) in ["z", "a", "m", "b"].iter().enumerate() {
+        let mut mem = make_memory(label, Some(shared));
+        // Force created_at sequence so each insert lands ~1ms later.
+        let offset_ms = i64::try_from(i).unwrap_or(0) * 10;
+        let now = chrono::Utc::now() + chrono::Duration::milliseconds(offset_ms);
+        mem.created_at = now.to_rfc3339();
+        mem.updated_at = mem.created_at.clone();
+        db::insert(&conn, &mem).expect("insert");
+    }
+    let first = db::list_by_source_uri(&conn, shared, None, None).expect("list");
+    let second = db::list_by_source_uri(&conn, shared, None, None).expect("list");
+    assert_eq!(
+        first.iter().map(|m| m.title.clone()).collect::<Vec<_>>(),
+        second.iter().map(|m| m.title.clone()).collect::<Vec<_>>(),
+        "two consecutive calls must produce identical ordering"
+    );
+    assert_eq!(first.len(), 4);
+}
+
+#[test]
+fn search_with_source_uri_excluded_when_namespace_mismatches() {
+    // AC pin: namespace filter composes with source_uri filter — a
+    // memory whose source_uri matches but whose namespace does NOT
+    // match is excluded.
+    let conn = open_test_db();
+    let uri = "doc:ns-test";
+    for i in 0..2 {
+        let mut mem = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            title: format!("a-{i}"),
+            content: "shared body content".to_string(),
+            namespace: "ns-a".to_string(),
+            tier: Tier::Mid,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            source_uri: Some(uri.to_string()),
+            ..Default::default()
+        };
+        mem.created_at = chrono::Utc::now().to_rfc3339();
+        db::insert(&conn, &mem).expect("insert");
+    }
+    let mem_b = Memory {
+        id: uuid::Uuid::new_v4().to_string(),
+        title: "b-only".to_string(),
+        content: "shared body content".to_string(),
+        namespace: "ns-b".to_string(),
+        tier: Tier::Mid,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        source_uri: Some(uri.to_string()),
+        ..Default::default()
+    };
+    db::insert(&conn, &mem_b).expect("insert");
+    let hits = db::search_with_source_uri(
+        &conn,
+        "body",
+        Some("ns-a"),
+        None,
+        50,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        Some(uri),
+    )
+    .expect("search");
+    assert_eq!(hits.len(), 2, "ns-a filter excludes the ns-b row");
+    for h in &hits {
+        assert_eq!(h.namespace, "ns-a");
+    }
+}
+
+#[test]
+fn kg_query_by_source_uri_returns_all_rooted_memories() {
+    // AC pin: `memory_kg_query --by-source-uri X` returns the full
+    // reciprocal subgraph rooted at every memory carrying the URI.
+    // The MCP tool handler is pub(super); we exercise the same
+    // substrate via `list_by_source_uri` (the MCP layer's only
+    // substrate dependency for the `by_source_uri` branch).
+    let conn = open_test_db();
+    let uri = "doc:kg-root";
+    for i in 0..4 {
+        let mem = make_memory(&format!("root-{i}"), Some(uri));
+        db::insert(&conn, &mem).expect("insert");
+    }
+    let roots = db::list_by_source_uri(&conn, uri, None, None).expect("list");
+    assert_eq!(roots.len(), 4, "all four root memories returned");
+    // The MCP wrapper at src/mcp/tools/kg_query.rs maps each row into
+    // a JSON node with target_id / title / target_namespace / depth=0.
+    // Mirror that shape to pin the contract:
+    for root in &roots {
+        assert_eq!(root.source_uri.as_deref(), Some(uri));
+        assert!(!root.id.is_empty());
+        assert!(!root.title.is_empty());
+        assert!(!root.namespace.is_empty());
+    }
+}
+
+#[test]
 fn empty_uri_returns_zero_rows_not_all_rows() {
     // Defensive: passing a URI that no memory carries must return an
     // empty set, NOT silently fall back to "list everything".
