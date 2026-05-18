@@ -5181,6 +5181,128 @@ pub fn set_embedding(conn: &Connection, id: &str, embedding: &[f32]) -> Result<(
     Ok(())
 }
 
+/// v0.7.0 Wave-2 A5 (issue #853) — batched embedding writer.
+///
+/// Writes a slice of `(id, embedding)` pairs inside a single SQLite
+/// transaction. Equivalent to calling [`set_embedding`] in a loop, but
+/// collapses N `UPDATE` round-trips (N implicit commits in autocommit
+/// mode) into one transaction commit, which is the dominant cost on
+/// SQLite WAL when N grows past a handful of rows.
+///
+/// Dim-invariant policy matches [`set_embedding`]:
+/// * Empty embeddings are written as `embedding_dim = NULL` (legacy
+///   degenerate-case parity).
+/// * Per-namespace established dim is checked once per namespace
+///   (cached in-flight) and any pair whose embedding length conflicts
+///   returns an `EmbeddingDimMismatch` error — the whole transaction
+///   rolls back so callers never see a partial commit. The mismatch
+///   carries the FIRST offending pair's namespace/established/attempted
+///   triple (consistent with the single-row path).
+///
+/// Returns the number of rows updated (rows whose `id` was not found in
+/// the `memories` table are silently skipped — same as [`set_embedding`],
+/// where `UPDATE … WHERE id = ?` returns `Ok(0)` and the function still
+/// returns `Ok(())`).
+///
+/// **Boot backfill use:** [`crate::mcp::run_mcp_server`] calls this in
+/// fixed-size chunks (see `DEFAULT_EMBED_BACKFILL_BATCH_SIZE`) so the
+/// embedder produces vectors in parallel-friendly bursts and the
+/// SQLite commit cost amortises across the batch.
+///
+/// # Errors
+///
+/// * Returns [`EmbeddingDimMismatch`] (boxed via anyhow) if any pair's
+///   embedding dim disagrees with the namespace-established dim. The
+///   transaction is rolled back; no rows are mutated.
+/// * Returns the underlying SQLite error on transaction/prepare/execute
+///   failure.
+pub fn set_embeddings_batch(
+    conn: &mut Connection,
+    entries: &[(String, Vec<f32>)],
+) -> Result<usize> {
+    if entries.is_empty() {
+        return Ok(0);
+    }
+
+    // Lookup table: id -> namespace. Needed up-front because we want
+    // to amortise the dim-check across a batch by resolving namespaces
+    // in a single query rather than one query per row.
+    let mut ns_by_id: HashMap<String, Option<String>> = HashMap::with_capacity(entries.len());
+    {
+        let mut stmt = conn.prepare("SELECT namespace FROM memories WHERE id = ?1")?;
+        for (id, _) in entries {
+            if ns_by_id.contains_key(id) {
+                continue;
+            }
+            let ns: Option<String> = stmt
+                .query_row(params![id], |r| r.get::<_, Option<String>>(0))
+                .ok()
+                .flatten();
+            ns_by_id.insert(id.clone(), ns);
+        }
+    }
+
+    // Per-namespace established dim, cached so we only hit the
+    // namespace_embedding_dim path once per distinct namespace in the
+    // batch (the cache is intra-batch — the namespace's established
+    // dim is immutable within this call's transaction window).
+    let mut ns_dim_cache: HashMap<String, Option<usize>> = HashMap::new();
+
+    let tx = conn.transaction()?;
+    {
+        let mut update =
+            tx.prepare("UPDATE memories SET embedding = ?1, embedding_dim = ?2 WHERE id = ?3")?;
+        let mut update_empty =
+            tx.prepare("UPDATE memories SET embedding = ?1, embedding_dim = NULL WHERE id = ?2")?;
+
+        let mut rows_updated = 0usize;
+        for (id, embedding) in entries {
+            let attempted = embedding.len();
+            if attempted == 0 {
+                let bytes = crate::embeddings::encode_embedding_blob(embedding);
+                rows_updated += update_empty.execute(params![bytes, id])?;
+                continue;
+            }
+            if let Some(Some(ns)) = ns_by_id.get(id) {
+                let established = if let Some(cached) = ns_dim_cache.get(ns) {
+                    *cached
+                } else {
+                    let resolved = namespace_embedding_dim(&tx, ns)?;
+                    ns_dim_cache.insert(ns.clone(), resolved);
+                    resolved
+                };
+                if let Some(established) = established
+                    && established != attempted
+                {
+                    return Err(EmbeddingDimMismatch {
+                        namespace: ns.clone(),
+                        established,
+                        attempted,
+                    }
+                    .into());
+                }
+                // First successful write in a namespace sets the
+                // established dim for the rest of this batch — keep
+                // the cache in sync so subsequent rows in the same
+                // namespace get a fast path AND so any inconsistent
+                // pair later in the batch trips the dim check rather
+                // than committing.
+                if established.is_none() {
+                    ns_dim_cache.insert(ns.clone(), Some(attempted));
+                }
+            }
+            let bytes = crate::embeddings::encode_embedding_blob(embedding);
+            let dim_i64 = i64::try_from(attempted).unwrap_or(i64::MAX);
+            rows_updated += update.execute(params![bytes, dim_i64, id])?;
+        }
+
+        drop(update);
+        drop(update_empty);
+        tx.commit()?;
+        Ok(rows_updated)
+    }
+}
+
 /// Load an embedding vector for a memory. Returns None if not set.
 ///
 /// v0.6.3.1 P2 — tolerant of legacy unheaded payloads (raw LE f32, length

@@ -1417,6 +1417,134 @@ fn load_active_keypair_for_mcp_in(
     }
 }
 
+/// v0.7.0 Wave-2 A5 (issue #853) — default batch size for the boot
+/// embedding-backfill loop. Tuned to balance two effects:
+///
+/// * Embedder forward-pass amortisation — bigger batches let the
+///   embedder's native batch path (when it lands) push more tokens
+///   through one model call.
+/// * SQLite transaction grouping — one commit per chunk, so the
+///   per-row UPDATE round-trips collapse.
+///
+/// 64 is the empirical sweet spot for the pre-vectorised loop body:
+/// large enough to amortise commit cost across the typical
+/// 500-1000 unembedded-row boot scenario, small enough that an
+/// embedder fault aborts at most one chunk of work. Override with
+/// `AI_MEMORY_EMBED_BACKFILL_BATCH` for ops experimentation.
+pub const DEFAULT_EMBED_BACKFILL_BATCH_SIZE: usize = 64;
+
+/// v0.7.0 Wave-2 A5 (issue #853) — chunked boot embedding backfill.
+///
+/// Replaces the original per-row `emb.embed()` + `db::set_embedding()`
+/// loop that issued one autocommit `UPDATE` per memory. The new path:
+///
+/// 1. Scans all unembedded rows in a single `SELECT` (unchanged
+///    behaviour — [`db::get_unembedded_ids`]).
+/// 2. Slices the result into chunks of `batch_size` (default
+///    [`DEFAULT_EMBED_BACKFILL_BATCH_SIZE`], overridable via the
+///    `AI_MEMORY_EMBED_BACKFILL_BATCH` env var).
+/// 3. Per chunk: calls [`Embed::embed_batch`] (the default impl
+///    loops internally; a vectorised backend implementation is the
+///    follow-up sub-issue), then a single
+///    [`db::set_embeddings_batch`] call that wraps every UPDATE in
+///    one transaction.
+///
+/// **Idempotence:** if `get_unembedded_ids` returns an empty vec
+/// (the "fully embedded" steady state), the function returns
+/// `Ok(0)` without preparing any statement — re-running the
+/// backfill on a fully-embedded DB is a true no-op.
+///
+/// **Single-chunk failure isolation:** an embedder error for one
+/// chunk is logged and that chunk is skipped (the subsequent
+/// chunks still run). The aggregate `ok` counter is the number of
+/// rows successfully written across all chunks.
+///
+/// # Errors
+///
+/// Only propagates errors from [`db::get_unembedded_ids`] (the initial
+/// scan). Per-chunk embedder + writer faults are logged and counted
+/// (NOT propagated), matching the original loop's semantics so a
+/// transient embedder fault on one chunk doesn't block MCP readiness.
+pub fn run_embedding_backfill(
+    conn: &mut rusqlite::Connection,
+    emb: &dyn Embed,
+) -> anyhow::Result<usize> {
+    let unembedded = db::get_unembedded_ids(conn)?;
+    if unembedded.is_empty() {
+        // Idempotence: zero rows scanned ⇒ zero work, no log line so
+        // re-runs on a steady-state DB stay silent.
+        return Ok(0);
+    }
+
+    let batch_size = std::env::var("AI_MEMORY_EMBED_BACKFILL_BATCH")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_EMBED_BACKFILL_BATCH_SIZE);
+
+    eprintln!(
+        "ai-memory: backfilling {} memories (batch_size={batch_size})...",
+        unembedded.len()
+    );
+
+    let mut ok = 0usize;
+    for chunk in unembedded.chunks(batch_size) {
+        let texts: Vec<String> = chunk.iter().map(|(_, t, c)| format!("{t} {c}")).collect();
+        let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+
+        let embeddings = match emb.embed_batch(&text_refs) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "ai-memory: embed_batch failed for chunk of {} rows: {e} (skipping chunk)",
+                    chunk.len()
+                );
+                continue;
+            }
+        };
+
+        // Defensive: a well-behaved embedder must return one vector
+        // per input. If a future custom impl violates the contract,
+        // fall back to the per-row path for safety rather than
+        // misaligning ids with vectors.
+        if embeddings.len() != chunk.len() {
+            eprintln!(
+                "ai-memory: embed_batch returned {} vectors for {} inputs — falling back to per-row path for this chunk",
+                embeddings.len(),
+                chunk.len()
+            );
+            for (id, title, content) in chunk {
+                let text = format!("{title} {content}");
+                if let Ok(v) = emb.embed(&text)
+                    && db::set_embedding(conn, id, &v).is_ok()
+                {
+                    ok += 1;
+                }
+            }
+            continue;
+        }
+
+        let entries: Vec<(String, Vec<f32>)> = chunk
+            .iter()
+            .zip(embeddings.into_iter())
+            .map(|((id, _, _), v)| (id.clone(), v))
+            .collect();
+
+        match db::set_embeddings_batch(conn, &entries) {
+            Ok(n) => ok += n,
+            Err(e) => {
+                eprintln!(
+                    "ai-memory: set_embeddings_batch failed for chunk of {} rows: {e} (skipping chunk)",
+                    chunk.len()
+                );
+            }
+        }
+    }
+
+    eprintln!("ai-memory: backfilled {ok}/{}", unembedded.len());
+    Ok(ok)
+}
+
 /// Run the MCP server over stdio. Blocks until stdin closes.
 /// Initializes components based on the requested feature tier.
 ///
@@ -1448,7 +1576,7 @@ pub fn run_mcp_server(
         .with_writer(std::io::stderr)
         .try_init();
 
-    let conn = db::open(db_path)?;
+    let mut conn = db::open(db_path)?;
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
@@ -1556,31 +1684,15 @@ pub fn run_mcp_server(
         match Embedder::for_model(*emb_model, embed_client) {
             Ok(emb) => {
                 eprintln!("ai-memory: embedder loaded ({})", emb.model_description());
-                // Backfill embeddings for memories that don't have them
-                match db::get_unembedded_ids(&conn) {
-                    Ok(unembedded) if !unembedded.is_empty() => {
-                        eprintln!("ai-memory: backfilling {} memories...", unembedded.len());
-                        let mut ok = 0usize;
-                        for (id, title, content) in &unembedded {
-                            let text = format!("{title} {content}");
-                            match emb.embed(&text) {
-                                Ok(embedding) => {
-                                    if db::set_embedding(&conn, id, &embedding).is_ok() {
-                                        ok += 1;
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!(
-                                        "ai-memory: embed failed for {}: {}",
-                                        &id[..8.min(id.len())],
-                                        e
-                                    );
-                                }
-                            }
-                        }
-                        eprintln!("ai-memory: backfilled {}/{}", ok, unembedded.len());
-                    }
-                    _ => {}
+                // Backfill embeddings for memories that don't have them.
+                // v0.7.0 Wave-2 A5 (issue #853): scan all unembedded rows
+                // in a single query, then chunk into fixed-size batches
+                // and call `embed_batch` + `set_embeddings_batch` per
+                // chunk. This collapses N per-row UPDATE round-trips into
+                // ceil(N/B) transaction commits and creates the surface
+                // for a vectorised embedder backend to land later.
+                if let Err(e) = run_embedding_backfill(&mut conn, &emb) {
+                    eprintln!("ai-memory: backfill failed: {e}");
                 }
                 Some(emb)
             }
