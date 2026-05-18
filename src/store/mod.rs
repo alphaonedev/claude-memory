@@ -1509,6 +1509,7 @@ mod tests {
             valid_until: None,
             observed_by: None,
             signature: None,
+            attest_level: None,
         };
         let level = s
             .link_signed(&ctx, &link, None)
@@ -1548,6 +1549,7 @@ mod tests {
             valid_until: None,
             observed_by: None,
             signature: None,
+            attest_level: None,
         };
         // Default forwards to link(); MinimalStore::link returns Ok.
         s.apply_remote_link(&ctx, &link, "unsigned")

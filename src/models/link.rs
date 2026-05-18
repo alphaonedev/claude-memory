@@ -218,6 +218,17 @@ pub struct MemoryLink {
     /// still valid. Part of the signed bundle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub valid_until: Option<String>,
+    /// v0.7 H4 — attestation level for the row (`"unsigned"`,
+    /// `"self_signed"`, `"peer_attested"`). Populated by readers that
+    /// surface the `memory_links.attest_level` TEXT column (e.g.
+    /// `db::get_links` for the `memory_get_links` MCP tool). Stays
+    /// `None` on constructors that don't go through a DB read — those
+    /// paths still feed `create_link_inbound` which derives the column
+    /// value from the `attest_level: &str` parameter. The
+    /// `skip_serializing_if` keeps the wire shape byte-identical to
+    /// pre-v0.7 federation peers that don't carry the column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attest_level: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

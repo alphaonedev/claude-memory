@@ -152,6 +152,7 @@ fn build_link(
         observed_by: observed_by.map(str::to_string),
         valid_from: valid_from.map(str::to_string),
         valid_until: None,
+        attest_level: None,
     }
 }
 

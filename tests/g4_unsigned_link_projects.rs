@@ -227,6 +227,7 @@ async fn g4_unsigned_link_trait_projects_into_age() {
         valid_until: None,
         observed_by: None,
         signature: None,
+        attest_level: None,
     };
     // **Unsigned** trait method — exercise the path the user's
     // hypothesis flagged ("the HTTP path may call link() rather than

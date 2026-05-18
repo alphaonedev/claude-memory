@@ -243,6 +243,7 @@ async fn seed_signed_link_with_nanosecond_valid_from(
         valid_until: None,
         observed_by: None,
         signature: None,
+        attest_level: None,
     };
     let ctx = ai_memory::store::CallerContext::for_agent(kp.agent_id.clone());
     let attest = store

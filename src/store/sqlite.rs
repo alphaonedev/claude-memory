@@ -278,6 +278,11 @@ impl MemoryStore for SqliteStore {
                     valid_until: row.get::<_, Option<String>>(5)?,
                     observed_by: row.get::<_, Option<String>>(6)?,
                     signature: row.get::<_, Option<Vec<u8>>>(7)?,
+                    // v0.7.0 #860 — SAL migrate path doesn't surface
+                    // attest_level (the federation wire shape stays
+                    // unchanged). `None` + skip_serializing_if keeps
+                    // pre-v0.7 receivers unaware of the new field.
+                    attest_level: None,
                 })
             })
             .map_err(box_err)?;
@@ -1190,6 +1195,7 @@ mod tests {
             valid_until: None,
             observed_by: None,
             signature: None,
+            attest_level: None,
         };
         store.link(&ctx, &link).await.expect("link insert");
         let listed = store.list_links(None).await.expect("list_links");
@@ -1241,6 +1247,7 @@ mod tests {
             valid_until: None,
             observed_by: None,
             signature: None,
+            attest_level: None,
         };
         let attest = store
             .link_signed(&ctx, &link, None)
@@ -1325,6 +1332,7 @@ mod tests {
             valid_until: None,
             observed_by: None,
             signature: None,
+            attest_level: None,
         };
         // attest_level threads through; "unsigned" is the safe default.
         store
@@ -1613,6 +1621,7 @@ mod tests {
             valid_until: None,
             observed_by: None,
             signature: None,
+            attest_level: None,
         };
         store.link(&ctx, &link).await.expect("insert link");
         let report = store
@@ -1648,6 +1657,7 @@ mod tests {
             valid_until: None,
             observed_by: None,
             signature: None,
+            attest_level: None,
         };
         store.link(&ctx, &link).await.expect("link");
         let report = store

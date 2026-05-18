@@ -144,6 +144,7 @@ fn memorylink_serde_roundtrip_preserves_reflects_on() {
         observed_by: None,
         valid_from: None,
         valid_until: None,
+        attest_level: None,
     };
     let wire = serde_json::to_string(&link).expect("serialize MemoryLink");
     let back: MemoryLink = serde_json::from_str(&wire).expect("deserialize MemoryLink");
@@ -282,6 +283,7 @@ async fn postgres_link_listlinks_roundtrips_reflects_on() {
         observed_by: None,
         valid_from: None,
         valid_until: None,
+        attest_level: None,
     };
     store
         .link(&ctx, &link)

@@ -834,6 +834,7 @@ async fn federation_apply_remote_link_round_trips_reflects_on_edge() {
         observed_by: Some("peer-ai".to_string()),
         valid_from: None,
         valid_until: None,
+        attest_level: None,
     };
     store
         .apply_remote_link(&ctx, &link, "unsigned")

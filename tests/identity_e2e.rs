@@ -545,6 +545,7 @@ fn peer_attested_inbound_link_verifies() {
         observed_by: Some("bob".to_string()),
         valid_from: Some(valid_from.clone()),
         valid_until: None,
+        attest_level: None,
     };
     db::create_link_inbound(&f.conn, &inbound, "peer_attested").expect("inbound insert");
     assert_eq!(
@@ -613,6 +614,7 @@ fn inbound_link_with_no_enrolled_pubkey_lands_unsigned() {
         observed_by: Some("carol".to_string()),
         valid_from: Some(valid_from),
         valid_until: None,
+        attest_level: None,
     };
     db::create_link_inbound(&f.conn, &inbound, "unsigned").expect("inbound insert (no-key path)");
     assert_eq!(

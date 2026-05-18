@@ -5967,6 +5967,9 @@ impl MemoryStore for PostgresStore {
                     observed_by,
                     valid_from: valid_from.map(|t| t.to_rfc3339()),
                     valid_until: valid_until.map(|t| t.to_rfc3339()),
+                    // v0.7.0 #860 — Postgres SAL migrate reader; the
+                    // federation wire stays unaware of attest_level.
+                    attest_level: None,
                 })
             })
             .collect()

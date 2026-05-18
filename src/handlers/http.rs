@@ -5520,6 +5520,7 @@ pub async fn create_link(
             valid_until: None,
             observed_by: None,
             signature: None,
+            attest_level: None,
         };
         let ctx = crate::store::CallerContext::for_agent("ai:http");
         return match app
@@ -5630,6 +5631,7 @@ pub async fn create_link(
                     observed_by: None,
                     valid_from: None,
                     valid_until: None,
+                    attest_level: None,
                 };
                 match crate::federation::broadcast_link_quorum(fed, &link).await {
                     Ok(tracker) => {

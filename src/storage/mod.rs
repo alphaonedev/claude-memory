@@ -1264,15 +1264,23 @@ pub fn forget(
             let fts_query = sanitize_fts_query(pat, true);
             let tier_str = tier.map(|t| t.as_str().to_string());
             // v0.6.3.1 P2 (G5) — preserve embedding + tier + expiry on forget-archive.
+            // v0.7.0 issue #861 — also project `metadata` into the
+            // archive row. The pre-fix INSERT omitted both the column
+            // and the SELECT expression, so the column defaulted to
+            // `'{}'` and `memory_archive_list` returned an empty object
+            // for every forget-archived row (silently stripping
+            // `agent_id`, `imported_from_*`, and every other operator-
+            // visible attribution key). Mirrors the gc + explicit-
+            // archive paths that already preserve metadata.
             conn.execute(
                 "INSERT OR REPLACE INTO archived_memories
                  (id, tier, namespace, title, content, tags, priority, confidence,
                   source, access_count, created_at, updated_at, last_accessed_at,
-                  expires_at, archived_at, archive_reason,
+                  expires_at, archived_at, archive_reason, metadata,
                   embedding, embedding_dim, original_tier, original_expires_at)
                  SELECT id, tier, namespace, title, content, tags, priority, confidence,
                         source, access_count, created_at, updated_at, last_accessed_at,
-                        expires_at, ?4, 'forget',
+                        expires_at, ?4, 'forget', metadata,
                         embedding, embedding_dim, tier, expires_at
                  FROM memories WHERE rowid IN (
                     SELECT m.rowid FROM memories_fts fts
@@ -1285,15 +1293,18 @@ pub fn forget(
             )?;
         } else {
             let tier_str = tier.map(|t| t.as_str().to_string());
+            // v0.7.0 issue #861 — same metadata-projection fix as the
+            // patterned branch above. Forget without a pattern still
+            // archives whole namespaces/tiers, so the same bug applied.
             conn.execute(
                 "INSERT OR REPLACE INTO archived_memories
                  (id, tier, namespace, title, content, tags, priority, confidence,
                   source, access_count, created_at, updated_at, last_accessed_at,
-                  expires_at, archived_at, archive_reason,
+                  expires_at, archived_at, archive_reason, metadata,
                   embedding, embedding_dim, original_tier, original_expires_at)
                  SELECT id, tier, namespace, title, content, tags, priority, confidence,
                         source, access_count, created_at, updated_at, last_accessed_at,
-                        expires_at, ?3, 'forget',
+                        expires_at, ?3, 'forget', metadata,
                         embedding, embedding_dim, tier, expires_at
                  FROM memories WHERE (?1 IS NULL OR namespace = ?1) AND (?2 IS NULL OR tier = ?2)",
                 params![namespace, tier_str, now],
@@ -2700,8 +2711,19 @@ pub fn create_link_inbound(conn: &Connection, link: &MemoryLink, attest_level: &
 }
 
 pub fn get_links(conn: &Connection, id: &str) -> Result<Vec<MemoryLink>> {
+    // v0.7.0 issue #860 — the `memory_get_links` MCP tool's docstring
+    // promises attestation level + temporal-validity columns
+    // (`valid_from`, `valid_until`, `observed_by`, `attest_level`) per
+    // link. The pre-fix SELECT only pulled 4 columns and hard-coded the
+    // optional fields to `None`, so the promised columns never reached
+    // the caller. Expand the SELECT to the full row projection that
+    // the docs commit to. `signature` is intentionally NOT surfaced —
+    // it is the verification surface owned by the `memory_verify` tool
+    // (`LinkVerifyRecord` below), not the read-only graph view.
     let mut stmt = conn.prepare(
-        "SELECT source_id, target_id, relation, created_at FROM memory_links
+        "SELECT source_id, target_id, relation, created_at, \
+                valid_from, valid_until, observed_by, attest_level \
+         FROM memory_links \
          WHERE source_id = ?1 OR target_id = ?1",
     )?;
     let rows = stmt.query_map(params![id], |row| {
@@ -2718,16 +2740,17 @@ pub fn get_links(conn: &Connection, id: &str) -> Result<Vec<MemoryLink>> {
             relation: crate::models::MemoryLinkRelation::from_str(&relation_str)
                 .unwrap_or_default(),
             created_at: row.get(3)?,
-            // get_links is a local read-only view; the H3 wire-extra
-            // fields stay None here. Federation export uses
-            // `export_links` (which mirrors the same shape) and inbound
-            // verification consumes the wire shape directly via
-            // `SyncPushBody.links`. Plumbing signature/observed_by into
-            // this read path is an H4 concern (memory_verify MCP tool).
+            // v0.7.0 #860 — temporal-validity + attestation columns
+            // promised by the `memory_get_links` docstring. `signature`
+            // stays `None`: that bytes-on-the-wire surface is the
+            // verifier's concern (`LinkVerifyRecord`), and exposing it
+            // here would force the JSON response to carry a base64 blob
+            // every existing caller would have to ignore.
             signature: None,
-            observed_by: None,
-            valid_from: None,
-            valid_until: None,
+            valid_from: row.get::<_, Option<String>>(4)?,
+            valid_until: row.get::<_, Option<String>>(5)?,
+            observed_by: row.get::<_, Option<String>>(6)?,
+            attest_level: row.get::<_, Option<String>>(7)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -4708,18 +4731,41 @@ pub fn list_archived(
         params_vec.iter().map(std::convert::AsRef::as_ref).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_refs.as_slice(), |row| {
+        // v0.7.0 issue #861 — `metadata` is stored as a JSON TEXT blob
+        // in the column. Falling back to `{}` only covers a NULL/empty
+        // read; the surrounding column projection then re-encodes it
+        // structured so callers see a real JSON object instead of an
+        // escaped string. Coupled with the forget-path archive INSERTs
+        // around lines 1268 / 1289 above (now SELECTing `metadata` so
+        // the column actually carries the source row's metadata), this
+        // restores the round-trip `agent_id` / `imported_from_*` /
+        // `consolidated_from_agents` keys callers rely on for
+        // attribution + restore.
         let metadata_str = row
             .get::<_, String>(16)
             .unwrap_or_else(|_| "{}".to_string());
         let metadata: serde_json::Value =
             serde_json::from_str(&metadata_str).unwrap_or_else(|_| serde_json::json!({}));
+        // v0.7.0 issue #861 — `tags` is stored as a JSON-encoded array
+        // TEXT (`'["a","b"]'`) by every write path. Returning the raw
+        // String forced callers to either double-parse or accept a
+        // string where they expected a JSON array. Parse here so the
+        // response matches the live-row shape (`memory_get`) and the
+        // contract tests in `tests/archive_serialization.rs`. NULL /
+        // malformed columns fall through to an empty array — the
+        // archive table's CHECK constraint makes the malformed case a
+        // never-in-practice path, but the fall-through keeps the read
+        // contract noisy-input-clean rather than panic-on-corruption.
+        let tags_str = row.get::<_, String>(5).unwrap_or_else(|_| "[]".to_string());
+        let tags: serde_json::Value =
+            serde_json::from_str(&tags_str).unwrap_or_else(|_| serde_json::json!([]));
         Ok(serde_json::json!({
             "id": row.get::<_, String>(0)?,
             "tier": row.get::<_, String>(1)?,
             "namespace": row.get::<_, String>(2)?,
             "title": row.get::<_, String>(3)?,
             "content": row.get::<_, String>(4)?,
-            "tags": row.get::<_, String>(5)?,
+            "tags": tags,
             "priority": row.get::<_, i32>(6)?,
             "confidence": row.get::<_, f64>(7)?,
             "source": row.get::<_, String>(8)?,
@@ -4890,6 +4936,11 @@ pub fn export_links(conn: &Connection) -> Result<Vec<MemoryLink>> {
             observed_by: row.get::<_, Option<String>>(5)?,
             valid_from: row.get::<_, Option<String>>(6)?,
             valid_until: row.get::<_, Option<String>>(7)?,
+            // v0.7.0 #860 — `export_links` is the federation outbound
+            // path; the wire shape stays without `attest_level` so
+            // pre-v0.7 receivers do not see an unknown field. Leaving
+            // this `None` keeps `skip_serializing_if` from emitting it.
+            attest_level: None,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -10458,6 +10509,7 @@ mod tests {
             valid_until: None,
             observed_by: Some("peer:remote".to_string()),
             signature: Some(vec![0xAB_u8; 64]),
+            attest_level: None,
         };
 
         // Peer-attested inbound bypasses the K9 deny.
@@ -10474,6 +10526,7 @@ mod tests {
             valid_until: None,
             observed_by: Some("peer:remote".to_string()),
             signature: None,
+            attest_level: None,
         };
         let err = create_link_inbound(&conn, &link2, "unsigned")
             .expect_err("unsigned inbound must NOT bypass governance");
@@ -10514,6 +10567,7 @@ mod tests {
             valid_until: None,
             observed_by: Some("peer:remote".to_string()),
             signature: None,
+            attest_level: None,
         };
         let err = create_link_inbound(&conn, &cycle_link, "peer_attested")
             .expect_err("cycle check must run even on peer_attested inbound");
@@ -12769,6 +12823,7 @@ mod tests {
             observed_by: Some("peer-bob".to_string()),
             valid_from: Some(now.clone()),
             valid_until: None,
+            attest_level: None,
         };
         let before = count_signed_events_of_type(&conn, "memory_link.created");
         create_link_inbound(&conn, &link, "unsigned").unwrap();

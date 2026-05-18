@@ -405,6 +405,7 @@ fn make_link(source_id: &str, target_id: &str, relation: &str) -> MemoryLink {
         observed_by: None,
         valid_from: None,
         valid_until: None,
+        attest_level: None,
     }
 }
 

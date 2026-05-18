@@ -469,6 +469,7 @@ mod tests {
             observed_by: None,
             valid_from: None,
             valid_until: None,
+            attest_level: None,
         }
     }
 
