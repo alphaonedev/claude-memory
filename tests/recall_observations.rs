@@ -349,6 +349,122 @@ fn gap3_ttl_env_var_override_honored() {
 }
 
 #[test]
+fn gap3_mcp_tool_since_filter_executes_branch() {
+    // Cover the `since` param path in handle_recall_observations.
+    use ai_memory::mcp::handle_recall_observations;
+    let conn = fresh_db();
+    seed_memory(&conn, "m1");
+    observations::record_recall(
+        &conn,
+        "r-since",
+        &[Candidate {
+            memory_id: "m1",
+            retriever: "hybrid",
+            rank: 1,
+            score: 0.9,
+        }],
+    )
+    .unwrap();
+    let cutoff = (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+    let resp = handle_recall_observations(
+        &conn,
+        &serde_json::json!({"recall_id": "r-since", "since": cutoff}),
+    )
+    .expect("mcp ok");
+    assert_eq!(resp["count"].as_u64(), Some(1));
+}
+
+#[test]
+fn gap3_mcp_tool_until_filter_executes_branch() {
+    use ai_memory::mcp::handle_recall_observations;
+    let conn = fresh_db();
+    seed_memory(&conn, "m1");
+    observations::record_recall(
+        &conn,
+        "r-until",
+        &[Candidate {
+            memory_id: "m1",
+            retriever: "hybrid",
+            rank: 1,
+            score: 0.9,
+        }],
+    )
+    .unwrap();
+    let resp = handle_recall_observations(
+        &conn,
+        &serde_json::json!({"recall_id": "r-until", "until": "2099-01-01T00:00:00Z"}),
+    )
+    .expect("mcp ok");
+    assert_eq!(resp["count"].as_u64(), Some(1));
+    let resp2 = handle_recall_observations(
+        &conn,
+        &serde_json::json!({"recall_id": "r-until", "until": "1900-01-01T00:00:00Z"}),
+    )
+    .expect("mcp ok");
+    assert_eq!(resp2["count"].as_u64(), Some(0));
+}
+
+#[test]
+fn gap3_mcp_tool_limit_param_caps_response() {
+    use ai_memory::mcp::handle_recall_observations;
+    let conn = fresh_db();
+    for id in &["m1", "m2", "m3", "m4", "m5"] {
+        seed_memory(&conn, id);
+    }
+    observations::record_recall(
+        &conn,
+        "r-lim",
+        &[
+            Candidate {
+                memory_id: "m1",
+                retriever: "h",
+                rank: 1,
+                score: 0.9,
+            },
+            Candidate {
+                memory_id: "m2",
+                retriever: "h",
+                rank: 2,
+                score: 0.8,
+            },
+            Candidate {
+                memory_id: "m3",
+                retriever: "h",
+                rank: 3,
+                score: 0.7,
+            },
+            Candidate {
+                memory_id: "m4",
+                retriever: "h",
+                rank: 4,
+                score: 0.6,
+            },
+            Candidate {
+                memory_id: "m5",
+                retriever: "h",
+                rank: 5,
+                score: 0.5,
+            },
+        ],
+    )
+    .unwrap();
+    let resp = handle_recall_observations(
+        &conn,
+        &serde_json::json!({"recall_id": "r-lim", "limit": 2}),
+    )
+    .expect("mcp ok");
+    assert_eq!(resp["count"].as_u64(), Some(2));
+    // limit > MAX cap clamps to MAX_LIMIT (1000); with only 5 rows we
+    // get all 5.
+    let resp_clamp = handle_recall_observations(
+        &conn,
+        &serde_json::json!({"recall_id": "r-lim", "limit": 99_999}),
+    )
+    .expect("mcp ok");
+    assert_eq!(resp_clamp["count"].as_u64(), Some(5));
+}
+
+#[test]
 fn gap3_mcp_tool_handles_consumed_false_filter() {
     let conn = fresh_db();
     for id in &["m1", "m2", "consumer"] {
