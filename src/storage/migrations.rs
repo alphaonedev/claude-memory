@@ -437,6 +437,20 @@ CREATE INDEX IF NOT EXISTS idx_signed_events_dlq_agent
 //       reflection MENTIONS).
 const CURRENT_SCHEMA_VERSION: i64 = 43;
 
+/// v0.7.0 refactor PR-1 (#793) — schema-pins SSOT.
+///
+/// Test-facing helper exposing the SAME constant the migration ladder
+/// is anchored to (`CURRENT_SCHEMA_VERSION`). Integration tests that
+/// previously embedded the literal `43` should call this helper instead,
+/// so the next schema bump touches ONE constant and the test fixtures
+/// pick the new value up automatically. The function deliberately
+/// returns `i64` to match the constant type and the value bound by
+/// the migration query.
+#[must_use]
+pub const fn current_schema_version_for_tests() -> i64 {
+    CURRENT_SCHEMA_VERSION
+}
+
 const MIGRATION_V15_SQLITE: &str =
     include_str!("../../migrations/sqlite/0010_v063_hierarchy_kg.sql");
 // v0.6.3.1 (P4, audit G1): backfill `metadata.governance.inherit = true`
@@ -1965,13 +1979,43 @@ mod tests {
 
     #[test]
     fn current_schema_version_matches_module_docstring() {
+        // v0.7.0 refactor PR-1 (#793) — schema-pins SSOT.
+        //
         // The module docstring is updated in lockstep with the
         // CURRENT_SCHEMA_VERSION constant. Bumping one without the
-        // other is a documented foot-gun. We pin the relationship
-        // so a future bump is loud.
+        // other is a documented foot-gun. Parse the docstring directly
+        // for the `current value: N` marker so the literal lives in
+        // exactly ONE place (the constant declaration above) and the
+        // assertion is anchored to the rendered docstring.
+        let source = include_str!("migrations.rs");
+        let marker = "current value: ";
+        let pos = source
+            .find(marker)
+            .expect("module docstring must contain `current value: N` marker");
+        let tail = &source[pos + marker.len()..];
+        let end = tail
+            .find(')')
+            .expect("docstring marker must close with `)`");
+        let parsed: i64 = tail[..end]
+            .trim()
+            .parse()
+            .expect("docstring `current value:` must be a parseable integer");
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 43,
-            "module docstring advertises 43; bump the docstring when this number changes"
+            parsed, CURRENT_SCHEMA_VERSION,
+            "module docstring advertises {parsed}; bump the docstring when \
+             CURRENT_SCHEMA_VERSION changes (current = {})",
+            CURRENT_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn current_schema_version_for_tests_matches_constant() {
+        // v0.7.0 refactor PR-1 (#793) — pin the public test-helper to
+        // the module-private constant. Any future drift between the
+        // helper and the constant is caught at build time.
+        assert_eq!(
+            super::current_schema_version_for_tests(),
+            CURRENT_SCHEMA_VERSION
         );
     }
 

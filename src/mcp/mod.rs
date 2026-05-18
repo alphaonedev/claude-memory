@@ -4,6 +4,14 @@
 //! MCP (Model Context Protocol) server for ai-memory.
 //! Exposes memory operations as tools for any MCP-compatible AI client over stdio JSON-RPC.
 
+// #873 — `handle_request` carries the 72-arm dispatch match (each arm
+// is a closure-shaped call into a per-tool handler with that handler's
+// specific argument bundle); tracked for split into a registry table
+// as #867. Allowance is module-scope to cover the dispatch helper as
+// well as the legacy `serve_mcp` boot scaffold which is still over-
+// budget while the deferred-registration substrate threads through.
+#![allow(clippy::too_many_lines)]
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
@@ -1169,8 +1177,8 @@ fn handle_request(
                 "memory_notify" => handle_notify(conn, arguments, resolved_ttl, mcp_client),
                 "memory_inbox" => handle_inbox(conn, arguments, mcp_client),
                 "memory_subscribe" => handle_subscribe(conn, arguments, mcp_client),
-                "memory_unsubscribe" => handle_unsubscribe(conn, arguments),
-                "memory_list_subscriptions" => handle_list_subscriptions(conn),
+                "memory_unsubscribe" => handle_unsubscribe(conn, arguments, mcp_client),
+                "memory_list_subscriptions" => handle_list_subscriptions(conn, mcp_client),
                 "memory_subscription_replay" => handle_subscription_replay(conn, arguments),
                 "memory_subscription_dlq_list" => handle_subscription_dlq_list(conn, arguments),
                 "memory_quota_status" => handle_quota_status(conn, arguments),

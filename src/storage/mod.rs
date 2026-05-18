@@ -1,6 +1,13 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+// #873 — `recall_hybrid_with_telemetry` exceeds the per-function 250-
+// line budget; tracked for split as #871 (stage-helpers: param-prep /
+// fts-branch / semantic-branch / blend+rerank / touch+telemetry). The
+// allowance is module-scope so future too-big helpers in the same
+// file are caught by the lint at PR-time instead of silently growing.
+#![allow(clippy::too_many_lines)]
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
@@ -332,6 +339,12 @@ pub(crate) mod reflect;
 // is re-published at `crate::storage::*` (and therefore `crate::db::*`
 // via the lib.rs shim) so callsites keep resolving without churn.
 pub use connection::open;
+// v0.7.0 refactor PR-1 (#793) — schema-pins SSOT. Re-export the
+// test-facing helper so callers can use either
+// `ai_memory::storage::current_schema_version_for_tests()` or the
+// existing `ai_memory::db::current_schema_version_for_tests()` shim
+// (via `pub use storage as db;` in `src/lib.rs`).
+pub use migrations::current_schema_version_for_tests;
 pub use reflect::{
     ReflectError, ReflectHookDecision, ReflectHooks, ReflectInput, ReflectOutcome,
     canonical_cbor_reflection_depth_exceeded, reflect, reflect_with_hooks,

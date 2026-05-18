@@ -633,14 +633,30 @@ pub async fn unsubscribe(
     // resolve through the same memory-row index. Without this branch
     // the handler reaches into the scratch sqlite db which contains no
     // subscription rows on a postgres-backed daemon.
+    //
+    // #874 (security-medium, 2026-05-18) — DO NOT pass `q.agent_id` to
+    // `resolve_caller_agent_id` as a trusted-input source. The query
+    // parameter is caller-supplied and bypassable; authentication must
+    // come from the request header (X-Agent-Id) only. The query
+    // `agent_id` then degrades to a filter that must match the
+    // authenticated caller (mismatch = 403).
     #[cfg(feature = "sal")]
     if matches!(app.storage_backend, StorageBackend::Postgres) {
-        let caller = match resolve_caller_agent_id(None, &headers, q.agent_id.as_deref()) {
+        let caller = match resolve_caller_agent_id(None, &headers, None) {
             Ok(id) => id,
             Err(e) => {
                 return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
             }
         };
+        if let Some(claimed) = q.agent_id.as_deref()
+            && claimed != caller
+        {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "agent_id query parameter does not match authenticated caller"})),
+            )
+                .into_response();
+        }
         let ctx = crate::store::CallerContext::for_agent(&caller);
 
         // Lookup the subscription memory-id via the persistent index.
@@ -703,27 +719,48 @@ pub async fn unsubscribe(
         };
     }
 
-    // Prefer explicit id. If absent, dispatch by (agent_id, namespace) for
-    // S33 — find the first matching row from list() and delete it.
-    if let Some(id) = q.id.clone() {
-        let mut params = json!({"id": id});
-        // Keep the key name stable across both handlers' interior shapes.
-        let _ = params.as_object_mut();
-        let lock = app.db.lock().await;
-        let result = crate::mcp::handle_unsubscribe(&lock.0, &params);
-        drop(lock);
-        return match result {
-            Ok(v) => (StatusCode::OK, Json(v)).into_response(),
-            Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
-        };
-    }
-
-    let caller = match resolve_caller_agent_id(None, &headers, q.agent_id.as_deref()) {
+    // #870 / #874 (security-high/medium, 2026-05-18) — authenticate
+    // the caller via header (or body) BEFORE touching the table; never
+    // trust `q.agent_id` as identity. Then scope every DELETE to the
+    // resolved caller so tenant A cannot remove tenant B's hooks.
+    let caller = match resolve_caller_agent_id(None, &headers, None) {
         Ok(id) => id,
         Err(e) => {
             return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
         }
     };
+    if let Some(claimed) = q.agent_id.as_deref()
+        && claimed != caller
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "agent_id query parameter does not match authenticated caller"})),
+        )
+            .into_response();
+    }
+
+    // Prefer explicit id. If absent, dispatch by (agent_id, namespace) for
+    // S33 — find the first matching row from list() (already owner-scoped)
+    // and delete it.
+    if let Some(id) = q.id.clone() {
+        let lock = app.db.lock().await;
+        let outcome = crate::subscriptions::delete(&lock.0, &id, Some(&caller));
+        drop(lock);
+        return match outcome {
+            Ok(removed) => {
+                (StatusCode::OK, Json(json!({"id": id, "removed": removed}))).into_response()
+            }
+            Err(e) => {
+                tracing::error!("unsubscribe: {e}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "internal server error"})),
+                )
+                    .into_response()
+            }
+        };
+    }
+
     let Some(ns) = q.namespace else {
         return (
             StatusCode::BAD_REQUEST,
@@ -733,14 +770,14 @@ pub async fn unsubscribe(
     };
 
     let lock = app.db.lock().await;
-    let subs = crate::subscriptions::list(&lock.0).unwrap_or_default();
-    let target = subs.into_iter().find(|s| {
-        s.namespace_filter.as_deref() == Some(ns.as_str())
-            && (s.agent_filter.as_deref() == Some(caller.as_str())
-                || s.created_by.as_deref() == Some(caller.as_str()))
-    });
+    // Owner-scoped list — the find() below is now redundant on the
+    // authorization side but still narrows by namespace_filter.
+    let subs = crate::subscriptions::list(&lock.0, Some(&caller)).unwrap_or_default();
+    let target = subs
+        .into_iter()
+        .find(|s| s.namespace_filter.as_deref() == Some(ns.as_str()));
     let outcome = match target {
-        Some(s) => crate::subscriptions::delete(&lock.0, &s.id).map(|r| (s.id, r)),
+        Some(s) => crate::subscriptions::delete(&lock.0, &s.id, Some(&caller)).map(|r| (s.id, r)),
         None => Ok((String::new(), false)),
     };
     drop(lock);
@@ -767,33 +804,45 @@ pub struct ListSubscriptionsQuery {
 
 pub async fn list_subscriptions(
     State(app): State<AppState>,
+    headers: HeaderMap,
     Query(q): Query<ListSubscriptionsQuery>,
 ) -> impl IntoResponse {
+    // #872 / #874 (security-high/medium, 2026-05-18) — authenticate
+    // the caller via X-Agent-Id header (NOT the `?agent_id=` query
+    // string, which is trivially spoofable and was the bypass surface
+    // in #874). The query parameter is degraded to a refinement that
+    // must match the authenticated caller, else 403.
+    let caller = match resolve_caller_agent_id(None, &headers, None) {
+        Ok(id) => id,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
+        }
+    };
+    if let Some(claimed) = q.agent_id.as_deref()
+        && claimed != caller
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "agent_id query parameter does not match authenticated caller"})),
+        )
+            .into_response();
+    }
+
     // v0.7.0 Wave-3 Continuation 4 (Bucket B / S33) — postgres-backed
     // daemons read subscriptions back from the `_subscriptions/
     // <agent_id>` namespace via the SAL `list` projection. The
     // dispatch loop itself is still sqlite-bound; the wire envelope
     // here lets the cert oracle observe that the subscription
     // round-trips through the persistent store.
+    //
+    // #872 — always scope to the authenticated caller's namespace; the
+    // pre-fix code walked every namespace under `_subscriptions/` when
+    // no `agent_id` query param was supplied, leaking every tenant's
+    // hooks.
     #[cfg(feature = "sal-postgres")]
     if matches!(app.storage_backend, StorageBackend::Postgres) {
-        let ctx = crate::store::CallerContext::for_agent(q.agent_id.as_deref().unwrap_or("daemon"));
-        // When `agent_id` is supplied, scope to `_subscriptions/<aid>`;
-        // otherwise scan every `_subscriptions/...` namespace via
-        // `taxonomy_namespaces` + per-namespace listing.
-        let namespaces: Vec<String> = if let Some(aid) = q.agent_id.as_deref() {
-            vec![format!("_subscriptions/{aid}")]
-        } else {
-            match crate::store::postgres::taxonomy_namespaces_via_store(
-                &app.store,
-                Some("_subscriptions"),
-            )
-            .await
-            {
-                Ok(pairs) => pairs.into_iter().map(|(ns, _)| ns).collect(),
-                Err(e) => return store_err_to_response(e),
-            }
-        };
+        let ctx = crate::store::CallerContext::for_agent(&caller);
+        let namespaces: Vec<String> = vec![format!("_subscriptions/{caller}")];
         let mut rows: Vec<serde_json::Value> = Vec::new();
         for ns in namespaces {
             let filter = crate::store::Filter {
@@ -843,7 +892,8 @@ pub async fn list_subscriptions(
     }
     let state = app.db.clone();
     let lock = state.lock().await;
-    let subs = match crate::subscriptions::list(&lock.0) {
+    // #872 — DB-side ownership scope: only the caller's rows.
+    let subs = match crate::subscriptions::list(&lock.0, Some(&caller)) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("list_subscriptions: {e}");
@@ -855,16 +905,7 @@ pub async fn list_subscriptions(
         }
     };
     drop(lock);
-    // Filter by agent_id when the caller passed one (S33's per-agent view).
-    let filtered: Vec<_> = match q.agent_id.as_deref() {
-        Some(aid) => subs
-            .into_iter()
-            .filter(|s| {
-                s.agent_filter.as_deref() == Some(aid) || s.created_by.as_deref() == Some(aid)
-            })
-            .collect(),
-        None => subs,
-    };
+    let filtered = subs;
     // Expose the subscribed namespace as a top-level field per row so S33 can
     // read `namespace` directly without probing `namespace_filter`.
     let rows: Vec<serde_json::Value> = filtered

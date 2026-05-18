@@ -94,14 +94,29 @@ pub(super) fn handle_subscribe(
 pub(crate) fn handle_unsubscribe(
     conn: &rusqlite::Connection,
     params: &Value,
+    mcp_client: Option<&str>,
 ) -> Result<Value, String> {
     let id = params["id"].as_str().ok_or("id is required")?;
-    let removed = crate::subscriptions::delete(conn, id).map_err(|e| e.to_string())?;
+    // Cross-tenant authorization (#870, security-high, 2026-05-18):
+    // scope the DELETE to the caller's resolved agent_id. Without this
+    // any tenant could enumerate ids (via lucky guess or by exfiltrating
+    // another tenant's list output) and remove the other tenant's
+    // webhook fleet. The resolution chain matches `handle_subscribe`.
+    let caller = crate::identity::resolve_agent_id(None, mcp_client).map_err(|e| e.to_string())?;
+    let removed =
+        crate::subscriptions::delete(conn, id, Some(&caller)).map_err(|e| e.to_string())?;
     Ok(json!({"id": id, "removed": removed}))
 }
 
-pub(super) fn handle_list_subscriptions(conn: &rusqlite::Connection) -> Result<Value, String> {
-    let subs = crate::subscriptions::list(conn).map_err(|e| e.to_string())?;
+pub(super) fn handle_list_subscriptions(
+    conn: &rusqlite::Connection,
+    mcp_client: Option<&str>,
+) -> Result<Value, String> {
+    // Cross-tenant authorization (#872, security-high, 2026-05-18):
+    // only return subscriptions owned by the caller. Pre-fix this
+    // returned every tenant's rows.
+    let caller = crate::identity::resolve_agent_id(None, mcp_client).map_err(|e| e.to_string())?;
+    let subs = crate::subscriptions::list(conn, Some(&caller)).map_err(|e| e.to_string())?;
     Ok(json!({"count": subs.len(), "subscriptions": subs}))
 }
 
@@ -245,6 +260,7 @@ mod tests {
         let resp = handle_unsubscribe(
             &conn,
             &json!({"id": "00000000-0000-0000-0000-000000000000"}),
+            None,
         )
         .expect("ok");
         assert_eq!(resp["removed"], false);
@@ -254,7 +270,7 @@ mod tests {
     #[test]
     fn unsubscribe_missing_id_errors() {
         let conn = fresh_conn();
-        let err = handle_unsubscribe(&conn, &json!({})).unwrap_err();
+        let err = handle_unsubscribe(&conn, &json!({}), None).unwrap_err();
         assert!(err.contains("id"), "got: {err}");
     }
 
@@ -262,7 +278,7 @@ mod tests {
     #[test]
     fn list_subscriptions_empty() {
         let conn = fresh_conn();
-        let resp = handle_list_subscriptions(&conn).expect("ok");
+        let resp = handle_list_subscriptions(&conn, None).expect("ok");
         assert_eq!(resp["count"].as_u64(), Some(0));
     }
 

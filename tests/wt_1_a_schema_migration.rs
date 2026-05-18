@@ -454,20 +454,17 @@ async fn test_capabilities_db_schema_version_reports_36() {
         .and_then(Value::as_i64)
         .expect("WT-1-A: db_schema_version must be a JSON integer");
 
+    // v0.7.0 refactor PR-1 (#793) — schema-pins SSOT. Pin against the
+    // canonical constant (re-exported as
+    // `ai_memory::db::current_schema_version_for_tests()`) so the next
+    // schema bump touches ONE constant instead of N test fixtures.
+    let expected = ai_memory::db::current_schema_version_for_tests();
     assert_eq!(
-        v, 43,
-        "WT-1-A+QW-2+Form 4+Form 5+Cluster-C+Cluster-G+PERF-8+#813: \
-         capabilities.db_schema_version must be 43 after the \
-         atomisation-foundation bump (35→36), persona-as-artifact \
-         bump (36→37), Form 4 source-uri provenance bump (37→38), \
-         Form 5 confidence calibration bump (38→39), Cluster-C \
-         signed-events DLQ bump (39→40), Cluster-G shadow-retention \
-         denormalised source column bump (40→41), polish PERF-8 \
-         auto_persona mentioned_entity_id bump (41→42), and Persona \
-         Signing Pipeline atomicity triggers (#813) bump (42→43). \
-         Drift here means the migrate ladder skipped one of those \
-         steps or the SAL `schema_version()` lookup is reading the \
-         wrong source."
+        v, expected,
+        "WT-1-A capabilities.db_schema_version must equal the canonical \
+         CURRENT_SCHEMA_VERSION ({expected}); drift here means the \
+         migrate ladder skipped a step or the SAL `schema_version()` \
+         lookup is reading the wrong source."
     );
 
     shutdown.notify_one();

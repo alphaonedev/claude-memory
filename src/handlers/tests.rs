@@ -13952,3 +13952,82 @@ fn h5_replay_cache_dedups_identical_tuple() {
         "repeat verify with same nonce must trigger replay"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #869 (2026-05-18) — `to_value_or_500` regression tests. Pins the
+// behaviour of the helper that replaced the pre-fix
+// `serde_json::to_value(&payload).unwrap_or_default()` pattern across
+// the create_memory call sites.
+// ---------------------------------------------------------------------------
+
+/// Happy path: serialisable struct → `Ok(serde_json::Value)` carrying
+/// the expected JSON object. Pins that the helper is a thin wrapper
+/// for the success case (no extra wrapping / mutation).
+#[test]
+fn to_value_or_500_serialises_typed_struct() {
+    let mem = Memory {
+        id: "m1".into(),
+        tier: Tier::Long,
+        namespace: "ns".into(),
+        title: "t".into(),
+        content: "c".into(),
+        tags: Vec::new(),
+        priority: 5,
+        confidence: 1.0,
+        source: "test".into(),
+        access_count: 0,
+        created_at: Utc::now().to_rfc3339(),
+        updated_at: Utc::now().to_rfc3339(),
+        last_accessed_at: None,
+        expires_at: None,
+        metadata: serde_json::Map::new().into(),
+        reflection_depth: 0,
+        memory_kind: crate::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
+        confidence_source: crate::models::ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
+    };
+    let value = super::to_value_or_500("test.happy", &mem)
+        .expect("Memory must serialise to JSON");
+    assert_eq!(value["id"], "m1");
+    assert_eq!(value["title"], "t");
+}
+
+/// Bad-encode path: a synthetic `Serialize` impl that always errors
+/// drives the `Err(response)` branch. We use a custom type rather than
+/// a stdlib oddity (`HashMap<f32, _>` etc.) so the test pins the
+/// helper's behaviour without depending on stdlib-specific failure
+/// modes that can shift between serde_json versions.
+///
+/// Pre-#869 the call site held `unwrap_or_default()` here and would
+/// return `201 Created {}` to the caller — the load-bearing assertion
+/// here is `expect_err`, which would have failed under the old code
+/// because `serde_json::Value::default()` is `Value::Null`.
+#[tokio::test]
+async fn to_value_or_500_returns_500_on_encode_failure() {
+    struct AlwaysErrors;
+    impl serde::Serialize for AlwaysErrors {
+        fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom(
+                "synthetic encode failure for #869 regression",
+            ))
+        }
+    }
+    let err_resp = super::to_value_or_500("test.bad", &AlwaysErrors)
+        .expect_err("synthetic Serialize impl must fail serde_json encode");
+    assert_eq!(err_resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let bytes = axum::body::to_bytes(err_resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let err = v["error"].as_str().unwrap_or_default();
+    assert!(
+        err.contains("internal server error"),
+        "500 body must carry the sanitised error envelope, got: {err}"
+    );
+}
