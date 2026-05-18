@@ -1,0 +1,170 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+  Brass-tacks essay 2 of 3 — "how an AI NHI uses ai-memory" — issue #832.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>How an AI NHI uses ai-memory &mdash; autonomous tier in action</title>
+<meta name="description" content="A concrete walk-through of how an AI Non-Human Identity agent uses ai-memory across a session: boot, recall, store, link, consolidate, reflect, handoff. With real tool calls.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/essays/brass-tacks-2-how.html">
+<style>
+:root{--bg:#0a0a0a;--panel:#121212;--border:#262626;--border-hi:#3a3a3a;--text:#f5f5f5;--muted:#9a9a9a;--dim:#6b6b6b;--accent:#6ee7ff;--code-bg:#161616;--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;--font-serif:Georgia,"Iowan Old Style","Apple Garamond",Cambria,Times,serif;--font-mono:"SF Mono","JetBrains Mono","Cascadia Code",Consolas,monospace;--w-read:680px;--w-wide:1080px}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:var(--font-sans);line-height:1.7;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+code,pre{font-family:var(--font-mono);font-size:.85rem}
+code{background:var(--code-bg);padding:.1em .35em;border-radius:3px;color:#d4d4d4}
+pre{background:var(--code-bg);border:1px solid var(--border);border-radius:6px;padding:.85rem 1.15rem;overflow-x:auto;line-height:1.55;margin:1.25rem 0}
+pre code{background:none;padding:0;color:#d4d4d4}
+.wrap{max-width:var(--w-read);margin:0 auto;padding:0 1.5rem}
+.topnav{border-bottom:1px solid var(--border);position:sticky;top:0;background:rgba(10,10,10,.92);backdrop-filter:blur(8px);z-index:50}
+.topnav .row{display:flex;align-items:center;justify-content:space-between;padding:1rem 1.5rem;max-width:var(--w-wide);margin:0 auto;font-size:.9rem}
+.topnav .brand{color:var(--text);font-weight:600}
+.topnav .links{display:flex;gap:1.5rem}
+.topnav .links a{color:var(--muted)}
+.topnav .links a:hover{color:var(--text);text-decoration:none}
+.crumb{padding:1.25rem 1.5rem 0;max-width:var(--w-read);margin:0 auto;color:var(--dim);font-size:.82rem;font-family:var(--font-mono)}
+.crumb a{color:var(--muted)}
+.essay{padding:2.5rem 0 4rem}
+.essay .meta{font-family:var(--font-mono);font-size:.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.18em;margin-bottom:1rem}
+.essay h1{font-size:2.4rem;font-weight:700;letter-spacing:-.025em;line-height:1.15;margin-bottom:1.5rem}
+.essay .deck{font-size:1.15rem;color:var(--muted);font-family:var(--font-serif);font-style:italic;margin-bottom:2.5rem;padding-bottom:1.5rem;border-bottom:1px solid var(--border);line-height:1.55}
+.essay h2{font-size:1.4rem;font-weight:700;letter-spacing:-.015em;margin:3rem 0 1rem;color:var(--text)}
+.essay .step-num{display:inline-block;font-family:var(--font-mono);font-size:.78rem;background:var(--accent);color:var(--bg);padding:.15em .6em;border-radius:3px;margin-right:.5em;font-weight:700;letter-spacing:.05em;vertical-align:middle}
+.essay h3{font-size:1.1rem;font-weight:600;margin:2rem 0 .75rem;color:var(--text)}
+.essay p{color:var(--text);margin-bottom:1.15rem;font-size:1.025rem}
+.essay p.callout{color:var(--text);font-family:var(--font-serif);font-size:1.08rem;font-style:italic;border-left:3px solid var(--accent);padding:.75rem 1.25rem;margin:2rem 0;background:rgba(110,231,255,.04)}
+.essay ul,.essay ol{color:var(--text);margin:0 0 1.25rem 1.5rem}
+.essay li{margin-bottom:.4rem}
+.essay li strong{color:var(--accent);font-weight:600}
+.label{font-family:var(--font-mono);font-size:.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:.12em;margin:1.25rem 0 -.5rem}
+hr{border:none;border-top:1px solid var(--border);margin:2.5rem 0}
+footer{padding:3rem 0;border-top:1px solid var(--border);color:var(--dim);font-size:.82rem;text-align:center}
+footer a{color:var(--muted)}
+.nav-essays{display:flex;justify-content:space-between;gap:1rem;margin-top:3rem;padding-top:1.5rem;border-top:1px solid var(--border);font-size:.9rem}
+.nav-essays a{color:var(--accent)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="row">
+    <a class="brand" href="../">ai-memory</a>
+    <div class="links">
+      <a href="brass-tacks-1-what.html">1. What</a>
+      <a href="brass-tacks-2-how.html" style="color:var(--text)">2. How</a>
+      <a href="brass-tacks-3-why.html">3. Why</a>
+      <a href="../#install">Install</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<div class="crumb"><a href="../">ai-memory</a> &nbsp;/&nbsp; essays &nbsp;/&nbsp; brass tacks 02</div>
+
+<article class="essay wrap">
+  <div class="meta">Brass tacks &middot; 02 of 03 &middot; about a 6 minute read</div>
+  <h1>How an AI NHI uses ai-memory.</h1>
+  <p class="deck">A concrete walk-through of one session of an autonomous AI Non-Human Identity agent. Seven steps: boot, recall, store, link, consolidate, reflect, hand off. Real MCP tool calls. Terse output excerpts. No marketing.</p>
+
+  <p>The agent in this walk-through is a coding agent named <code>ai:curator-agent@host01:pid-4815</code> running with the autonomous tier and Ollama-served <code>gemma4:e4b</code>. The user has asked it to investigate a flaky test in the project.</p>
+
+  <h2><span class="step-num">01</span> Boot &mdash; load identity and policy</h2>
+  <p>The agent's launch hook calls <code>memory_session_start</code>. The substrate stamps a session id, surfaces the agent's prior reflections, and loads any operator-signed substrate rules that scope to this agent. The agent now knows who it is and what it is allowed to do.</p>
+  <div class="label">Tool call</div>
+  <pre><code>memory_session_start({ "agent_id": "ai:curator-agent@host01:pid-4815" })</code></pre>
+  <div class="label">Excerpt</div>
+  <pre><code>{ "session_id": "sess-2026-05-18-a3f9",
+  "prior_reflections": 3,
+  "loaded_substrate_rules": ["L1.identity", "L3.audit", "L5.governance"],
+  "last_handoff": "2026-05-17T22:14:03Z" }</code></pre>
+
+  <h2><span class="step-num">02</span> Recall &mdash; what do I already know about this</h2>
+  <p>Before doing anything, the agent calls <code>memory_recall</code> against the context "flaky test in pipeline." This is hybrid recall: FTS5 keyword score blended with cosine similarity over MiniLM embeddings, weighted by tier, priority, confidence, and recency. Every recall mutates the database (touches access_count, refreshes expires_at, promotes mid&rarr;long at 5 accesses).</p>
+  <div class="label">Tool call</div>
+  <pre><code>memory_recall({ "context": "flaky test pipeline", "limit": 5 })</code></pre>
+  <div class="label">Excerpt</div>
+  <pre><code>{ "results": [
+    { "id": "...a1f7", "title": "PR #810 introduced async test race",
+      "kind": "finding", "confidence": 0.92, "score": 0.78 },
+    { "id": "...b3c2", "title": "Test isolation policy &mdash; no shared DB",
+      "kind": "policy", "confidence": 1.00, "score": 0.71 } ] }</code></pre>
+
+  <h2><span class="step-num">03</span> Store &mdash; record the new observation</h2>
+  <p>The agent reproduces the flake and learns it only fails when two suites run in parallel. It stores a finding. The substrate stamps <code>agent_id</code> from the resolution ladder (env, then process default), assigns a tier (<code>mid</code>: 7-day TTL), and writes a signed event into the audit chain.</p>
+  <div class="label">Tool call</div>
+  <pre><code>memory_store({
+  "title": "Flake reproduces only under parallel suite execution",
+  "content": "test_handler_parity::bucket_b flakes 30% with -j 2; never with -j 1",
+  "tier": "mid",
+  "kind": "finding",
+  "confidence": 0.85,
+  "tags": ["flake", "test-isolation", "pr-810"] })</code></pre>
+
+  <h2><span class="step-num">04</span> Link &mdash; tie the new finding to what we knew</h2>
+  <p>The new finding extends the earlier "PR #810 introduced async test race" memory. The agent records the relationship with a typed directional link and (because the autonomous tier is on) signs the link with the agent's Ed25519 key. <code>valid_from</code> is set; <code>valid_until</code> is left open until something invalidates the claim.</p>
+  <div class="label">Tool call</div>
+  <pre><code>memory_link({
+  "from": "...new-finding-id",
+  "to":   "...a1f7",
+  "kind": "derived_from",
+  "attest_level": "signed_by_agent" })</code></pre>
+
+  <h2><span class="step-num">05</span> Consolidate &mdash; do I have duplicates</h2>
+  <p>The autonomous-tier curator (a background loop) periodically calls <code>memory_consolidate</code> on neighborhoods of the graph. It uses the configured LLM to detect that two earlier memories &mdash; one a tag drift report, one the new finding above &mdash; describe the same underlying defect. The curator merges them into a single canonical memory, preserves both source <code>agent_id</code>s under <code>consolidated_from_agents</code>, and emits a <code>supersedes</code> link from the old to the new.</p>
+  <div class="label">Tool call</div>
+  <pre><code>memory_consolidate({
+  "candidates": ["...old-id-1", "...old-id-2", "...new-finding-id"],
+  "strategy": "llm_merge" })</code></pre>
+  <div class="label">Excerpt</div>
+  <pre><code>{ "consolidated_id": "...c8d4",
+  "consolidated_from_agents":
+    ["ai:curator-agent@host01:pid-4815", "ai:earlier-agent@host01:pid-2200"],
+  "supersedes": ["...old-id-1", "...old-id-2"],
+  "verdict": "merged" }</code></pre>
+
+  <h2><span class="step-num">06</span> Reflect &mdash; what does the chain now mean</h2>
+  <p>After the consolidation, the agent calls <code>memory_reflect</code> against its working scope. Reflection is bounded (default depth cap 3 to prevent runaway recursion); the substrate refuses depth 4 with <code>REFLECTION_DEPTH_EXCEEDED</code>. The reflection is signed by the agent's key and stored as a memory of kind <code>reflection</code>, which the next session will surface via <code>memory_session_start</code>.</p>
+  <div class="label">Tool call</div>
+  <pre><code>memory_reflect({ "scope": "pr-810 flake investigation", "depth": 2 })</code></pre>
+  <div class="label">Excerpt</div>
+  <pre><code>{ "reflection_id": "...refl-aa1",
+  "summary": "Flake is parallel-execution race; fix is per-suite DB
+              not shared mutex. Three earlier observations converge
+              on the same root cause.",
+  "next_actions": ["draft PR converting bucket_b to per-suite DB",
+                   "extend test_handler_parity::race to assert -j 4 stable"] }</code></pre>
+
+  <h2><span class="step-num">07</span> Handoff &mdash; the next session inherits</h2>
+  <p>The session ends. Nothing is lost. The next session of any agent that boots into the same namespace gets the reflection surfaced via <code>memory_session_start</code>, the consolidated finding via <code>memory_recall</code>, and the typed link chain via <code>memory_get_links</code>. The signed audit chain replays cleanly; the substrate rules still apply; the <code>agent_id</code> trail records who did what; the operator can verify any of it.</p>
+  <div class="label">Next session boot</div>
+  <pre><code>memory_session_start({ "agent_id": "ai:next-agent@host01:pid-9001" })
+  &rarr; surfaces reflection ...refl-aa1, points at consolidated ...c8d4</code></pre>
+
+  <p class="callout">This is what "the substrate AI agents run on" means in concrete terms. Memory persists. Identity persists. Audit persists. Governance persists. The agent did its work; nothing of value vanished when the process died.</p>
+
+  <hr>
+
+  <p>Two paragraphs to anchor what just happened.</p>
+  <p>First, none of these calls require the agent to be told what to do at each step. The session-start hook fires automatically; the curator runs on its own interval; the autonomous tier consolidates without being asked; reflection is part of the agent's own flow. The substrate is not a passive store the agent dips into; it is a partner that does work on the agent's behalf, on its own schedule, with operator-signed rules constraining the work.</p>
+  <p>Second, this entire sequence is reproducible. <code>scripts/reproduce-recursive-learning.sh</code> in the repo runs the end-to-end primitive with a fresh DB, three sample memories, and demonstrates the depth-cap refusal. The audit chain it produces verifies. That is the engineering bar: every claim made on this page is reachable from a fresh checkout.</p>
+
+  <div class="nav-essays">
+    <a href="brass-tacks-1-what.html">&larr; previous &middot; what it is</a>
+    <a href="brass-tacks-3-why.html">next &rarr; why it beats vector-DB-only</a>
+  </div>
+</article>
+
+<footer>
+  <a href="../">&larr; back to ai-memory</a> &middot;
+  <a href="https://github.com/alphaonedev/ai-memory-mcp">source</a> &middot;
+  Apache-2.0 &middot; &copy; 2026 AlphaOne LLC
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,133 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+  Brass-tacks essay 1 of 3 — "ai-memory in 60 seconds" — issue #832.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>What ai-memory actually is &mdash; 60-second brass-tacks essay</title>
+<meta name="description" content="ai-memory is the substrate AI Non-Human Identity agents run on. Persistent typed memory, knowledge graph, governance, hooks. This essay corrects the &quot;notebook for AI&quot; undersell.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/essays/brass-tacks-1-what.html">
+<style>
+:root{--bg:#0a0a0a;--panel:#121212;--border:#262626;--border-hi:#3a3a3a;--text:#f5f5f5;--muted:#9a9a9a;--dim:#6b6b6b;--accent:#6ee7ff;--code-bg:#161616;--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;--font-serif:Georgia,"Iowan Old Style","Apple Garamond",Cambria,Times,serif;--font-mono:"SF Mono","JetBrains Mono","Cascadia Code",Consolas,monospace;--w-read:680px;--w-wide:1080px}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:var(--font-sans);line-height:1.7;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+code,pre{font-family:var(--font-mono);font-size:.88rem}
+code{background:var(--code-bg);padding:.1em .35em;border-radius:3px;color:#d4d4d4}
+pre{background:var(--code-bg);border:1px solid var(--border);border-radius:6px;padding:1rem 1.15rem;overflow-x:auto;line-height:1.55;margin:1.25rem 0}
+pre code{background:none;padding:0;color:#d4d4d4}
+.wrap{max-width:var(--w-read);margin:0 auto;padding:0 1.5rem}
+.topnav{border-bottom:1px solid var(--border);position:sticky;top:0;background:rgba(10,10,10,.92);backdrop-filter:blur(8px);z-index:50}
+.topnav .row{display:flex;align-items:center;justify-content:space-between;padding:1rem 1.5rem;max-width:var(--w-wide);margin:0 auto;font-size:.9rem}
+.topnav .brand{color:var(--text);font-weight:600}
+.topnav .links{display:flex;gap:1.5rem}
+.topnav .links a{color:var(--muted)}
+.topnav .links a:hover{color:var(--text);text-decoration:none}
+.crumb{padding:1.25rem 1.5rem 0;max-width:var(--w-read);margin:0 auto;color:var(--dim);font-size:.82rem;font-family:var(--font-mono)}
+.crumb a{color:var(--muted)}
+.essay{padding:2.5rem 0 4rem}
+.essay .meta{font-family:var(--font-mono);font-size:.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.18em;margin-bottom:1rem}
+.essay h1{font-size:2.4rem;font-weight:700;letter-spacing:-.025em;line-height:1.15;margin-bottom:1.5rem}
+.essay .deck{font-size:1.15rem;color:var(--muted);font-family:var(--font-serif);font-style:italic;margin-bottom:2.5rem;padding-bottom:1.5rem;border-bottom:1px solid var(--border);line-height:1.55}
+.essay h2{font-size:1.4rem;font-weight:700;letter-spacing:-.015em;margin:3rem 0 1rem;color:var(--text)}
+.essay h3{font-size:1.1rem;font-weight:600;margin:2rem 0 .75rem;color:var(--text)}
+.essay p{color:var(--text);margin-bottom:1.15rem;font-size:1.025rem}
+.essay p.callout{color:var(--text);font-family:var(--font-serif);font-size:1.1rem;font-style:italic;border-left:3px solid var(--accent);padding:.75rem 1.25rem;margin:2rem 0;background:rgba(110,231,255,.04)}
+.essay ul,.essay ol{color:var(--text);margin:0 0 1.25rem 1.5rem}
+.essay li{margin-bottom:.5rem}
+.essay li strong{color:var(--accent);font-weight:600}
+hr{border:none;border-top:1px solid var(--border);margin:2.5rem 0}
+.endnote{padding:1rem 1.25rem;background:var(--panel);border:1px solid var(--border);border-radius:6px;font-size:.88rem;color:var(--muted);margin-top:2rem}
+.endnote strong{color:var(--text)}
+footer{padding:3rem 0;border-top:1px solid var(--border);color:var(--dim);font-size:.82rem;text-align:center}
+footer a{color:var(--muted)}
+.nav-essays{display:flex;justify-content:space-between;gap:1rem;margin-top:3rem;padding-top:1.5rem;border-top:1px solid var(--border);font-size:.9rem}
+.nav-essays a{color:var(--accent)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="row">
+    <a class="brand" href="../">ai-memory</a>
+    <div class="links">
+      <a href="brass-tacks-1-what.html" style="color:var(--text)">1. What</a>
+      <a href="brass-tacks-2-how.html">2. How</a>
+      <a href="brass-tacks-3-why.html">3. Why</a>
+      <a href="../#install">Install</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<div class="crumb"><a href="../">ai-memory</a> &nbsp;/&nbsp; essays &nbsp;/&nbsp; brass tacks 01</div>
+
+<article class="essay wrap">
+  <div class="meta">Brass tacks &middot; 01 of 03 &middot; about a 5 minute read</div>
+  <h1>What ai-memory actually is.</h1>
+  <p class="deck">It is not a notebook for your AI. Calling it that is a massive undersell. ai-memory is an autonomous-tier substrate for AI Non-Human Identity agents: persistent typed memory, a knowledge graph with temporal validity, operator-signed governance rules, signed reflections, attested links, and an operational discipline that says &mdash; out loud, in CLAUDE.md &mdash; <em>fix everything</em>.</p>
+
+  <h2>In 60 seconds</h2>
+  <p>An AI agent calls an LLM. The LLM is stateless &mdash; it sees only the prompt you hand it, on every call. Every memory of who the agent is, what it learned last week, what its operator told it to do at boot time, and what the agent itself decided three sessions ago is supplied by something outside the LLM. That something is the agent's <strong>substrate</strong>.</p>
+  <p>ai-memory is that substrate, built as a single Apache-2.0 Rust binary. It gives an AI Non-Human Identity (NHI) agent:</p>
+  <ul>
+    <li><strong>Persistent typed memory.</strong> Not "blobs of text" &mdash; memories carry a kind (decision, fact, policy, observation, etc.), a confidence, a tier with a time-to-live, an agent_id, an audit trail.</li>
+    <li><strong>A knowledge graph.</strong> Typed directional links between memories &mdash; <code>supersedes</code>, <code>contradicts</code>, <code>derived_from</code>, <code>related_to</code> &mdash; with temporal validity (<code>valid_from</code> / <code>valid_until</code>), optional Ed25519 attestation, and a query surface that Apache AGE accelerates when you scale past T1.</li>
+    <li><strong>Operator-signed governance.</strong> Substrate rules L1&ndash;L6, each one Ed25519-signed by the operator's key. The agent cannot rewrite the rules; the operator can.</li>
+    <li><strong>A hook pipeline.</strong> Twenty named substrate events; programmable handlers; HMAC-required webhook subscriptions; an SSRF gate by default.</li>
+    <li><strong>An autonomous tier.</strong> When you wire in an LLM (local Ollama, remote OpenAI-compatible, whatever), the substrate will consolidate duplicate memories, detect contradictions across the chain, and auto-tag &mdash; without an agent having to ask.</li>
+    <li><strong>A signed audit chain.</strong> Every state change recorded in append-only Ed25519-signed events. Replayable, verifiable, cryptographically tamper-evident.</li>
+  </ul>
+
+  <p class="callout">"Notebook for AI" gets you maybe 5% of the way to what this thing does. The real frame is: this is the substrate an autonomous AI agent <em>runs on</em>, the way a process runs on an operating system.</p>
+
+  <h2>The 5-minute deeper read</h2>
+
+  <h3>Why "substrate" and not "notebook"</h3>
+  <p>A notebook is a passive store. You write to it, you read from it. That is fine for human knowledge management; it is not enough for an autonomous AI agent. An autonomous agent needs the substrate to enforce things on its behalf &mdash; even against its own future requests &mdash; because the agent is, by design, going to try things and the operator needs guarantees that survive those attempts.</p>
+  <p>Three concrete guarantees ai-memory enforces that a notebook never could:</p>
+  <ol>
+    <li><strong>Identity preservation.</strong> Every memory carries <code>metadata.agent_id</code>. Once stored, that field is immutable across update, upsert, dedup, MCP <code>memory_update</code>, HTTP <code>PUT</code>, import, sync, and consolidate. The agent can rewrite the content; it cannot rewrite who wrote it.</li>
+    <li><strong>Governance rules survive the agent.</strong> Substrate rules L1&ndash;L6 (each cryptographically signed by the operator) are loaded from disk on boot, not from the agent's working context. The agent can ask the substrate to apply them; the agent cannot strike them.</li>
+    <li><strong>Audit chain is append-only.</strong> Every store, every link, every reflection, every promotion is signed into the events chain. The chain replays deterministically; tampering breaks the signature; the verifier catches it.</li>
+  </ol>
+
+  <h3>Why "NHI"</h3>
+  <p>"AI Non-Human Identity" is the framing the security industry has converged on for autonomous agents that act on behalf of an organization, the way service accounts and machine identities do today. An NHI has an identity, a credential, a scope, an audit trail &mdash; just like a human identity, but without the human. The substrate has to know the difference between "this memory was written by alice the human" and "this memory was written by <code>ai:my-curator-agent@host01:pid-4815</code>." ai-memory carries that distinction natively, end to end.</p>
+
+  <h3>Why "autonomous tier"</h3>
+  <p>ai-memory ships in four operational tiers: <strong>keyword</strong> (FTS5 only, no model), <strong>semantic</strong> (MiniLM embeddings, cosine recall), <strong>smart</strong> (Ollama-backed query expansion + auto-tag), <strong>autonomous</strong> (smart + LLM-driven consolidation, contradiction detection, reflection). The autonomous tier is what makes the substrate <em>act</em> rather than just <em>store</em>; it is the one that runs a background curator that consolidates duplicate facts, flags contradictions in the chain, and lets the agent ask "what do I actually know, deduplicated" instead of "what's the keyword match for X."</p>
+
+  <h3>Why one binary</h3>
+  <p>Operability. One Rust binary, one SQLite file, no daemon required for single-agent use, four operational modes that scale from a developer laptop (T1) to a multi-region hive (T5). The same binary runs the MCP server, the HTTP daemon, the autonomous curator, and the quorum-sync federator &mdash; you just pick the subcommand.</p>
+
+  <h3>Why "fix everything"</h3>
+  <p>Because the substrate is the floor your autonomous agents stand on. If the floor has holes, you do not get to call them "non-blocking." Read CLAUDE.md if you want the full prime directive; the short version is: every issue discovered during testing is filed at the moment of discovery, fixed in the current release, retested, re-checked from a different angle, and only then closed. No deferral. No "vN+1 polish." The substrate gets to ship when the substrate is solid.</p>
+
+  <hr>
+
+  <p>That is what ai-memory actually is. If you came here from "notebook for AI," delete that framing &mdash; it does not fit. The next essay, <a href="brass-tacks-2-how.html">how an AI NHI uses ai-memory across a session</a>, walks you through what an autonomous agent actually does with it: boot, recall, store, link, consolidate, reflect, hand off.</p>
+
+  <div class="endnote">
+    <strong>Provenance.</strong> This essay deliberately corrects an earlier framing that called ai-memory a "notebook for AI." The "notebook" framing was an undersell; ai-memory is a substrate, with the load-bearing word being <em>autonomous</em>. The correction is logged as ai-memory memory <code>e68fa714-6fea-43fb-9f0a-5802d8e70bc7</code>.
+  </div>
+
+  <div class="nav-essays">
+    <span>&nbsp;</span>
+    <a href="brass-tacks-2-how.html">Next &rarr; how an AI NHI uses it</a>
+  </div>
+</article>
+
+<footer>
+  <a href="../">&larr; back to ai-memory</a> &middot;
+  <a href="https://github.com/alphaonedev/ai-memory-mcp">source</a> &middot;
+  Apache-2.0 &middot; &copy; 2026 AlphaOne LLC
+</footer>
+
+</body>
+</html>
