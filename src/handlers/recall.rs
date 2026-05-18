@@ -148,6 +148,7 @@ pub async fn recall_memories_get(
         p.has_citations.unwrap_or(false),
         p.source_uri_prefix.as_deref(),
         kinds.as_deref(),
+        p.session_id.as_deref(),
     )
     .await
 }
@@ -200,6 +201,7 @@ pub async fn recall_memories_post(
         body.has_citations.unwrap_or(false),
         body.source_uri_prefix.as_deref(),
         kinds.as_deref(),
+        body.session_id.as_deref(),
     )
     .await
 }
@@ -250,7 +252,15 @@ async fn recall_response(
     // branches. `None` preserves the pre-Form-6 "no kind filter"
     // semantics.
     kinds_filter: Option<&[crate::models::MemoryKind]>,
+    // v0.7.0 (issue #518) — per-session recently-accessed boost.
+    // When `Some(non-empty)`, the rerank post-step adds +0.05 to any
+    // recall candidate already in this session's ring (cap 50 ids,
+    // FIFO eviction) and appends the post-boost hit set back into the
+    // ring so subsequent recalls in the same session reuse the new
+    // context. `None`/empty preserves pre-#518 recall semantics.
+    session_id: Option<&str>,
 ) -> axum::response::Response {
+    let session_tracker = crate::reranker::global_session_recall_tracker();
     // `recall_scope_tier` is consumed only on the postgres SAL branch
     // (line 3026). Suppress the unused-variable lint when the sal
     // feature is off — same idiom as `url_was_synthesized` in
@@ -348,6 +358,14 @@ async fn recall_response(
                         .filter(|(m, _)| allowed.contains(&m.memory_kind))
                         .collect(),
                 };
+                // v0.7.0 (issue #518) — per-session recency boost +
+                // post-recall record. No-op when `session_id` is None
+                // or empty.
+                let scored_pairs = crate::reranker::apply_session_recency_boost(
+                    scored_pairs,
+                    session_id,
+                    session_tracker,
+                );
                 let touch_ids: Vec<String> =
                     scored_pairs.iter().map(|(m, _)| m.id.clone()).collect();
                 let scored: Vec<serde_json::Value> = scored_pairs
@@ -464,6 +482,9 @@ async fn recall_response(
                     .filter(|(m, _)| allowed.contains(&m.memory_kind))
                     .collect(),
             };
+            // v0.7.0 (issue #518) — per-session recency boost +
+            // post-recall record on the sqlite branch.
+            let r = crate::reranker::apply_session_recency_boost(r, session_id, session_tracker);
             let scored: Vec<serde_json::Value> = r
                 .iter()
                 .map(|(m, s)| {

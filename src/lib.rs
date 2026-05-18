@@ -1,7 +1,7 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
-#![recursion_limit = "256"]
+#![recursion_limit = "512"]
 // The library target was added by the proptest infra (Agent G) to expose
 // production modules to the integration test crate. The bin target's
 // clippy run already gates CI — re-running pedantic against the same

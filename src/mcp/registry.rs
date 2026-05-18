@@ -567,7 +567,7 @@ pub fn tool_definitions() -> Value {
             {
                 "name": "memory_recall",
                 "description": "Recall memories relevant to a context (ranked).",
-                "docs": "Fuzzy OR recall ranked by relevance + priority + access + tier. budget_tokens (P6/R1): cap cumulative cl100k content tokens (always returns >=1). context_tokens: bias query embedding 70/30 (v0.6.0.0). session_default (#518): splice [agents.defaults.recall_scope]. include_archived (WT-1-E): atomised sources hidden by default. Default format toon_compact (~79% smaller).",
+                "docs": "Fuzzy OR recall ranked by relevance + priority + access + tier. budget_tokens (P6/R1): cap cumulative cl100k content tokens (always returns >=1). context_tokens: bias query embedding 70/30 (v0.6.0.0). session_default (#518): splice [agents.defaults.recall_scope]. session_id (#518): per-session +0.05 recency boost for recently-accessed memories. include_archived (WT-1-E): atomised sources hidden by default. Default format toon_compact (~79% smaller).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -581,6 +581,7 @@ pub fn tool_definitions() -> Value {
                         "budget_tokens": {"type": "integer", "minimum": 0, "description": "P6/R1 cumulative content-token cap (cl100k). 0=empty. Top result returned even if oversized (meta.budget_overflow=true)."},
                         "context_tokens": {"type": "array", "items": {"type": "string"}, "description": "Recent conversation tokens; biases query embedding 70/30 (v0.6.0.0)."},
                         "session_default": {"type": "boolean", "default": false, "description": "Splice [agents.defaults.recall_scope] for unset fields. Resolution: explicit > recall_scope > defaults."},
+                        "session_id": {"type": "string", "description": "#518 — per-session id. When set, the rerank post-step adds +0.05 to any candidate already in this session's recently-accessed ring (cap 50 ids, FIFO eviction); recall results are appended to the ring so subsequent recalls in the same session reuse the new context. Empty/omitted = no boost (pre-#518 semantics)."},
                         "include_archived": {"type": "boolean", "default": false, "description": "WT-1-E: include atomised sources alongside atoms."},
                         "has_citations": {"type": "boolean", "default": false, "description": "Form 4 (#757): require non-empty citations array."},
                         "source_uri_prefix": {"type": "string", "description": "Form 4 (#757): restrict by source_uri prefix (e.g. 'doc:', 'uri:https://')."},

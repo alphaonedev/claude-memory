@@ -305,6 +305,20 @@ pub fn handle_recall(
         .as_str()
         .map(std::string::ToString::to_string);
 
+    // v0.7.0 (issue #518) — per-session "recently accessed" boost.
+    // When the caller passes a non-empty `session_id`, the rerank
+    // post-step adds `SESSION_RECENCY_BOOST` to every candidate
+    // already in the session's ring buffer and records the post-
+    // boost hit set back into the buffer so the next recall in the
+    // same session reuses the new context. `None` / empty preserves
+    // pre-#518 recall semantics exactly.
+    let session_id: Option<String> = params["session_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(std::string::ToString::to_string);
+    let session_tracker = crate::reranker::global_session_recall_tracker();
+
     // v0.6.0.0 contextual recall — caller-supplied recent conversation tokens.
     let context_tokens: Vec<String> = params["context_tokens"]
         .as_array()
@@ -454,6 +468,12 @@ pub fn handle_recall(
                 if let Some(ce) = reranker {
                     let ce_reranked = ce.rerank(context, results);
                     let ce_reranked = apply_kinds_filter(ce_reranked, kinds_filter.as_deref());
+                    // v0.7.0 (issue #518) — session recency boost.
+                    let ce_reranked = crate::reranker::apply_session_recency_boost(
+                        ce_reranked,
+                        session_id.as_deref(),
+                        session_tracker,
+                    );
                     let memories = scored_memories(ce_reranked);
                     let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "hybrid+rerank"});
                     decorate_budget(&mut resp, &outcome);
@@ -463,6 +483,13 @@ pub fn handle_recall(
                 }
 
                 let results = apply_kinds_filter(results, kinds_filter.as_deref());
+                // v0.7.0 (issue #518) — session recency boost (no
+                // cross-encoder branch).
+                let results = crate::reranker::apply_session_recency_boost(
+                    results,
+                    session_id.as_deref(),
+                    session_tracker,
+                );
                 let memories = scored_memories(results);
                 let mut resp =
                     json!({"memories": memories, "count": memories.len(), "mode": "hybrid"});
@@ -507,6 +534,14 @@ pub fn handle_recall(
         source_uri_prefix.as_deref(),
     );
     let results = apply_kinds_filter(results, kinds_filter.as_deref());
+    // v0.7.0 (issue #518) — session recency boost on the keyword-only
+    // fallback branch as well, so the contract is uniform regardless
+    // of which retrieval mode produced the candidate set.
+    let results = crate::reranker::apply_session_recency_boost(
+        results,
+        session_id.as_deref(),
+        session_tracker,
+    );
     let memories = scored_memories(results);
     let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "keyword"});
     decorate_budget(&mut resp, &outcome);

@@ -773,6 +773,15 @@ pub struct RecallQuery {
     /// silently dropped (forward-compat with future variants).
     #[serde(default)]
     pub kinds: Option<String>,
+    /// v0.7.0 (issue #518) — per-session "recently accessed" boost.
+    /// When set and non-empty, the rerank post-step adds +0.05 to any
+    /// recall candidate already in this session's ring buffer (cap
+    /// 50 ids, FIFO eviction); the recall hit set is appended to the
+    /// ring so subsequent recalls in the same session reuse the new
+    /// context. `None`/empty preserves pre-#518 recall semantics
+    /// exactly.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[allow(clippy::unnecessary_wraps)]
@@ -831,6 +840,10 @@ pub struct RecallBody {
     /// the param; AND with the other filters.
     #[serde(default)]
     pub kinds: Option<serde_json::Value>,
+    /// v0.7.0 (issue #518) — per-session recency boost. See the
+    /// matching field on [`RecallQuery`].
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 impl RecallBody {
