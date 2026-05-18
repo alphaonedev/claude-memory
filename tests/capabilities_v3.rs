@@ -1282,3 +1282,81 @@ fn cap_v3_k5_v2_callers_see_omitted_field_when_empty() {
          (rule_summary omitted when no policies); got: {val}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #545 verification — consolidated acceptance check.
+//
+// Issue #545 enumerated four ACs (all already pinned by the A1-A4 cells
+// above). This test consolidates them into a single response so a future
+// reader who lands on #545 can see the contract at a glance.
+//
+//   1. memory_capabilities(accept="v3") includes `summary`,
+//      `to_describe_to_user`, and (when allowlist applies)
+//      `agent_permitted_families` at the top level.
+//   2. Each tool object adds `callable_now: bool` alongside `loaded`.
+//   3. Schema bumped to "3" with v2 response shape preserved.
+//   4. Substrate-side calibration (loaded vs total counts) is
+//      pre-computed, not left for the LLM to infer.
+// ---------------------------------------------------------------------------
+#[test]
+fn issue_545_v3_response_carries_all_four_calibration_fields() {
+    let tier_config = semantic_tier();
+    let conn = fresh_conn();
+    let cfg = allowlist(&[("alice", &["core", "graph"])]);
+    let val = handle_capabilities_with_conn_v3(
+        &tier_config,
+        None,
+        false,
+        Some(&conn),
+        &Profile::core(),
+        Some(&cfg),
+        Some("alice"),
+        None,
+    )
+    .expect("v3 capabilities serialize for issue #545 acceptance");
+
+    // AC3 — schema_version is "3".
+    assert_eq!(val["schema_version"], "3", "#545 AC3: schema_version must be \"3\"");
+
+    // AC1 — top-level summary present and non-empty.
+    let summary = val["summary"]
+        .as_str()
+        .expect("#545 AC1: top-level `summary` must be a string");
+    assert!(!summary.is_empty(), "#545 AC1: summary must be non-empty");
+    // AC4 — pre-computed counts in summary (substrate did the math).
+    assert!(
+        summary.contains(" of ") && summary.contains("memory tools"),
+        "#545 AC4: summary must pre-compute loaded vs total counts; got: {summary}"
+    );
+
+    // AC1 — to_describe_to_user present and non-empty.
+    let describe = val["to_describe_to_user"]
+        .as_str()
+        .expect("#545 AC1: `to_describe_to_user` must be a string");
+    assert!(!describe.is_empty(), "#545 AC1: describe must be non-empty");
+
+    // AC1 — agent_permitted_families surfaced when allowlist applies.
+    let permitted = val["agent_permitted_families"]
+        .as_array()
+        .expect("#545 AC1: agent_permitted_families must surface when allowlist applies");
+    assert!(
+        permitted.iter().any(|v| v == "core"),
+        "#545 AC1: alice should be permitted `core`; got: {permitted:?}"
+    );
+
+    // AC2 — every tool entry carries callable_now alongside loaded.
+    let tools = val["tools"]
+        .as_array()
+        .expect("#545 AC2: top-level `tools` array required");
+    assert!(!tools.is_empty(), "#545 AC2: tools array must be populated");
+    for tool in tools {
+        assert!(
+            tool["callable_now"].is_boolean(),
+            "#545 AC2: every tool entry must carry callable_now (bool); got: {tool:?}"
+        );
+        assert!(
+            tool["loaded"].is_boolean(),
+            "#545 AC2: every tool entry must keep `loaded` alongside callable_now"
+        );
+    }
+}
