@@ -363,7 +363,11 @@ mod hmac_fixture_tests {
         let env = sign_canonical_envelope("secret", "1700000000", "POST", "pa_1", "{}");
         assert!(env.starts_with("sha256="), "envelope: {env}");
         let digest = env.trim_start_matches("sha256=");
-        assert_eq!(digest.len(), 64, "SHA-256 digest is 32 bytes = 64 hex chars");
+        assert_eq!(
+            digest.len(),
+            64,
+            "SHA-256 digest is 32 bytes = 64 hex chars"
+        );
         assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }

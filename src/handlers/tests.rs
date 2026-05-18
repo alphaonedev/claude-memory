@@ -14001,8 +14001,7 @@ fn to_value_or_500_serialises_typed_struct() {
         confidence_signals: None,
         confidence_decayed_at: None,
     };
-    let value = super::to_value_or_500("test.happy", &mem)
-        .expect("Memory must serialise to JSON");
+    let value = super::to_value_or_500("test.happy", &mem).expect("Memory must serialise to JSON");
     assert_eq!(value["id"], "m1");
     assert_eq!(value["title"], "t");
 }

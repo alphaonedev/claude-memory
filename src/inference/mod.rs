@@ -232,10 +232,7 @@ pub fn compute_attested_weights(
 ///
 /// Returns an error if the file cannot be read or the recomputed hash
 /// does not match `expected.sha256`.
-pub fn verify_attested_weights(
-    path: &std::path::Path,
-    expected: &AttestedWeights,
-) -> Result<()> {
+pub fn verify_attested_weights(path: &std::path::Path, expected: &AttestedWeights) -> Result<()> {
     let recomputed = compute_attested_weights(path, &expected.label, None)?;
     if recomputed.sha256 != expected.sha256 {
         return Err(anyhow!(
@@ -263,8 +260,7 @@ mod tests {
 
     #[test]
     fn cpu_backend_round_trips_embed() {
-        let be: Arc<dyn InferenceBackend> =
-            Arc::new(CpuBackend::new(Arc::new(MockEmbedder), None));
+        let be: Arc<dyn InferenceBackend> = Arc::new(CpuBackend::new(Arc::new(MockEmbedder), None));
         let v = be.embed("hello").expect("embed ok");
         assert_eq!(v, vec![5.0_f32; 4]);
     }
@@ -302,8 +298,8 @@ mod tests {
         f.sync_all().expect("sync fixture");
         drop(f);
 
-        let attested = compute_attested_weights(&path, "fixture", None)
-            .expect("compute_attested_weights ok");
+        let attested =
+            compute_attested_weights(&path, "fixture", None).expect("compute_attested_weights ok");
         assert_eq!(attested.sha256.len(), 64, "sha256 hex must be 64 chars");
 
         verify_attested_weights(&path, &attested).expect("verify ok");
@@ -330,8 +326,8 @@ mod tests {
             signature: None,
             label: "test".into(),
         };
-        let be = CpuBackend::new(Arc::new(MockEmbedder), None)
-            .with_attested_weights(attested.clone());
+        let be =
+            CpuBackend::new(Arc::new(MockEmbedder), None).with_attested_weights(attested.clone());
         assert_eq!(be.attested_weights(), Some(attested));
     }
 }
