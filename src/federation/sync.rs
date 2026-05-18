@@ -100,7 +100,10 @@ pub(super) async fn post_once(
     if let Some(key) = api_key {
         req = req.header("x-api-key", key);
     }
-    // v0.7.0 #791 — attach per-message Ed25519 signature header.
+    // v0.7.0 #791 — attach per-message Ed25519 signature header. The
+    // receiver verifies against the peer's enrolled public key when
+    // `AI_MEMORY_FED_REQUIRE_SIG=1` (v0.7.0 default). Unsigned posts
+    // remain valid on receivers running with the env knob set to `0`.
     if let Some(sk) = signing_key {
         let sig_header = crate::federation::signing::sign_body_header(sk, &body_bytes);
         req = req.header(crate::federation::signing::SIGNATURE_HEADER, sig_header);
@@ -1350,8 +1353,8 @@ pub async fn bulk_catchup_push(
         let api_key = config.api_key.clone();
         let signing_key = config.signing_key.clone();
         joins.spawn(async move {
-            // v0.7.0 #791 — serialise once so X-Memory-Sig signs the
-            // exact wire bytes the receiver observes.
+            // v0.7.0 #791 — serialise once so the X-Memory-Sig
+            // signature matches the wire bytes the receiver sees.
             let body_bytes = match serde_json::to_vec(&payload) {
                 Ok(b) => b,
                 Err(e) => {

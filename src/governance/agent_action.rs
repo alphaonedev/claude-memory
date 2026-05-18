@@ -651,6 +651,9 @@ fn emit_forensic_decision(agent_id: &str, action: &AgentAction, decision: &Decis
         Decision::Refuse { rule_id, .. } => ("refuse", rule_id.clone()),
         Decision::Warn { rule_id, .. } => ("warn", rule_id.clone()),
     };
+    // payload is `{action, decision_detail}` — keeps the forensic row
+    // self-describing without depending on cross-table joins for a
+    // SIEM walking the chain.
     let payload = serde_json::json!({
         "action": action,
         "decision_detail": decision,

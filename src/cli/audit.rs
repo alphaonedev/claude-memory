@@ -82,12 +82,17 @@ pub struct VerifyArgs {
     /// v0.7.0 #697 — verify the **forensic** governance-decision log
     /// (Ed25519-signed, daily-rotated `forensic-<YYYY-MM-DD>.jsonl`)
     /// from the supplied ISO date forward. Walks every file at or
-    /// after `<YYYY-MM-DD>` under the resolved forensic directory.
+    /// after `<YYYY-MM-DD>` under the resolved forensic directory
+    /// (`<audit_dir>/` by default; overridable via the global
+    /// `--audit-dir` flag). Mutually exclusive with the default
+    /// hash-chain verifier (which operates on the flat `audit.log`).
     #[arg(long, value_name = "ISO_DATE")]
     pub since: Option<String>,
     /// v0.7.0 #697 — agent_id whose Ed25519 public key is used to
     /// verify signatures on the forensic log. Defaults to the
-    /// resolved daemon agent_id.
+    /// resolved daemon agent_id (same precedence as the rest of the
+    /// CLI). Use the matching `--agent-id` if your daemon signs under
+    /// a non-default identity.
     #[arg(long, value_name = "AGENT_ID")]
     pub forensic_agent_id: Option<String>,
 }
@@ -204,7 +209,9 @@ fn run_verify(
     out: &mut CliOutput<'_>,
 ) -> Result<i32> {
     // v0.7.0 #697 — forensic verify (Ed25519-signed, daily-rotated)
-    // takes priority when `--since` is supplied.
+    // takes priority when `--since` is supplied. The flat `audit.log`
+    // verifier ignores the `--since` semantic by design (that log is
+    // a single file).
     if let Some(since) = args.since.as_deref() {
         return run_forensic_verify(since, args, cli_audit_dir, app_config, out);
     }
@@ -282,8 +289,9 @@ fn run_verify(
 /// daemon's Ed25519 public key, and walks every
 /// `forensic-<YYYY-MM-DD>.jsonl` file at or after `--since`.
 ///
-/// Exit codes mirror the flat verifier: `0` chain intact (signed or
-/// unsigned), `2` at least one row failed.
+/// Exit codes mirror the flat verifier:
+/// - `0` — chain intact (signed or unsigned)
+/// - `2` — at least one row failed
 fn run_forensic_verify(
     since: &str,
     args: &VerifyArgs,
@@ -291,12 +299,19 @@ fn run_forensic_verify(
     app_config: &AppConfig,
     out: &mut CliOutput<'_>,
 ) -> Result<i32> {
+    // Forensic files live alongside the flat audit.log file — same
+    // resolution ladder. Walk-up from the resolved audit log file to
+    // its directory.
     let log_path = resolve_path(app_config, cli_audit_dir, args.path.as_deref());
     let dir = log_path
         .parent()
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
+    // Resolve the agent_id whose pubkey signs the forensic log. The
+    // operator can override via `--forensic-agent-id` for off-default
+    // signers (e.g. an HSM-rotated key). Falls back to the resolved
+    // daemon agent_id.
     let agent_id = args
         .forensic_agent_id
         .clone()

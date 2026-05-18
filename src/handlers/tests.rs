@@ -143,6 +143,7 @@ async fn store_and_retrieve_via_state() {
         confidence_source: crate::models::ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let id = db::insert(&lock.0, &mem).unwrap();
     let got = db::get(&lock.0, &id).unwrap().unwrap();
@@ -180,6 +181,7 @@ async fn recall_via_state() {
         confidence_source: crate::models::ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(&lock.0, &mem).unwrap();
     let (results, _outcome) = db::recall(
@@ -269,6 +271,7 @@ async fn create_and_update_with_metadata() {
         confidence_source: crate::models::ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let id = db::insert(&lock.0, &mem).unwrap();
 
@@ -574,6 +577,7 @@ async fn http_update_memory_uses_appstate() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&lock.0, &mem).unwrap()
     };
@@ -709,6 +713,7 @@ async fn http_sync_push_applies_archives() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&lock.0, &mem).unwrap()
     };
@@ -788,6 +793,7 @@ async fn http_archive_by_ids_happy_path() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&lock.0, &mem).unwrap()
     };
@@ -864,6 +870,7 @@ async fn http_archive_by_ids_default_reason() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&lock.0, &mem).unwrap()
     };
@@ -1255,6 +1262,7 @@ async fn http_contradictions_surfaces_same_topic_candidates_and_synth_link() {
                 confidence_source: crate::models::ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             db::insert(&lock.0, &mem).unwrap();
         }
@@ -1348,6 +1356,7 @@ async fn http_sync_push_applies_deletions() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&lock.0, &mem).unwrap()
     };
@@ -1428,6 +1437,7 @@ async fn http_sync_push_applies_incoming_links() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let m1_id = db::insert(&lock.0, &m1).unwrap();
         let m2 = Memory {
@@ -1456,6 +1466,7 @@ async fn http_sync_push_applies_incoming_links() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let m2_id = db::insert(&lock.0, &m2).unwrap();
         (m1_id, m2_id)
@@ -1551,6 +1562,7 @@ async fn http_sync_push_refuses_reflection_cycle_from_peer() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let a_id = db::insert(&lock.0, &a).unwrap();
         let b = Memory {
@@ -1579,6 +1591,7 @@ async fn http_sync_push_refuses_reflection_cycle_from_peer() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let b_id = db::insert(&lock.0, &b).unwrap();
         db::create_link(&lock.0, &a_id, &b_id, "reflects_on").unwrap();
@@ -1682,6 +1695,7 @@ async fn http_sync_push_governance_bypass_on_peer_attested() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let s_id = db::insert(&lock.0, &s).unwrap();
         let t = Memory {
@@ -1710,6 +1724,7 @@ async fn http_sync_push_governance_bypass_on_peer_attested() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let t_id = db::insert(&lock.0, &t).unwrap();
         (s_id, t_id)
@@ -1787,6 +1802,7 @@ async fn http_sync_since_streams_new_memories_only() {
                 confidence_source: crate::models::ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             db::insert(&lock.0, &mem).unwrap();
         }
@@ -1859,6 +1875,7 @@ async fn http_sync_since_includes_s39_diagnostic_fields() {
                 confidence_source: crate::models::ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             db::insert(&lock.0, &mem).unwrap();
         }
@@ -2407,6 +2424,7 @@ async fn update_memory_rejects_oversized_content() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&lock.0, &mem).unwrap()
     };
@@ -2463,6 +2481,7 @@ async fn update_memory_rejects_invalid_confidence() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&lock.0, &mem).unwrap()
     };
@@ -3093,6 +3112,7 @@ async fn insert_test_memory(state: &Db, namespace: &str, title: &str) -> String 
         confidence_source: crate::models::ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(&lock.0, &mem).unwrap()
 }
@@ -4517,6 +4537,7 @@ async fn http_entity_register_collision_with_non_entity_returns_409() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&lock.0, &mem).unwrap();
     }
@@ -4743,6 +4764,7 @@ async fn http_kg_timeline_returns_empty_for_unlinked_source() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&lock.0, &mem).unwrap()
     };
@@ -4882,6 +4904,7 @@ async fn http_kg_invalidate_marks_link_as_invalidated() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let a = db::insert(&lock.0, &mk("source-a")).unwrap();
         let b = db::insert(&lock.0, &mk("target-b")).unwrap();
@@ -5072,6 +5095,7 @@ async fn http_kg_query_returns_empty_for_unlinked_source() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&lock.0, &mem).unwrap()
     };
@@ -5249,6 +5273,7 @@ async fn http_get_links_returns_empty_array_for_unlinked_id() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&lock.0, &mem).unwrap()
     };
@@ -5330,6 +5355,7 @@ async fn http_forget_memories_with_namespace_filter_returns_count() {
                 confidence_source: crate::models::ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             db::insert(&lock.0, &mem).unwrap();
         }
@@ -6445,6 +6471,7 @@ async fn http_forget_memories_pattern_only_deletes_matches() {
                 confidence_source: crate::models::ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             db::insert(&lock.0, &mem).unwrap();
         }
@@ -6507,6 +6534,7 @@ async fn http_forget_memories_by_tier_only_targets_tier() {
                 confidence_source: crate::models::ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             db::insert(&lock.0, &mem).unwrap();
         }
@@ -6576,6 +6604,7 @@ async fn http_forget_memories_combined_filters_intersect() {
                 confidence_source: crate::models::ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             db::insert(&lock.0, &mem).unwrap();
         }
@@ -7574,6 +7603,7 @@ async fn h8b_get_inbox_unread_only_filter_excludes_read() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let read = Memory {
             id: Uuid::new_v4().to_string(),
@@ -7601,6 +7631,7 @@ async fn h8b_get_inbox_unread_only_filter_excludes_read() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&lock.0, &unread).unwrap();
         db::insert(&lock.0, &read).unwrap();
@@ -7662,6 +7693,7 @@ async fn h8b_get_inbox_limit_clamps_returned_count() {
                 confidence_source: crate::models::ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             db::insert(&lock.0, &mem).unwrap();
         }
@@ -7775,6 +7807,7 @@ async fn h8b_session_start_namespace_filter() {
                 confidence_source: crate::models::ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             db::insert(&lock.0, &mem).unwrap();
         }
@@ -7873,6 +7906,7 @@ async fn h8b_session_start_preloads_recent_context() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&lock.0, &mem).unwrap();
     }
@@ -8885,6 +8919,7 @@ async fn http_consolidate_two_into_one_happy_path() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let a = db::insert(&lock.0, &mk("draft-a")).unwrap();
         let b = db::insert(&lock.0, &mk("draft-b")).unwrap();
@@ -9135,6 +9170,7 @@ async fn http_contradictions_synthesizes_links_for_same_title() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&lock.0, &mk("alice-says", "earth is round")).unwrap();
         db::insert(&lock.0, &mk("bob-says", "earth is flat")).unwrap();
@@ -9198,6 +9234,7 @@ async fn http_contradictions_namespace_filter_isolates_results() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&lock.0, &mk("ns-iso-a", "first opinion")).unwrap();
         db::insert(&lock.0, &mk("ns-iso-b", "different opinion")).unwrap();
@@ -9786,6 +9823,7 @@ async fn http_set_namespace_standard_qs_invalid_governance_returns_400() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&lock.0, &mem).unwrap()
     };
@@ -11014,6 +11052,7 @@ async fn http_promote_memory_happy_path_clears_expires_at() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&lock.0, &mem).unwrap()
     };
@@ -12903,6 +12942,7 @@ async fn seed_governance_policy(state: &Db, ns: &str, policy: serde_json::Value)
         confidence_source: crate::models::ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let standard_id = db::insert(&lock.0, &standard).unwrap();
     db::set_namespace_standard(&lock.0, ns, &standard_id, None).unwrap();
@@ -13541,6 +13581,7 @@ async fn http_consolidate_accepts_use_llm_without_summary_l7() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let a = db::insert(&lock.0, &mk("aom101-0", "first")).unwrap();
         let b = db::insert(&lock.0, &mk("aom101-1", "second")).unwrap();
@@ -13647,6 +13688,7 @@ async fn http_consolidate_response_carries_summary_on_every_key_s51_reads() {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let a = db::insert(
             &lock.0,
@@ -14000,6 +14042,7 @@ fn to_value_or_500_serialises_typed_struct() {
         confidence_source: crate::models::ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let value = super::to_value_or_500("test.happy", &mem).expect("Memory must serialise to JSON");
     assert_eq!(value["id"], "m1");
