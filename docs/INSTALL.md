@@ -49,6 +49,19 @@
    sudo rpm -i ai-memory-0.5.1-1.x86_64.rpm    # or aarch64
    ```
 
+   **Arch Linux (AUR — v0.7.0 Gap #3 / issue #804):**
+   ```bash
+   # via your favourite AUR helper (paru / yay / aurutils):
+   paru -S ai-memory
+   # or build from the in-repo PKGBUILD:
+   git clone https://github.com/alphaonedev/ai-memory-mcp.git
+   cd ai-memory-mcp/packaging/aur
+   makepkg -si
+   ```
+   The PKGBUILD lives at `packaging/aur/PKGBUILD` and is reviewable in
+   the source tree. The submitted AUR slot is `ai-memory` (operator
+   ownership; upstream submission tracked in #804).
+
    **Docker:**
    ```bash
    docker build -t ai-memory https://github.com/alphaonedev/ai-memory-mcp.git
@@ -59,6 +72,26 @@
    ```bash
    cargo install --git https://github.com/alphaonedev/ai-memory-mcp.git
    ```
+
+   ### Version pinning (v0.7.0 Gap #3 / issue #804)
+
+   For production deployments, pin to an exact version. The substrate
+   honours semver discipline (`0.7.x` series stays backward-compatible;
+   `0.8.0` will land schema bumps and new tools). The supported pin
+   syntax per channel:
+
+   | Channel       | Pin syntax                                                          |
+   |---------------|---------------------------------------------------------------------|
+   | Cargo         | `cargo install ai-memory --version =0.7.0 --locked`                 |
+   | cargo-binstall| `cargo binstall ai-memory --version 0.7.0`                          |
+   | Homebrew      | `brew install alphaonedev/tap/ai-memory@0.7.0`                      |
+   | COPR          | `sudo dnf install ai-memory-0.7.0-1.fc40`                           |
+   | .deb / .rpm   | Download the `0.7.0` artifact from the GH Release; pin by filename. |
+   | AUR           | Use `ai-memory=0.7.0-1` in `paru -S ai-memory=0.7.0-1`.             |
+   | Docker        | `docker pull ghcr.io/alphaonedev/ai-memory:0.7.0` (digest pin is even safer: `@sha256:…`). |
+
+   In CI, prefer the cargo-binstall + `--version` form so the version
+   appears in your build manifest and reproducibility is trivial.
 
 2. **Configure MCP in your AI client.** The example below is for **Claude Code** — add the `mcpServers` key to `~/.claude.json` (user scope, applies to all projects):
 
