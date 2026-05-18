@@ -29,6 +29,13 @@ use serde_json::json;
 use std::sync::Mutex;
 use tower::ServiceExt as _;
 
+// v0.7.0 refactor PR-5 (#793) — shared K10 HMAC fixture lives in
+// `tests/common/mod.rs`. The legacy in-file `sign()` helper below
+// (which still binds the K7-shape `<ts>.POST.<pending_id>.<body>`
+// canonical) is preserved as a facade that delegates to the common
+// helper so this file's call-sites do not churn.
+mod common;
+
 static K10_HTTP_LOCK: Mutex<()> = Mutex::new(());
 
 /// Build the router from a shared `Db` so the test body can both
@@ -139,53 +146,18 @@ async fn seed_pending_row_via_db(
 }
 
 /// Compute the K7-style HMAC signature header value for a request body.
+///
+/// v0.7.0 refactor PR-5 (#793) — thin facade over
+/// [`common::sign_canonical_envelope`]. The historical K10 fixture only
+/// fires `POST` against the approval endpoint, so the method is
+/// hard-coded here to keep call-sites unchanged.
 fn sign(secret: &str, timestamp: &str, pending_id: &str, body: &str) -> String {
-    use sha2::Digest;
-    use sha2::Sha256;
-    fn sha256_hex(s: &str) -> String {
-        let mut h = Sha256::new();
-        h.update(s.as_bytes());
-        format!("{:x}", h.finalize())
-    }
-    fn hmac_sha256_hex(key_hex: &str, body: &str) -> String {
-        const BLOCK: usize = 64;
-        let key_bytes = hex_decode(key_hex).unwrap_or_else(|| key_hex.as_bytes().to_vec());
-        let mut key = key_bytes;
-        if key.len() > BLOCK {
-            let mut h = Sha256::new();
-            h.update(&key);
-            key = h.finalize().to_vec();
-        }
-        key.resize(BLOCK, 0);
-        let mut opad = [0x5cu8; BLOCK];
-        let mut ipad = [0x36u8; BLOCK];
-        for i in 0..BLOCK {
-            opad[i] ^= key[i];
-            ipad[i] ^= key[i];
-        }
-        let mut inner = Sha256::new();
-        inner.update(ipad);
-        inner.update(body.as_bytes());
-        let inner_digest = inner.finalize();
-        let mut outer = Sha256::new();
-        outer.update(opad);
-        outer.update(inner_digest);
-        format!("{:x}", outer.finalize())
-    }
-    fn hex_decode(s: &str) -> Option<Vec<u8>> {
-        if !s.len().is_multiple_of(2) {
-            return None;
-        }
-        (0..s.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
-            .collect()
-    }
-    let key_hash = sha256_hex(secret);
+    let _ = common::sign_canonical_envelope; // keep the facade reference live
+    let key_hash = common::sha256_hex(secret);
     // P1 (#628 agent-4): canonical request now binds method + pending_id
     // so a captured signature can't be redirected to a different row.
     let canonical = format!("{timestamp}.POST.{pending_id}.{body}");
-    let sig = hmac_sha256_hex(&key_hash, &canonical);
+    let sig = common::hmac_sha256_hex(&key_hash, &canonical);
     format!("sha256={sig}")
 }
 

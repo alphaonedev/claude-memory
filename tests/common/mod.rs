@@ -221,3 +221,149 @@ pub fn fresh_db_tempfile_conn() -> (NamedTempFile, Connection) {
     let conn = ai_memory::db::open(tmp.path()).expect("db::open");
     (tmp, conn)
 }
+
+// ---------------------------------------------------------------------------
+// v0.7.0 refactor PR-5 (#793) — shared K10 HMAC signing helper.
+//
+// The K10/K7 approval HTTP path binds a canonical request to a signature
+// with the shape:
+//
+//     canonical = "<ts>.<METHOD>.<pending_id>.<body>"
+//     sig       = HMAC-SHA256(sha256_hex(secret).as_bytes(), canonical)
+//
+// Six integration test files used to ship a hand-rolled copy of this
+// helper (k10_approval_http, k10_approval_security, v070_a1_authn,
+// serve_postgres_continuation2/3, l07_3_chunk_d_http_surface). The next
+// canonical-bytes binding change (#791 v0.8.0 federation signed-signals)
+// would have required 6+ identical edits. This helper consolidates the
+// definition so future binding changes touch ONE site.
+//
+// Callers wrap the returned hex string in the `sha256=<hex>` envelope
+// that the K10 verifier expects (or call [`sign_canonical_envelope`] for
+// the wrapped form).
+// ---------------------------------------------------------------------------
+
+/// Hex-encode an SHA-256 hash of the supplied string. Used to derive
+/// the HMAC key from the raw operator secret (matches the daemon-side
+/// key-derivation in `src/handlers/...`).
+#[must_use]
+pub fn sha256_hex(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(s.as_bytes());
+    format!("{:x}", h.finalize())
+}
+
+/// Decode a lowercase-hex string into bytes. Returns `None` for odd
+/// length or non-hex characters.
+#[must_use]
+pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
+}
+
+/// Compute the HMAC-SHA256 of `body` keyed by `key_hex`. The key is
+/// hex-decoded when possible (so callers can pass either a hex string
+/// or a raw key); the function follows RFC 2104.
+#[must_use]
+pub fn hmac_sha256_hex(key_hex: &str, body: &str) -> String {
+    use sha2::{Digest, Sha256};
+    const BLOCK: usize = 64;
+    let key_bytes = hex_decode(key_hex).unwrap_or_else(|| key_hex.as_bytes().to_vec());
+    let mut key = key_bytes;
+    if key.len() > BLOCK {
+        let mut h = Sha256::new();
+        h.update(&key);
+        key = h.finalize().to_vec();
+    }
+    key.resize(BLOCK, 0);
+    let mut opad = [0x5cu8; BLOCK];
+    let mut ipad = [0x36u8; BLOCK];
+    for i in 0..BLOCK {
+        opad[i] ^= key[i];
+        ipad[i] ^= key[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(body.as_bytes());
+    let inner_digest = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner_digest);
+    format!("{:x}", outer.finalize())
+}
+
+/// Compute the canonical K10 HMAC signature header value for an
+/// approval request that binds `(timestamp, method, pending_id, body)`.
+/// Returns the raw lowercase-hex digest (no `sha256=` prefix).
+///
+/// The binding shape:
+///
+/// ```text
+/// canonical = "<timestamp>.<METHOD>.<pending_id>.<body>"
+/// digest    = HMAC-SHA256(sha256_hex(secret), canonical)
+/// ```
+///
+/// Use [`sign_canonical_envelope`] to obtain the `sha256=<hex>` envelope
+/// the K10 verifier expects in the `X-Approval-Signature` header.
+#[must_use]
+pub fn sign_canonical(
+    secret: &str,
+    timestamp: &str,
+    method: &str,
+    pending_id: &str,
+    body: &str,
+) -> String {
+    let key_hash = sha256_hex(secret);
+    let canonical = format!("{timestamp}.{method}.{pending_id}.{body}");
+    hmac_sha256_hex(&key_hash, &canonical)
+}
+
+/// Same as [`sign_canonical`] but wraps the digest in the
+/// `sha256=<hex>` envelope the K10 verifier expects.
+#[must_use]
+pub fn sign_canonical_envelope(
+    secret: &str,
+    timestamp: &str,
+    method: &str,
+    pending_id: &str,
+    body: &str,
+) -> String {
+    format!(
+        "sha256={}",
+        sign_canonical(secret, timestamp, method, pending_id, body)
+    )
+}
+
+#[cfg(test)]
+mod hmac_fixture_tests {
+    use super::{sign_canonical, sign_canonical_envelope};
+
+    /// Pin the canonical-bytes shape so a future binding-change PR is
+    /// loud. If this assert fires, every K10 client (including any
+    /// out-of-tree integration) needs to update.
+    #[test]
+    fn sign_canonical_binds_method_and_pending_id() {
+        let a = sign_canonical("secret", "1700000000", "POST", "pa_123", "{}");
+        let b = sign_canonical("secret", "1700000000", "POST", "pa_124", "{}");
+        let c = sign_canonical("secret", "1700000000", "DELETE", "pa_123", "{}");
+        assert_ne!(a, b, "pending_id MUST be in the canonical bytes");
+        assert_ne!(a, c, "method MUST be in the canonical bytes");
+    }
+
+    /// The envelope shape is `sha256=<lowercase-hex>` so the K10
+    /// verifier can split on `=` and pick the algorithm tag.
+    #[test]
+    fn sign_canonical_envelope_uses_sha256_prefix() {
+        let env = sign_canonical_envelope("secret", "1700000000", "POST", "pa_1", "{}");
+        assert!(env.starts_with("sha256="), "envelope: {env}");
+        let digest = env.trim_start_matches("sha256=");
+        assert_eq!(digest.len(), 64, "SHA-256 digest is 32 bytes = 64 hex chars");
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+}
