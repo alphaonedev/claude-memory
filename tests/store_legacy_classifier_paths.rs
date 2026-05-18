@@ -717,3 +717,534 @@ fn legacy_classifier_skips_self_id_in_candidate_loop() {
         "merge mode must reuse the seed row id"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #838 — coverage for the v0.7.0 (#519) proactive contradiction
+// detection block in `handle_store` (L779-L815). Those branches were
+// added by commit 9f06d5178 and pulled store.rs coverage from 95.89%
+// to 95.41% (sub-floor). The 8 unit tests in `tests/proactive_conflict.rs`
+// pin the `db::proactive_conflict_check` substrate but do NOT execute
+// the MCP wrapper that consumes its result.
+//
+// The branches we close here:
+//
+// * L789 — `params["force"].as_bool().unwrap_or(false)` true arm
+//   (`force_write = true` bypass).
+// * L790 — `!force_write && let Some(emb) = embedder` true arm with
+//   embedder present.
+// * L792-793 — `emb.embed(...)` Ok arm AND
+//   `db::proactive_conflict_check` returns `Some(conflict)`.
+// * L795-803 — `tracing::info!` conflict-refused log line.
+// * L804-813 — `return Err("CONFLICT: ...")` envelope shape.
+// * L790 false arm — `force_write = true` with embedder present
+//   (skips the inner probe entirely).
+// * L792 false arm reachability — `emb.embed` failure path (the
+//   substrate falls through to the quota gate when embedding errors).
+// * L793 None arm — embedder + Ok embedding but no conflict
+//   detected (low similarity / non-contradicting content).
+// ---------------------------------------------------------------------------
+
+/// Constant-vector embedder: every input maps to the same unit vector
+/// so the proactive conflict probe always sees cosine = 1.0 between
+/// the incoming write and any seeded memory whose stored embedding
+/// matches. Lets us drive the #519 conflict-refusal branch without
+/// pulling in HuggingFace model loading.
+struct FixedEmbedder {
+    vector: Vec<f32>,
+}
+
+impl FixedEmbedder {
+    fn unit_4d() -> Self {
+        // Pre-normalised so cosine(self, self) = 1.0.
+        let v = (1.0_f32 / 4.0_f32.sqrt()).abs();
+        Self {
+            vector: vec![v, v, v, v],
+        }
+    }
+}
+
+impl ai_memory::embeddings::Embed for FixedEmbedder {
+    fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+        Ok(self.vector.clone())
+    }
+
+    fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        texts.iter().map(|t| self.embed(t)).collect()
+    }
+}
+
+/// Embedder that always errors — exercises the L792 false-arm
+/// (`if let Ok(query_embedding) = emb.embed(&text)` fails so the
+/// conflict probe is silently skipped and execution falls through).
+struct ErrorEmbedder;
+
+impl ai_memory::embeddings::Embed for ErrorEmbedder {
+    fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+        Err(anyhow::anyhow!("synthetic embedder failure"))
+    }
+
+    fn embed_batch(&self, _texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        Err(anyhow::anyhow!("synthetic embedder failure"))
+    }
+}
+
+/// Seed a row with a caller-supplied embedding. Mirrors the
+/// http handler's "embed-before-lock" pattern.
+fn seed_with_embedding(
+    conn: &Connection,
+    title: &str,
+    content: &str,
+    namespace: &str,
+    embedding: &[f32],
+) -> String {
+    let id = seed_existing(conn, title, content, namespace);
+    db::set_embedding(conn, &id, embedding).expect("set_embedding");
+    id
+}
+
+#[test]
+fn proactive_conflict_mcp_refuses_near_duplicate_with_conflict_envelope() {
+    // The conflict block fires when:
+    //   * embedder wired
+    //   * force omitted (defaults false)
+    //   * a seeded row in the same namespace has a near-identical
+    //     embedding AND a different content body
+    //   * AND a different title (to avoid the exact-title dedup
+    //     branch upstream that short-circuits before the proactive
+    //     conflict probe)
+    let (conn, db_path) = open_db();
+    let ns = "ns-pcd-refuse";
+    let embedder = FixedEmbedder::unit_4d();
+    let seed_id = seed_with_embedding(
+        &conn,
+        "established-fact",
+        "deadline is june 15",
+        ns,
+        &embedder.vector,
+    );
+
+    // Different title (skips upstream dedup), different content
+    // (triggers contradiction signal), same namespace.
+    let params = json!({
+        "title": "revised-fact",
+        "content": "deadline is june 22",
+        "namespace": ns,
+        "agent_id": "ai:pcd",
+    });
+
+    let err = ai_memory::mcp::tools::handle_store_for_tests(
+        &conn,
+        &db_path,
+        &params,
+        Some(&embedder as &dyn ai_memory::embeddings::Embed),
+        None,
+        None,
+        &ResolvedTtl::default(),
+        false,
+        None,
+        None,
+    )
+    .expect_err("proactive conflict must refuse the write");
+
+    assert!(
+        err.starts_with("CONFLICT:"),
+        "error must carry the CONFLICT: wire prefix, got: {err}"
+    );
+    assert!(
+        err.contains(ns),
+        "error envelope must name the namespace, got: {err}"
+    );
+    assert!(
+        err.contains(&seed_id),
+        "error envelope must surface the existing id, got: {err}"
+    );
+    assert!(
+        err.contains("established-fact"),
+        "error envelope must surface the existing title, got: {err}"
+    );
+    assert!(
+        err.contains("near_duplicate_with_differing_content"),
+        "error envelope must carry the substrate reason code, got: {err}"
+    );
+    assert!(
+        err.contains("force=true"),
+        "error envelope must hint at the bypass mechanism, got: {err}"
+    );
+}
+
+#[test]
+fn proactive_conflict_mcp_force_true_bypasses_probe_and_writes() {
+    // L789 true arm — `force = true` short-circuits the probe so the
+    // store lands even when a near-duplicate-with-differing-content
+    // exists in the namespace.
+    let (conn, db_path) = open_db();
+    let ns = "ns-pcd-force";
+    let embedder = FixedEmbedder::unit_4d();
+    let _seed_id = seed_with_embedding(
+        &conn,
+        "established-fact",
+        "deadline is june 15",
+        ns,
+        &embedder.vector,
+    );
+
+    let params = json!({
+        "title": "revised-fact-forced",
+        "content": "deadline is june 22",
+        "namespace": ns,
+        "agent_id": "ai:pcd",
+        "force": true,
+    });
+
+    let resp = ai_memory::mcp::tools::handle_store_for_tests(
+        &conn,
+        &db_path,
+        &params,
+        Some(&embedder as &dyn ai_memory::embeddings::Embed),
+        None,
+        None,
+        &ResolvedTtl::default(),
+        false,
+        None,
+        None,
+    )
+    .expect("force=true must bypass the conflict probe and land the row");
+
+    assert!(
+        resp["id"].as_str().is_some(),
+        "row must land when force=true, got: {resp}"
+    );
+    assert_eq!(
+        resp["title"].as_str(),
+        Some("revised-fact-forced"),
+        "title must round-trip into the response"
+    );
+}
+
+#[test]
+fn proactive_conflict_mcp_no_embedder_skips_probe() {
+    // L790 false arm — no embedder wired → the proactive conflict
+    // probe is skipped entirely and the store falls through to the
+    // quota + insert path.
+    let (conn, db_path) = open_db();
+    let ns = "ns-pcd-noembed";
+
+    let params = json!({
+        "title": "fact-without-embedder",
+        "content": "anything",
+        "namespace": ns,
+        "agent_id": "ai:pcd",
+    });
+
+    let resp = ai_memory::mcp::tools::handle_store_for_tests(
+        &conn,
+        &db_path,
+        &params,
+        None, // no embedder
+        None,
+        None,
+        &ResolvedTtl::default(),
+        false,
+        None,
+        None,
+    )
+    .expect("store must land when no embedder is wired (probe skipped)");
+
+    assert!(resp["id"].as_str().is_some(), "row must land, got: {resp}");
+}
+
+#[test]
+fn proactive_conflict_mcp_embedder_error_falls_through_to_quota() {
+    // L792 false arm — embedder errors → `emb.embed(...)` returns
+    // `Err` → the `if let Ok(...)` guard fails → the conflict probe
+    // is silently skipped → store falls through to quota + insert.
+    let (conn, db_path) = open_db();
+    let ns = "ns-pcd-emb-err";
+    // Seed a near-duplicate that WOULD trigger the probe — to prove
+    // the embedder-error path bypasses it.
+    let seed = FixedEmbedder::unit_4d();
+    let _seed_id = seed_with_embedding(
+        &conn,
+        "would-conflict",
+        "deadline is june 15",
+        ns,
+        &seed.vector,
+    );
+
+    let embedder = ErrorEmbedder;
+    let params = json!({
+        "title": "incoming-write",
+        "content": "deadline is june 22",
+        "namespace": ns,
+        "agent_id": "ai:pcd",
+    });
+
+    let resp = ai_memory::mcp::tools::handle_store_for_tests(
+        &conn,
+        &db_path,
+        &params,
+        Some(&embedder as &dyn ai_memory::embeddings::Embed),
+        None,
+        None,
+        &ResolvedTtl::default(),
+        false,
+        None,
+        None,
+    )
+    .expect("embedder Err must fall through to the quota/insert path");
+
+    assert!(
+        resp["id"].as_str().is_some(),
+        "row must land even when embedder errors, got: {resp}"
+    );
+}
+
+#[test]
+fn proactive_conflict_mcp_low_similarity_does_not_refuse() {
+    // L793 None arm — embedder Ok + probe runs + no candidate clears
+    // the 0.95 cosine threshold → `proactive_conflict_check` returns
+    // `Ok(None)` → the early-return is skipped → store proceeds.
+    let (conn, db_path) = open_db();
+    let ns = "ns-pcd-low-sim";
+
+    // Seed with one unit vector; the incoming write embeds to an
+    // ORTHOGONAL vector so cosine = 0.0 << 0.95.
+    let orthogonal_seed = vec![1.0_f32, 0.0, 0.0, 0.0];
+    let _seed_id = seed_with_embedding(
+        &conn,
+        "orthogonal-seed",
+        "established fact alpha",
+        ns,
+        &orthogonal_seed,
+    );
+
+    // Embedder that always returns [0, 1, 0, 0] — orthogonal to seed.
+    struct OrthogonalEmbedder;
+    impl ai_memory::embeddings::Embed for OrthogonalEmbedder {
+        fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.0, 1.0, 0.0, 0.0])
+        }
+        fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            texts.iter().map(|t| self.embed(t)).collect()
+        }
+    }
+
+    let embedder = OrthogonalEmbedder;
+    let params = json!({
+        "title": "incoming-orthogonal",
+        "content": "totally unrelated fact",
+        "namespace": ns,
+        "agent_id": "ai:pcd",
+    });
+
+    let resp = ai_memory::mcp::tools::handle_store_for_tests(
+        &conn,
+        &db_path,
+        &params,
+        Some(&embedder as &dyn ai_memory::embeddings::Embed),
+        None,
+        None,
+        &ResolvedTtl::default(),
+        false,
+        None,
+        None,
+    )
+    .expect("low-similarity write must land — probe returned None");
+
+    assert!(
+        resp["id"].as_str().is_some(),
+        "row must land for orthogonal embeddings, got: {resp}"
+    );
+}
+
+#[test]
+fn proactive_conflict_mcp_high_sim_same_content_does_not_refuse() {
+    // L793 None arm — near-duplicate AND IDENTICAL content body. The
+    // substrate classifies this as the upsert happy-path (not a
+    // contradiction), so `proactive_conflict_check` returns `Ok(None)`
+    // even when cosine = 1.0. The MCP wrapper falls through to insert.
+    //
+    // Different title is required so the upstream exact-title dedup
+    // doesn't short-circuit before the probe.
+    let (conn, db_path) = open_db();
+    let ns = "ns-pcd-same-content";
+    let embedder = FixedEmbedder::unit_4d();
+    let _seed_id = seed_with_embedding(
+        &conn,
+        "user-pref-a",
+        "user prefers dark mode",
+        ns,
+        &embedder.vector,
+    );
+
+    let params = json!({
+        "title": "user-pref-b",
+        "content": "user prefers dark mode",
+        "namespace": ns,
+        "agent_id": "ai:pcd",
+    });
+
+    let resp = ai_memory::mcp::tools::handle_store_for_tests(
+        &conn,
+        &db_path,
+        &params,
+        Some(&embedder as &dyn ai_memory::embeddings::Embed),
+        None,
+        None,
+        &ResolvedTtl::default(),
+        false,
+        None,
+        None,
+    )
+    .expect("same-content near-duplicate must NOT refuse (upsert happy-path)");
+
+    assert!(
+        resp["id"].as_str().is_some(),
+        "row must land for same-content near-duplicate, got: {resp}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #838 — L996 / L1003 closing-region pin: `confirmed_contradictions`
+// populated AND `auto_tags` EMPTY. The cov-838-r3 baseline shows L996
+// (closing brace of the `if !auto_tags.is_empty()` true block) at hit
+// count 0. The branch fires when:
+//   * legacy_per_pair_classifier = true (populates confirmed_contradictions)
+//   * auto_tag returns Ok(empty)        (auto_tags stays empty)
+//   * detect_contradiction returns Ok(true) on at least one candidate
+// Symmetric to `autonomy_hook_auto_tags_only_no_legacy_classifier_persists`
+// (which covers the inverse — auto_tags populated, contradictions empty).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn autonomy_hook_confirmed_contradictions_only_no_auto_tags_persists_to_metadata() {
+    let (conn, db_path) = open_db();
+    let ns = "ns-contra-only";
+    install_legacy_classifier_policy(&conn, ns);
+    // Seed a candidate row with overlapping FTS keywords so it appears
+    // in the `existing` set the legacy classifier scans.
+    let _seed = seed_existing(
+        &conn,
+        "contra-only similar title",
+        "earlier seeded body with overlap",
+        ns,
+    );
+
+    let server = mock_runtime().block_on(async {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": []})))
+            .mount(&server)
+            .await;
+        // synthesis (chat) — synthesis is GATED by !legacy_per_pair_classifier
+        // so it won't fire; but legacy classifier uses chat too. Return
+        // "yes" so detect_contradiction → Ok(true) → confirmed populated.
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"message": {"content": "yes"}, "done": true})),
+            )
+            .mount(&server)
+            .await;
+        // auto_tag (generate) — return empty so auto_tags stays empty.
+        // OllamaClient::auto_tag parses newline-separated tokens; an
+        // empty response yields no tags.
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"response": ""})))
+            .mount(&server)
+            .await;
+        server
+    });
+    let uri = server.uri();
+    let llm = OllamaClient::new_with_url(&uri, "test-model").expect("mock client");
+
+    let resp = run_store(
+        &conn,
+        &db_path,
+        Some(&llm),
+        true,
+        json!({
+            "title": "contra-only canonical title",
+            "content": BASE_CONTENT,
+            "namespace": ns,
+            "on_conflict": "version",
+        }),
+    )
+    .expect("store ok");
+
+    let id = resp["id"].as_str().expect("id").to_string();
+    let meta: String = conn
+        .query_row("SELECT metadata FROM memories WHERE id = ?1", [&id], |r| {
+            r.get(0)
+        })
+        .expect("row exists");
+    let parsed: Value = serde_json::from_str(&meta).expect("valid metadata json");
+
+    // auto_tags MUST be absent or empty (LLM returned no tags) — exercises
+    // the false-arm of `if !auto_tags.is_empty()` at L994/996.
+    let auto_tags_empty = parsed
+        .get("auto_tags")
+        .and_then(|v| v.as_array())
+        .is_none_or(std::vec::Vec::is_empty);
+    assert!(
+        auto_tags_empty,
+        "auto_tags must be empty when LLM returned no tags, got: {parsed}"
+    );
+
+    // confirmed_contradictions MUST be populated (legacy classifier ran +
+    // detect_contradiction returned Ok(true) for the seed candidate).
+    let contras = parsed
+        .get("confirmed_contradictions")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !contras.is_empty(),
+        "confirmed_contradictions must be populated when chat returned yes, got: {parsed}"
+    );
+}
+
+#[test]
+fn proactive_conflict_mcp_force_default_false_when_omitted() {
+    // Wire-shape pin: `params["force"].as_bool().unwrap_or(false)` —
+    // when callers omit `force` entirely, the unwrap_or branch fires
+    // and the probe gets to run. The previous test seeds a refusal
+    // when force is omitted; this one pins the symmetric absence-as-
+    // default-false by checking the response shape against a write
+    // that wouldn't refuse anyway (so the only signal is that the
+    // probe ran but found nothing).
+    let (conn, db_path) = open_db();
+    let ns = "ns-pcd-force-default";
+    let embedder = FixedEmbedder::unit_4d();
+
+    // Empty namespace — no candidates exist → probe returns None.
+    let params = json!({
+        "title": "fresh-write-no-candidates",
+        "content": "no priors in this namespace",
+        "namespace": ns,
+        "agent_id": "ai:pcd",
+        // intentionally NO "force" key
+    });
+
+    let resp = ai_memory::mcp::tools::handle_store_for_tests(
+        &conn,
+        &db_path,
+        &params,
+        Some(&embedder as &dyn ai_memory::embeddings::Embed),
+        None,
+        None,
+        &ResolvedTtl::default(),
+        false,
+        None,
+        None,
+    )
+    .expect("first write with no priors must land");
+
+    assert!(
+        resp["id"].as_str().is_some(),
+        "row must land in empty namespace, got: {resp}"
+    );
+}
