@@ -560,7 +560,7 @@ fn autonomy_hook_auto_tags_only_no_legacy_classifier_persists_to_metadata() {
         parsed.get("confirmed_contradictions").is_none()
             || parsed["confirmed_contradictions"]
                 .as_array()
-                .map_or(true, std::vec::Vec::is_empty),
+                .is_none_or(std::vec::Vec::is_empty),
         "confirmed_contradictions must be absent without legacy_per_pair_classifier opt-in"
     );
 }
