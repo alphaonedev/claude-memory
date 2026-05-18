@@ -1606,6 +1606,18 @@ pub struct ToolEntry {
     /// `loaded && agent_can_call(agent_id, family)`. When the
     /// `[mcp.allowlist]` is disabled, `callable_now == loaded`.
     pub callable_now: bool,
+    /// v0.7.0 issue #803 — 0-2 worked examples for the tool.
+    /// `skip_serializing_if = "Vec::is_empty"` strips the field
+    /// for any tool without curated examples.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<ToolExample>,
+}
+
+/// v0.7.0 issue #803 — single worked example for `tools[].examples`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolExample {
+    pub call: serde_json::Value,
+    pub description: String,
 }
 
 // ---------------------------------------------------------------------------
