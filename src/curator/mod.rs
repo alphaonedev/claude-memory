@@ -1838,6 +1838,62 @@ mod tests {
             );
         }
     }
+
+    /// Issue #839 coverage — exercise the persona_sweep `dry_run` branch
+    /// (curator/mod.rs L479-485). The pre-fix coverage measurement was
+    /// missing this arm because every persona-sweep regression seeded
+    /// with `dry_run: false`. The fixture below mirrors
+    /// `run_once_persona_sweep_generates_signed_persona_for_new_entity`
+    /// but flips `dry_run = true` so the loop body lands in the
+    /// dry-run accounting block without invoking the LLM generator.
+    #[test]
+    fn run_once_persona_sweep_dry_run_counts_without_writing() {
+        let server = FakeOllama::start(FakeOllamaCfg::default());
+        let llm = ollama_for(&server);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+
+        let obs = make_eligible_memory("dry-persona-ns", "observation");
+        let obs_id = db::insert(&conn, &obs).unwrap();
+
+        let entity_id = "dry-persona-entity-2026-05-18";
+        let mut rfl = make_eligible_memory("dry-persona-ns", "reflection-of-obs");
+        rfl.memory_kind = crate::models::MemoryKind::Reflection;
+        rfl.reflection_depth = 1;
+        rfl.content = "Dry-run reflection mentions the entity under test.".to_string();
+        let rfl_id = db::insert(&conn, &rfl).unwrap();
+        conn.execute(
+            "UPDATE memories SET mentioned_entity_id = ?1 WHERE id = ?2",
+            rusqlite::params![entity_id, &rfl_id],
+        )
+        .unwrap();
+        db::create_link(&conn, &rfl_id, &obs_id, "reflects_on").unwrap();
+
+        let kp = crate::identity::keypair::generate("daemon").unwrap();
+
+        let cfg = CuratorConfig {
+            include_namespaces: vec!["dry-persona-ns".to_string()],
+            dry_run: true,
+            ..CuratorConfig::default()
+        };
+        let report = run_once(&conn, Some(&llm), &cfg, Some(&kp)).unwrap();
+
+        // Dry-run accounts the would-be generation.
+        assert!(
+            report.personas_generated >= 1,
+            "dry-run must still count would-be persona generations, errors={:?}",
+            report.errors
+        );
+
+        // But NO persona row was actually written.
+        let persona = crate::persona::get_latest_persona(&conn, entity_id, "dry-persona-ns")
+            .expect("get_latest_persona must not error");
+        assert!(
+            persona.is_none(),
+            "dry-run must NOT write a persona row, got: {persona:?}"
+        );
+    }
 }
 
 #[test]

@@ -3821,6 +3821,25 @@ mod tests {
         // This test stays as a smoke check — it doesn't attempt to load.
     }
 
+    /// Issue #840 coverage — exercise the `app_config.embedding_model`
+    /// override branch in `build_embedder` (daemon_runtime.rs L1504-1523).
+    /// The keyword tier has no tier-preset model, so when the override is
+    /// unparseable the resolution ladder falls through to `None` without
+    /// attempting an HF-hub fetch. This pins the parse-failure log path
+    /// and the `None` fallback that the L2 comment documents.
+    #[tokio::test]
+    async fn test_build_embedder_invalid_override_falls_back_to_preset() {
+        let mut cfg = AppConfig::default();
+        cfg.embedding_model = Some("not-a-real-embedding-model-2026".to_string());
+        // Keyword tier preset is None; override parse fails → falls back
+        // to preset None → returns None without touching HF-hub.
+        let emb = build_embedder(FeatureTier::Keyword, &cfg).await;
+        assert!(
+            emb.is_none(),
+            "unparseable override + keyword tier must return None"
+        );
+    }
+
     // ----- build_vector_index -------------------------------------------
 
     #[test]
