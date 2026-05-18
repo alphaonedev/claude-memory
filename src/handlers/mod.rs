@@ -37,11 +37,13 @@
 //!   /api/v1/approvals/{pending_id}` + SSE stream).
 
 pub mod approvals;
+pub mod archive;
 pub mod errors;
 pub mod federation_receive;
 pub mod hook_subscribers;
 pub mod http;
 pub mod parity;
+pub mod skills;
 pub mod system;
 pub mod transport;
 
@@ -50,11 +52,13 @@ pub mod transport;
 // reference `handlers::<name>` without knowing which sub-module the
 // item came from. Wire compatibility is preserved verbatim.
 pub use approvals::*;
+pub use archive::*;
 pub use errors::*;
 pub use federation_receive::*;
 pub use hook_subscribers::*;
 pub use http::*;
 pub(crate) use parity::*;
+pub use skills::*;
 pub use system::*;
 pub use transport::*;
 
