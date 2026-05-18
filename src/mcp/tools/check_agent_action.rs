@@ -205,6 +205,12 @@ mod tests {
 
     #[test]
     fn filesystem_write_kind_refuses_on_glob() {
+        // Issue #819 — suppress operator pubkey resolution for the
+        // scope of this test so the unsigned R001 fixture below
+        // enforces consistently regardless of dev-host / CI-runner
+        // state (other tests in the same binary may have created
+        // an operator.key.pub file at the platform config path).
+        let _no_pubkey = rules_store::force_no_operator_pubkey_for_test();
         let conn = fresh_conn();
         rules_store::insert(
             &conn,
@@ -420,6 +426,8 @@ mod tests {
     // matcher uses the `command_regex` substring key.
     #[test]
     fn warn_severity_surfaces_rule_id() {
+        // Issue #819 — suppress operator pubkey resolution.
+        let _no_pubkey = rules_store::force_no_operator_pubkey_for_test();
         let conn = fresh_conn();
         rules_store::insert(
             &conn,
@@ -450,6 +458,8 @@ mod tests {
     // Process spawn refusal — assert structured rule_id surfaces.
     #[test]
     fn process_spawn_refuses_on_binary_match() {
+        // Issue #819 — suppress operator pubkey resolution.
+        let _no_pubkey = rules_store::force_no_operator_pubkey_for_test();
         let conn = fresh_conn();
         rules_store::insert(
             &conn,
