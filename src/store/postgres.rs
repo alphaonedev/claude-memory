@@ -3844,13 +3844,57 @@ impl PostgresStore {
         .map_err(|e| to_store_err("insert memory_link", e))?;
 
         if matches!(self.kg_backend, KgBackend::Age) {
-            project_link_into_age(
+            // v0.7.0 fold-A2A1.3 (#700) extended to the link path
+            // (#858 follow-up, 2026-05-18): AGE projection is
+            // best-effort. The relational `memory_links` insert
+            // above is the canonical source of truth — the AGE
+            // graph projection is a query-acceleration mirror used
+            // by the cypher-backed `find_paths_cypher` path, which
+            // already falls back to the recursive CTE
+            // (`is_age_runtime_failure` → `warn_age_fallback`) when
+            // AGE is unavailable at query time.
+            //
+            // Pre-fix: any AGE runtime failure here (e.g. the test
+            // postgres user lacking permission to `LOAD 'age'`)
+            // propagated up as `BackendUnavailable` → HTTP 503,
+            // even though the link row was successfully inserted
+            // into `memory_links`. That broke every link-creating
+            // postgres test (smoke + 5 handler_parity tests +
+            // anything else that creates a link before reading via
+            // cypher). The canonical link insert had already
+            // committed at this point (well, it was queued in
+            // `tx` — see below); the AGE projection failure should
+            // degrade to a warning, not a 503.
+            //
+            // Treatment: catch the failure, log a structured warn
+            // event with the same shape `warn_age_fallback` uses,
+            // and continue to commit. Operators monitoring the
+            // tracing stream see exactly which link skipped its
+            // AGE projection.
+            if let Err(e) = project_link_into_age(
                 &mut tx,
                 &link.source_id,
                 &link.target_id,
                 link.relation.as_str(),
             )
-            .await?;
+            .await
+            {
+                if is_age_runtime_failure(&e) {
+                    tracing::warn!(
+                        target = "store::postgres::kg",
+                        source_id = %link.source_id,
+                        target_id = %link.target_id,
+                        relation = link.relation.as_str(),
+                        err = %e,
+                        "AGE projection skipped on link insert — \
+                         relational memory_links row still committed. \
+                         find_paths_cypher will degrade to CTE fallback for \
+                         queries that traverse this edge."
+                    );
+                } else {
+                    return Err(e);
+                }
+            }
         }
 
         tx.commit()
