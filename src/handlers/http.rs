@@ -1217,6 +1217,53 @@ pub async fn create_memory(
         .map(|c| c.id.clone())
         .collect();
 
+    // v0.7.0 (issue #519) — proactive contradiction detection. Refuse
+    // the write with 409 CONFLICT when an embedded near-duplicate
+    // (>= 0.95 cosine) in the same namespace has differing content,
+    // UNLESS the caller passed `force=true`. The check is a no-op
+    // when no embedding could be computed (degraded mode) or when the
+    // caller forced through.
+    if !body.force
+        && let Some(ref qe) = embedding
+    {
+        match db::proactive_conflict_check(&lock.0, &mem, qe) {
+            Ok(Some(conflict)) => {
+                tracing::info!(
+                    target: "create_memory",
+                    namespace = %mem.namespace,
+                    existing_id = %conflict.existing_id,
+                    similarity = conflict.similarity,
+                    reason = conflict.reason,
+                    "create_memory refused by proactive conflict detection (#519); \
+                     pass force=true to override",
+                );
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": format!(
+                            "near-duplicate of existing memory in namespace '{}'",
+                            mem.namespace,
+                        ),
+                        "code": "CONFLICT",
+                        "existing_id": conflict.existing_id,
+                        "existing_title": conflict.existing_title,
+                        "similarity": conflict.similarity,
+                        "reason": conflict.reason,
+                        "hint": "pass force=true to insert anyway",
+                    })),
+                )
+                    .into_response();
+            }
+            Ok(None) => {}
+            Err(e) => {
+                // Substrate failure on the proactive check is non-fatal
+                // — log and continue so a transient SELECT failure
+                // can't black-hole the write path.
+                tracing::warn!("proactive_conflict_check failed (non-fatal, continuing): {e}");
+            }
+        }
+    }
+
     // Stage 5 — quota + insert.
     let actual_id = match insert_create_with_quota(&lock, &mem, &embedding) {
         Ok(id) => id,
@@ -2798,6 +2845,7 @@ mod tests {
             scope: None,
             on_conflict: None,
             detect_conflicts: None,
+            force: false,
             citations: Vec::new(),
             source_uri: None,
             source_span: None,

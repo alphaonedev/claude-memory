@@ -776,6 +776,44 @@ pub(crate) fn handle_store(
         }));
     }
 
+    // v0.7.0 (issue #519) — proactive contradiction detection. When
+    // an embedder is wired AND the caller did NOT pass `force=true`,
+    // scan the top-K most similar live memories in the namespace and
+    // refuse the write if any near-duplicate (≥ 0.95 cosine) has a
+    // differing content body (deterministic substrate-layer
+    // contradiction signal — see `db::proactive_conflict_check`).
+    //
+    // Bypass with `force=true` for callers that explicitly want the
+    // conflicting fact to land alongside the existing one (e.g. a
+    // curator pass that intends to revise an earlier claim).
+    let force_write = params["force"].as_bool().unwrap_or(false);
+    if !force_write && let Some(emb) = embedder {
+        let text = format!("{} {}", mem.title, mem.content);
+        if let Ok(query_embedding) = emb.embed(&text)
+            && let Ok(Some(conflict)) = db::proactive_conflict_check(conn, &mem, &query_embedding)
+        {
+            tracing::info!(
+                target: "memory_store",
+                namespace = %mem.namespace,
+                existing_id = %conflict.existing_id,
+                similarity = conflict.similarity,
+                reason = conflict.reason,
+                "memory_store refused by proactive conflict detection (#519); \
+                 pass force=true to override",
+            );
+            return Err(format!(
+                "CONFLICT: memory near-duplicates an existing memory in namespace \
+                 '{}' (existing id: {}, title: '{}', similarity: {:.3}, reason: {}). \
+                 Pass force=true to insert anyway.",
+                mem.namespace,
+                conflict.existing_id,
+                conflict.existing_title,
+                conflict.similarity,
+                conflict.reason,
+            ));
+        }
+    }
+
     // v0.7 K8 — per-agent quota gate. Pre-write check; on exceeded
     // limit returns a `QUOTA_EXCEEDED` diagnostic naming the limit
     // hit. Bytes counted = (title + content + serialized metadata)

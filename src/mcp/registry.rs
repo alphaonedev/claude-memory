@@ -542,7 +542,7 @@ pub fn tool_definitions() -> Value {
             {
                 "name": "memory_store",
                 "description": "Store a memory; deduplicates by title+namespace.",
-                "docs": "Store a memory. Dedupes by (title, namespace). Tier defaults to mid (7d TTL); long is permanent. on_conflict: error|merge|version. scope: Task 1.5 visibility.",
+                "docs": "Store a memory. Dedupes by (title, namespace). Tier defaults to mid (7d TTL); long is permanent. on_conflict: error|merge|version. scope: Task 1.5 visibility. force (#519): bypass proactive contradiction detection on near-duplicate writes.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -558,7 +558,8 @@ pub fn tool_definitions() -> Value {
                         "agent_id": {"type": "string", "description": "NHI agent_id; synthesized if omitted."},
                         "scope": {"type": "string", "enum": ["private", "team", "unit", "org", "collective"], "description": "Task 1.5 visibility. Default private."},
                         "on_conflict": {"type": "string", "enum": ["error", "merge", "version"], "description": "P2/G6 collision policy on (title, namespace). error=CONFLICT (v2 default), merge=update in place (v1 default), version=append '(N)' suffix."},
-                        "kind": {"type": "string", "enum": ["observation", "reflection", "persona", "concept", "entity", "claim", "relation", "event", "conversation", "decision"], "description": "Form 6 (#759) memory-kind. Default observation."}
+                        "kind": {"type": "string", "enum": ["observation", "reflection", "persona", "concept", "entity", "claim", "relation", "event", "conversation", "decision"], "description": "Form 6 (#759) memory-kind. Default observation."},
+                        "force": {"type": "boolean", "default": false, "description": "#519 — bypass proactive contradiction detection. By default the write refuses with CONFLICT when a near-duplicate (>=0.95 cosine) has differing content; set force=true to insert anyway."}
                     },
                     "required": ["title", "content"]
                 }

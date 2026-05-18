@@ -611,6 +611,15 @@ pub struct CreateMemory {
     /// caller can pass to a follow-up `memory_consolidate`.
     #[serde(default)]
     pub detect_conflicts: Option<bool>,
+    /// v0.7.0 (issue #519) — proactive contradiction detection bypass.
+    /// When `true`, the substrate-level `proactive_conflict_check` is
+    /// skipped on this write so a near-duplicate-with-differing-content
+    /// row is inserted anyway. Default `false` preserves the new v0.7.0
+    /// refuse-by-default posture; callers that explicitly want the
+    /// conflicting fact to land alongside the existing one set
+    /// `force=true`.
+    #[serde(default)]
+    pub force: bool,
     /// v0.7.0 Form 4 (issue #757) — fact-provenance citations
     /// supplied at write time. Each entry must satisfy
     /// `validate::validate_citation`. Empty by default.

@@ -3425,6 +3425,181 @@ pub fn canonical_content_hash(text: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+// ---------------------------------------------------------------------------
+// v0.7.0 (issue #519) — proactive conflict detection on memory_store
+// ---------------------------------------------------------------------------
+
+/// Cosine-similarity threshold above which a candidate is treated as a
+/// near-duplicate for the purpose of [`proactive_conflict_check`].
+///
+/// Empirically tuned for the MiniLM-L6-v2 / Nomic embedder pair: rows
+/// whose `(title, content)` paraphrase the query at this level are
+/// already considered "the same memory" by the existing duplicate
+/// machinery (`DUPLICATE_THRESHOLD_DEFAULT` sits at 0.85 for the
+/// merge-suggestion surface). 0.95 is the stricter "this is the same
+/// fact, restated" bar; combined with the textual contradiction signal
+/// below, we surface only writes that proactively conflict with an
+/// established near-duplicate.
+pub const PROACTIVE_CONFLICT_SIM_THRESHOLD: f32 = 0.95;
+
+/// Top-K cap for the candidate pool inspected by
+/// [`proactive_conflict_check`]. Bounded so the per-write cost is O(K)
+/// rather than O(namespace_size).
+pub const PROACTIVE_CONFLICT_TOP_K: usize = 5;
+
+/// Result envelope returned by [`proactive_conflict_check`] when an
+/// existing memory near-duplicates AND textually contradicts the
+/// incoming write.
+#[derive(Debug, Clone)]
+pub struct ProactiveConflict {
+    /// `id` of the existing memory the new write conflicts with.
+    pub existing_id: String,
+    /// Title of the existing memory (for diagnostic surfacing).
+    pub existing_title: String,
+    /// Cosine similarity (always `>= PROACTIVE_CONFLICT_SIM_THRESHOLD`
+    /// in returned values).
+    pub similarity: f32,
+    /// Reason the candidate was classified as conflicting. Currently
+    /// always `"near_duplicate_with_differing_content"`; future
+    /// extensions (LLM-backed detector, negation-flip heuristic) can
+    /// surface a different reason string here.
+    pub reason: &'static str,
+}
+
+/// v0.7.0 (issue #519) — proactive contradiction detection on the
+/// `memory_store` write path.
+///
+/// Scans the top-`PROACTIVE_CONFLICT_TOP_K` most similar live memories
+/// in the new memory's namespace (by cosine similarity over the
+/// existing `memories.embedding` column) and returns the first match
+/// whose similarity meets `PROACTIVE_CONFLICT_SIM_THRESHOLD` AND whose
+/// stored `content` differs from the incoming `mem.content` exactly.
+///
+/// The "differs exactly" check is the deterministic substrate-layer
+/// contradiction signal — a row that paraphrases the same fact at
+/// ≥ 0.95 cosine but spells out a different content body is, by
+/// construction, asserting a near-duplicate fact with a different
+/// substantive payload (the LLM detector would call this a soft
+/// contradiction; the substrate check calls it a near-duplicate with
+/// differing content). Callers that want the full LLM-backed
+/// `detect_contradiction` round-trip can layer it on top of the
+/// proactive-check result; the substrate path stays LLM-independent so
+/// it runs deterministically under `AI_MEMORY_NO_CONFIG=1` and in
+/// every CI environment.
+///
+/// A `force=true` switch at the handler layer (MCP / CLI / HTTP)
+/// bypasses this check entirely — see `src/mcp/tools/store.rs` and
+/// `src/handlers/http.rs::create_memory`.
+///
+/// Returns:
+/// * `Ok(None)` — no conflict detected; the caller may proceed with
+///   the insert.
+/// * `Ok(Some(ProactiveConflict))` — at least one candidate triggered
+///   the near-duplicate-with-differing-content guard; the caller
+///   should refuse the insert (and return an error envelope naming
+///   `existing_id`) unless `force=true` was set.
+///
+/// # Errors
+///
+/// Bubbles rusqlite errors from the candidate-pool SELECT. The cosine
+/// pass itself is in-memory and infallible (mismatched-dim candidates
+/// are skipped with a tracing warn, mirroring `check_duplicate`).
+pub fn proactive_conflict_check(
+    conn: &Connection,
+    mem: &Memory,
+    query_embedding: &[f32],
+) -> Result<Option<ProactiveConflict>> {
+    if query_embedding.is_empty() {
+        return Ok(None);
+    }
+    let now = Utc::now().to_rfc3339();
+
+    // Pull (id, title, content, embedding) for the live, in-namespace
+    // pool. We restrict to the same namespace as the incoming write
+    // because cross-namespace "contradictions" are not a substrate
+    // concept (namespaces are deliberately isolated scopes); the
+    // namespace-scoped check matches the `find_contradictions` /
+    // `find_by_title_namespace` semantics already used by the
+    // `OnConflict::Error` branch of `insert_with_conflict`.
+    let mut stmt = conn.prepare(
+        "SELECT id, title, content, embedding FROM memories
+         WHERE embedding IS NOT NULL
+           AND (expires_at IS NULL OR expires_at > ?1)
+           AND namespace = ?2",
+    )?;
+    let rows: Vec<(String, String, String, Vec<u8>)> = stmt
+        .query_map(params![now, &mem.namespace], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    // Score every candidate and keep the top-K by cosine.
+    let mut scored: Vec<(f32, String, String, String)> = Vec::with_capacity(rows.len());
+    for (id, title, content, blob) in rows {
+        if blob.is_empty() {
+            continue;
+        }
+        // Skip self (same id) — happens when a re-store reuses the
+        // existing memory id (NHI replay path).
+        if id == mem.id {
+            continue;
+        }
+        let candidate = match crate::embeddings::decode_embedding_blob(&blob) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    memory_id = %id,
+                    blob_len = blob.len(),
+                    error = %e,
+                    "proactive_conflict_check: skipping candidate with malformed embedding"
+                );
+                continue;
+            }
+        };
+        if candidate.len() != query_embedding.len() {
+            tracing::warn!(
+                memory_id = %id,
+                expected = query_embedding.len(),
+                got = candidate.len(),
+                "proactive_conflict_check: skipping candidate with dimension mismatch"
+            );
+            continue;
+        }
+        let sim = crate::embeddings::Embedder::cosine_similarity(query_embedding, &candidate);
+        scored.push((sim, id, title, content));
+    }
+    // Sort descending by similarity so we visit the strongest matches
+    // first; bail at the top-K cap.
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    for (sim, id, title, content) in scored.into_iter().take(PROACTIVE_CONFLICT_TOP_K) {
+        if sim < PROACTIVE_CONFLICT_SIM_THRESHOLD {
+            // The top-K cap is sorted descending — once we drop below
+            // the threshold we can't find any conflicts in the tail.
+            break;
+        }
+        // Deterministic textual contradiction signal: the candidate
+        // is near-duplicate (≥ 0.95 cosine) AND its content body
+        // differs from the incoming write's content. Same-content
+        // near-duplicates are not contradictions; they are the upsert
+        // happy-path that the SQL `ON CONFLICT(title, namespace)`
+        // already handles.
+        if content != mem.content {
+            return Ok(Some(ProactiveConflict {
+                existing_id: id,
+                existing_title: title,
+                similarity: sim,
+                reason: "near_duplicate_with_differing_content",
+            }));
+        }
+    }
+    Ok(None)
+}
+
 /// v0.7.0 F18 — exact-match-aware nearest-neighbor duplicate check.
 ///
 /// Wraps [`check_duplicate`] with a SHA-256 short-circuit on the raw
