@@ -423,6 +423,33 @@ pub struct Capabilities {
     pub memory_kinds: Vec<String>,
 }
 
+/// v0.7.0 Gap 4 (#887) — the three thresholds powering the
+/// `ConfidenceTier` enum. `confirmed` and `likely` are inclusive
+/// lower bounds; `ambiguous` is the implicit floor (everything below
+/// `likely`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct ConfidenceTierThresholds {
+    pub confirmed: f64,
+    pub likely: f64,
+    pub ambiguous: f64,
+}
+
+impl Default for ConfidenceTierThresholds {
+    fn default() -> Self {
+        // Mirrors the constants on `crate::models::ConfidenceTier`.
+        // Cannot reference them directly here without inducing a
+        // semantic cycle through `confidence::DEFAULT_HALF_LIFE_DAYS`
+        // already imported in this module; the
+        // `confidence_tier_thresholds_match_model_constants` test
+        // below pins the agreement at build time.
+        Self {
+            confirmed: 0.95,
+            likely: 0.7,
+            ambiguous: 0.0,
+        }
+    }
+}
+
 /// Live recall-mode tag (P1 honesty patch). Reflects the *runtime*
 /// state of the embedder + LLM, not the configured tier.
 ///
@@ -1396,6 +1423,15 @@ pub struct CapabilityConfidenceCalibration {
     /// Default freshness-decay half-life (days). 30 in v0.7.0; tunable
     /// per namespace via the `confidence_decay_half_life_days` policy.
     pub default_half_life_days: f64,
+    /// v0.7.0 Gap 4 (#887) — derived-tier thresholds. MCP callers
+    /// reading this surface know how the substrate buckets the
+    /// `confidence` real into `confirmed` / `likely` / `ambiguous`
+    /// without re-deriving the breakpoints. Stable; bumping is a
+    /// wire-level break (see [`crate::models::ConfidenceTier`]).
+    /// `#[serde(default)]` keeps pre-Gap-4 capability consumers
+    /// reading newer payloads from breaking.
+    #[serde(default)]
+    pub tier_thresholds: ConfidenceTierThresholds,
 }
 
 impl CapabilityConfidenceCalibration {
@@ -1413,6 +1449,7 @@ impl CapabilityConfidenceCalibration {
             calibration_tool: "implemented".to_string(),
             signals_schema: "v1".to_string(),
             default_half_life_days: crate::confidence::DEFAULT_HALF_LIFE_DAYS,
+            tier_thresholds: ConfidenceTierThresholds::default(),
         }
     }
 }
@@ -5535,5 +5572,43 @@ legacy_scoring = false
             kinds,
             vec!["observation".to_string(), "reflection".to_string()]
         );
+    }
+
+    /// v0.7.0 Gap 4 (#887) — pin the capabilities-surface thresholds
+    /// to the `ConfidenceTier` model constants so a future
+    /// re-tuning bumps BOTH in lockstep (or the build breaks).
+    #[test]
+    fn confidence_tier_thresholds_match_model_constants() {
+        let defaults = ConfidenceTierThresholds::default();
+        assert!(
+            (defaults.confirmed - crate::models::ConfidenceTier::CONFIRMED_MIN).abs()
+                < f64::EPSILON,
+            "ConfidenceTierThresholds.confirmed must match ConfidenceTier::CONFIRMED_MIN"
+        );
+        assert!(
+            (defaults.likely - crate::models::ConfidenceTier::LIKELY_MIN).abs() < f64::EPSILON,
+            "ConfidenceTierThresholds.likely must match ConfidenceTier::LIKELY_MIN"
+        );
+        // Ambiguous is the implicit floor — pin it to zero so the
+        // wire shape is fully self-describing.
+        assert!(
+            (defaults.ambiguous - 0.0).abs() < f64::EPSILON,
+            "ambiguous floor is fixed at 0.0"
+        );
+    }
+
+    /// v0.7.0 Gap 4 (#887) — every `TierConfig::capabilities()` call
+    /// must surface the calibration block so MCP capability readers
+    /// can rely on the field being present.
+    #[test]
+    fn capability_confidence_calibration_carries_tier_thresholds() {
+        // `CapabilityConfidenceCalibration::current()` (the
+        // capabilities v3 builder) surfaces the Gap 4 thresholds so
+        // MCP capability readers can filter without re-deriving the
+        // breakpoints.
+        let surface = CapabilityConfidenceCalibration::current();
+        assert!((surface.tier_thresholds.confirmed - 0.95).abs() < f64::EPSILON);
+        assert!((surface.tier_thresholds.likely - 0.7).abs() < f64::EPSILON);
+        assert!((surface.tier_thresholds.ambiguous - 0.0).abs() < f64::EPSILON);
     }
 }
