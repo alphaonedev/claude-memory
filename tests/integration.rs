@@ -7593,17 +7593,36 @@ fn test_budget_mcp_tool_schema_and_response() {
         .iter()
         .find(|t| t["name"] == "memory_recall")
         .unwrap();
-    // v0.7 C4 — `budget_tokens` is an OPTIONAL param and is hidden
-    // from the default `tools/list` payload (verbose=false). The
-    // contract changed from "must be advertised" to "must NOT be
-    // advertised by default; runtime call still works". Verbose
-    // discovery is exercised below via memory_capabilities.
+    // v0.7 C4 + #859 — `budget_tokens` is an OPTIONAL param. **Pre-#859**
+    // the C4 trim dropped every optional from the default `tools/list`
+    // payload, hiding the call surface from MCP clients. **Post-#859**
+    // every property entry is preserved on the wire (with per-property
+    // `description` prose stripped) so NHI agents can DISCOVER the
+    // call surface from `tools/list` directly. The runtime call still
+    // works either way — this assertion just pins the wire shape.
+    let recall_props = recall_tool["inputSchema"]["properties"]
+        .as_object()
+        .expect("memory_recall must declare properties");
     assert!(
-        recall_tool["inputSchema"]["properties"]
-            .get("budget_tokens")
-            .is_none(),
-        "v0.7 C4: memory_recall must NOT advertise optional `budget_tokens` in the \
-         default tools/list payload. Pass verbose=true to memory_capabilities to opt in."
+        recall_props.contains_key("budget_tokens"),
+        "#859: memory_recall.inputSchema.properties must expose `budget_tokens` \
+         on the default tools/list payload for client-side discovery."
+    );
+    // Per-property prose is stripped on the wire (verbose path keeps it).
+    let budget_tokens = recall_props
+        .get("budget_tokens")
+        .and_then(serde_json::Value::as_object)
+        .unwrap();
+    assert!(
+        !budget_tokens.contains_key("description"),
+        "#859: per-property `description` prose must be stripped on the wire"
+    );
+    // Structural metadata stays so clients can construct valid args.
+    assert_eq!(
+        budget_tokens
+            .get("type")
+            .and_then(serde_json::Value::as_str),
+        Some("integer")
     );
     // The required param `context` survives the trim.
     assert!(

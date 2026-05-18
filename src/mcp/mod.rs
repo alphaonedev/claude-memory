@@ -35,7 +35,14 @@ pub(super) static SHARED_PERMISSION_RULES_GUARD: std::sync::Mutex<()> = std::syn
 // (handlers.rs, sizes.rs, main.rs, etc.) continue to resolve them without
 // any call-site changes. Items that were `pub` in the original mcp.rs stay
 // `pub`; items that were `pub(crate)` stay `pub(crate)`.
-pub(crate) use registry::{families_overview, strip_docs_from_tools, trim_optional_params};
+pub(crate) use registry::families_overview;
+// #859 — `trim_optional_params` is no longer called from outside the
+// registry module on the production path (the wire-shape composition
+// lives entirely inside `tool_definitions_for_profile`). The in-tree
+// tests still exercise it directly, so the re-export is gated to
+// `#[cfg(test)]`. `strip_docs_from_tools` is fully internal.
+#[cfg(test)]
+pub(crate) use registry::trim_optional_params;
 pub use registry::{
     handle_capabilities_family, tool_definitions, tool_definitions_for_profile,
     tool_definitions_for_profile_verbose,
@@ -2219,16 +2226,23 @@ mod tests {
         assert!(err.contains("must not be empty"));
     }
 
-    // ---- v0.7 C4 — optional-param trim acceptance gates ----
+    // ---- v0.7 C4 — wire-form schema invariants (post-#859 update) ----
 
     /// `tools/list` payload (the default `tool_definitions_for_profile`
-    /// path) must hide every optional param except the C4 keep-list.
-    /// Concrete spot-check: `memory_store` keeps `title`, `content` (both
-    /// required) plus `namespace` (kept), and DROPS `confidence`,
-    /// `priority`, `tier`, `metadata`, `agent_id`, `source`, `scope`,
-    /// `tags`, `on_conflict`.
+    /// path) must EXPOSE every optional param so NHI agents can
+    /// discover the call surface. Per-property `description` prose
+    /// is stripped on the wire (the budget concession that lets
+    /// discovery fit the token ceiling); the structural metadata
+    /// (`type`, `enum`, `minimum`, `maximum`, `default`) survives so
+    /// clients can construct valid argument objects.
+    ///
+    /// **Pre-#859 (historical):** this test asserted the opposite —
+    /// that `confidence`, `priority`, `tier`, … were STRIPPED from
+    /// the wire. That trim broke NHI runtime discovery and was
+    /// reverted by #859. The test is renamed + inverted to lock the
+    /// new wire shape.
     #[test]
-    fn tool_definitions_for_profile_strips_optional_params_by_default() {
+    fn tool_definitions_for_profile_preserves_optional_params_post_859() {
         let p = crate::profile::Profile::full();
         let defs = tool_definitions_for_profile(&p);
         let store = defs["tools"]
@@ -2238,15 +2252,11 @@ mod tests {
             .find(|t| t["name"] == "memory_store")
             .expect("memory_store must be present in full profile");
         let props = store["inputSchema"]["properties"].as_object().unwrap();
-        // Required + keep-list survives.
-        assert!(props.contains_key("title"), "title (required) dropped");
-        assert!(props.contains_key("content"), "content (required) dropped");
-        assert!(
-            props.contains_key("namespace"),
-            "namespace (C4 keep-list) dropped"
-        );
-        // Long-tail optionals must be gone.
-        for stripped in [
+        // Required AND optional now both survive on the wire.
+        for kept in [
+            "title",
+            "content",
+            "namespace",
             "confidence",
             "priority",
             "tier",
@@ -2256,12 +2266,29 @@ mod tests {
             "scope",
             "tags",
             "on_conflict",
+            "kind",
         ] {
             assert!(
-                !props.contains_key(stripped),
-                "optional param `{stripped}` should have been stripped from default tools/list"
+                props.contains_key(kept),
+                "#859: wire schema must preserve property `{kept}` for client-side discovery"
             );
         }
+        // But the prose stays stripped.
+        let confidence = props
+            .get("confidence")
+            .and_then(serde_json::Value::as_object)
+            .expect("confidence property must be an object");
+        assert!(
+            !confidence.contains_key("description"),
+            "#859: per-property `description` prose must be stripped on the wire"
+        );
+        // Structural metadata stays.
+        assert_eq!(
+            confidence.get("type").and_then(|v| v.as_str()),
+            Some("number")
+        );
+        assert!(confidence.contains_key("minimum"));
+        assert!(confidence.contains_key("maximum"));
     }
 
     /// `tool_definitions_for_profile_verbose` keeps every optional —
@@ -2300,13 +2327,18 @@ mod tests {
     }
 
     /// The `verbose=true` family path must round-trip every optional;
-    /// `verbose=false` (the default for `include_schema=true`) must
-    /// strip them. Anchors the wire-shape contract documented on
+    /// `verbose=false` (the default for `include_schema=true`) is the
+    /// wire-form schema. Per issue #859 (rev v0.7.0), the wire form
+    /// PRESERVES every property entry so MCP clients can discover the
+    /// long-tail optionals (`confidence`, `priority`, …) — it only
+    /// strips the per-property `description` prose and the top-level
+    /// `docs` field. Anchors the wire-shape contract documented on
     /// [`handle_capabilities_family`].
     #[test]
     fn handle_capabilities_family_verbose_toggles_optional_params() {
         let p = crate::profile::Profile::full();
-        // verbose=false → trimmed schema for memory_store
+        // verbose=false → trimmed wire schema: properties preserved,
+        // per-property `description` prose stripped.
         let trimmed =
             handle_capabilities_family("core", true, false, &p, None, None, None).unwrap();
         assert_eq!(trimmed["verbose"], false);
@@ -2319,12 +2351,47 @@ mod tests {
         let props_trimmed = store_trimmed["inputSchema"]["properties"]
             .as_object()
             .unwrap();
-        assert!(!props_trimmed.contains_key("confidence"));
-        assert!(!props_trimmed.contains_key("priority"));
-        assert!(props_trimmed.contains_key("namespace"));
-        assert!(props_trimmed.contains_key("title"));
+        // #859 — every optional must remain so NHI agents can discover
+        // the surface from `tools/list` directly.
+        for kept in [
+            "title",
+            "content",
+            "namespace",
+            "confidence",
+            "priority",
+            "tier",
+            "metadata",
+            "agent_id",
+            "source",
+            "scope",
+            "tags",
+            "on_conflict",
+            "kind",
+        ] {
+            assert!(
+                props_trimmed.contains_key(kept),
+                "wire schema (verbose=false) must preserve property `{kept}` (#859)"
+            );
+        }
+        // But the per-property prose is dropped on the wire path.
+        let confidence_prop = props_trimmed
+            .get("confidence")
+            .and_then(serde_json::Value::as_object)
+            .expect("confidence property must be an object");
+        assert!(
+            !confidence_prop.contains_key("description"),
+            "wire schema must drop per-property `description` prose (#859)"
+        );
+        // Structural metadata stays — clients need it to construct
+        // valid args.
+        assert_eq!(
+            confidence_prop.get("type").and_then(|v| v.as_str()),
+            Some("number")
+        );
+        assert!(confidence_prop.contains_key("minimum"));
+        assert!(confidence_prop.contains_key("maximum"));
 
-        // verbose=true → full schema
+        // verbose=true → full schema (prose preserved).
         let verbose = handle_capabilities_family("core", true, true, &p, None, None, None).unwrap();
         assert_eq!(verbose["verbose"], true);
         let store_verbose = verbose["tools"]
@@ -2342,15 +2409,17 @@ mod tests {
         assert!(props_verbose.contains_key("agent_id"));
     }
 
-    /// `trim_optional_params` reports a positive count and is
-    /// idempotent — re-running on an already-trimmed value is a no-op.
+    /// #859 (rev) — `trim_optional_params` strips per-property
+    /// `description` text from every property entry (not the property
+    /// entry itself). Reports a positive count and is idempotent — a
+    /// second pass on an already-stripped schema is a no-op.
     #[test]
     fn trim_optional_params_is_idempotent() {
         let mut defs = tool_definitions();
         let stripped_first = trim_optional_params(&mut defs);
         assert!(
             stripped_first > 0,
-            "first trim should strip a positive number of optionals"
+            "first trim should strip a positive number of per-property descriptions"
         );
         let stripped_second = trim_optional_params(&mut defs);
         assert_eq!(
@@ -2359,23 +2428,15 @@ mod tests {
         );
     }
 
-    /// `tools/list` (full profile, trimmed) must be materially smaller
-    /// than the verbose payload. We assert >= 28% size reduction
-    /// because the long-tail optionals carry the bulk of the per-tool
-    /// description bytes (defaults, enums, prose). If this regresses,
-    /// the keep-list grew or the trimmer broke.
-    ///
-    /// v0.7.0 L2 cascade note: the threshold was tightened to 30% in
-    /// early v0.7; the L2-3 / L2-6 / L2-7 additions skew the
-    /// required-vs-optional ratio toward required params (the new
-    /// skill/notification tools are mostly mandatory ids), bringing
-    /// the trim saving down to ~29.7%. The substantive trim is still
-    /// healthy (>5kB on the full profile); 28% pins the gate just
-    /// below the new measurement so a regression in the trimmer itself
-    /// would still trip it. Re-tighten to 30% once enough additional
-    /// tools land that the optionals come back into balance.
+    /// `tools/list` (full profile, trimmed wire) must be materially
+    /// smaller than the verbose payload. Pre-#859 the trim dropped
+    /// entire optional property entries which gave a ~30% byte saving;
+    /// post-#859 the trim preserves properties (keeping discovery) and
+    /// only drops per-property `description` prose + the top-level
+    /// `docs` field, which still saves a substantive fraction because
+    /// the prose dominates the per-property byte cost.
     #[test]
-    fn c4_trim_shrinks_full_profile_payload_by_at_least_28_percent() {
+    fn c4_trim_shrinks_full_profile_payload_meaningfully() {
         let p = crate::profile::Profile::full();
         let trimmed = tool_definitions_for_profile(&p);
         let verbose = tool_definitions_for_profile_verbose(&p);
@@ -2386,10 +2447,21 @@ mod tests {
             "trimmed ({trimmed_bytes}B) must be smaller than verbose ({verbose_bytes}B)"
         );
         let saved_pct = (verbose_bytes - trimmed_bytes) as f64 / verbose_bytes as f64 * 100.0;
+        // Post-#859 floor — `tool_definitions_for_profile_verbose`
+        // already strips `docs` (via `strip_docs_from_tools`) and the
+        // recursive per-property description walker, so the only
+        // additional savings the trimmed path delivers is
+        // `wire_compact_descriptions` truncating each tool's
+        // top-level `description` to the first sentence (typically
+        // ~28 chars). That's ~5-10% of the verbose total; the 5%
+        // gate flags a regression in the wire compactor itself. The
+        // absolute token-budget ceiling is pinned separately by
+        // `tests/c2_tool_docs_field.rs`.
         assert!(
-            saved_pct >= 28.0,
-            "C4 trim should save >=28% of full-profile bytes; got {saved_pct:.1}% \
-             (verbose={verbose_bytes}B, trimmed={trimmed_bytes}B)"
+            saved_pct >= 5.0,
+            "trim should save >=5% of full-profile bytes via top-level description \
+             compaction; got {saved_pct:.1}% (verbose={verbose_bytes}B, \
+             trimmed={trimmed_bytes}B) — `wire_compact_descriptions` may be broken"
         );
     }
 
