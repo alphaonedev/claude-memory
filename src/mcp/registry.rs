@@ -559,7 +559,7 @@ pub fn tool_definitions() -> Value {
                         "scope": {"type": "string", "enum": ["private", "team", "unit", "org", "collective"], "description": "Task 1.5 visibility. Default private."},
                         "on_conflict": {"type": "string", "enum": ["error", "merge", "version"], "description": "P2/G6 collision policy on (title, namespace). error=CONFLICT (v2 default), merge=update in place (v1 default), version=append '(N)' suffix."},
                         "kind": {"type": "string", "enum": ["observation", "reflection", "persona", "concept", "entity", "claim", "relation", "event", "conversation", "decision"], "description": "Form 6 (#759) memory-kind. Default observation."},
-                        "force": {"type": "boolean", "default": false, "description": "#519 — bypass proactive contradiction detection. By default the write refuses with CONFLICT when a near-duplicate (>=0.95 cosine) has differing content; set force=true to insert anyway."}
+                        "force": {"type": "boolean", "default": false, "description": "#519 bypass proactive contradiction detection (>=0.95 cosine + contradiction → CONFLICT unless force=true)."}
                     },
                     "required": ["title", "content"]
                 }
@@ -567,7 +567,7 @@ pub fn tool_definitions() -> Value {
             {
                 "name": "memory_recall",
                 "description": "Recall memories relevant to a context (ranked).",
-                "docs": "Fuzzy OR recall ranked by relevance + priority + access + tier. budget_tokens (P6/R1): cap cumulative cl100k content tokens (always returns >=1). context_tokens: bias query embedding 70/30 (v0.6.0.0). session_default (#518): splice [agents.defaults.recall_scope]. session_id (#518): per-session +0.05 recency boost for recently-accessed memories. include_archived (WT-1-E): atomised sources hidden by default. Default format toon_compact (~79% smaller).",
+                "docs": "Fuzzy OR recall ranked by relevance + priority + access + tier. Optional: budget_tokens (cl100k cap), context_tokens (query-embed bias), session_id (+0.05 recency boost per #518), include_archived, kinds filter. Default format toon_compact (~79% smaller).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -581,7 +581,7 @@ pub fn tool_definitions() -> Value {
                         "budget_tokens": {"type": "integer", "minimum": 0, "description": "P6/R1 cumulative content-token cap (cl100k). 0=empty. Top result returned even if oversized (meta.budget_overflow=true)."},
                         "context_tokens": {"type": "array", "items": {"type": "string"}, "description": "Recent conversation tokens; biases query embedding 70/30 (v0.6.0.0)."},
                         "session_default": {"type": "boolean", "default": false, "description": "Splice [agents.defaults.recall_scope] for unset fields. Resolution: explicit > recall_scope > defaults."},
-                        "session_id": {"type": "string", "description": "#518 — per-session id. When set, the rerank post-step adds +0.05 to any candidate already in this session's recently-accessed ring (cap 50 ids, FIFO eviction); recall results are appended to the ring so subsequent recalls in the same session reuse the new context. Empty/omitted = no boost (pre-#518 semantics)."},
+                        "session_id": {"type": "string", "description": "#518 session id; +0.05 rerank boost for candidates in session's recently-accessed ring (cap 50, FIFO)."},
                         "include_archived": {"type": "boolean", "default": false, "description": "WT-1-E: include atomised sources alongside atoms."},
                         "has_citations": {"type": "boolean", "default": false, "description": "Form 4 (#757): require non-empty citations array."},
                         "source_uri_prefix": {"type": "string", "description": "Form 4 (#757): restrict by source_uri prefix (e.g. 'doc:', 'uri:https://')."},
@@ -1068,7 +1068,7 @@ pub fn tool_definitions() -> Value {
             {
                 "name": "memory_capabilities",
                 "description": "Discover runtime capabilities; family=<name> drills in.",
-                "docs": "Caps-v3: tier, profile, summary, callable_now, agent_permitted_families, harness detection. family + include_schema enumerates one family. C2/C4: verbose=true restores `docs` + full inputSchema (default trim keeps required + namespace/format only).\n\n## Families vs Memory Kinds (issue #864)\n\n`family` (a.k.a. MCP tool family) and `memory_kind` are TWO DIFFERENT taxonomies that share the word \"family\" in the codebase. Do not confuse them:\n\n- **MCP tool family** (this parameter) — 8 groups that bucket the 70+ MCP tools for discovery / profile filtering: core, lifecycle, graph, governance, power, meta, archive, other. Drives `memory_load_family`, `memory_smart_load`, `--profile`, and the `family` field on every tool definition.\n- **memory_kind** — the per-row content taxonomy stored on `memories.memory_kind`: Observation, Reflection, Plan, Decision, Skill, Persona, Entity, etc. Drives content-classification handlers (atomise, persona, curator) and the substrate's typed-memory invariants.\n\nA memory carrying `memory_kind = Reflection` is unrelated to the `meta` tool family; a tool in the `governance` tool family operates on memories of ANY `memory_kind`.",
+                "docs": "Caps-v3: tier, profile, summary, callable_now, agent_permitted_families, harness detection. family+include_schema drills one family. verbose=true restores full schema. NOTE per #864: `family` here = MCP tool-family (8 groups: core/lifecycle/graph/governance/power/meta/archive/other), NOT memory_kind taxonomy.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
