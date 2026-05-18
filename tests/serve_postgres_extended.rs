@@ -127,14 +127,17 @@ async fn route_gate_returns_501_for_unsupported_endpoint() {
     let (base, shutdown, handle) = spawn_daemon(&url).await;
     let client = reqwest::Client::new();
 
-    // /api/v1/forget is not on the supported list; expect 501 with the
-    // structured envelope.
+    // Pick an endpoint that is routed but NOT on
+    // `postgres_endpoint_supported`. /api/v1/forget was the original
+    // sentinel here but has since been migrated (Wave-3 Continuation
+    // 3); GET /api/v1/skill/list is still un-migrated on postgres so
+    // the gate's 501 contract surfaces there. If a future commit
+    // migrates skill/list, swap this for another unmigrated path.
     let resp = client
-        .post(format!("{base}/api/v1/forget"))
-        .json(&json!({"pattern": "anything"}))
+        .get(format!("{base}/api/v1/skill/list"))
         .send()
         .await
-        .expect("forget POST");
+        .expect("skill/list GET");
     assert_eq!(
         resp.status(),
         reqwest::StatusCode::NOT_IMPLEMENTED,
@@ -169,7 +172,9 @@ async fn agents_round_trip_via_sal() {
         .post(format!("{base}/api/v1/agents"))
         .json(&json!({
             "agent_id": agent_id,
-            "agent_type": "ai",
+            // validate_agent_type requires either the closed VALID_AGENT_TYPES
+            // set OR the `ai:<name>` open form. Bare "ai" is rejected.
+            "agent_type": "ai:claude-opus-4.7",
             "capabilities": ["recall", "store"]
         }))
         .send()
@@ -470,13 +475,21 @@ async fn taxonomy_round_trip_via_sal() {
         .json()
         .await
         .expect("taxonomy body");
-    let tree = tax["tree"].as_array().expect("tree array");
+    // Response shape is `{"tree": {"children": [...], "count": N,
+    // "namespace": "", "subtree_count": M}, "total_count": …,
+    // "storage_backend": "postgres"}`. The `tree` field is the ROOT
+    // node, not an array — its `children` array holds the top-level
+    // namespaces. Original test asserted `tax["tree"].as_array()` which
+    // doesn't match the actual envelope.
+    let tree = tax["tree"]["children"]
+        .as_array()
+        .expect("tree.children array");
     let total = tax["total_count"].as_u64().expect("total_count");
     assert!(total >= 3);
     let row = tree
         .iter()
         .find(|n| n["namespace"].as_str() == Some(&unique_ns))
-        .expect("our namespace appears in tree");
+        .expect("our namespace appears in tree.children");
     assert!(row["count"].as_u64().unwrap_or(0) >= 3);
     assert_eq!(tax["storage_backend"], "postgres");
 

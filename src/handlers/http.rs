@@ -1139,6 +1139,73 @@ pub async fn register_agent(
             .into_response();
     }
 
+    // v0.7.0 Wave-3 Continuation 3 — postgres-backed daemons route the
+    // agent-registration write through `app.store` so the row lands in
+    // the same postgres `_agents` namespace that `list_agents` projects
+    // from. Pre-fix this handler wrote through `db::register_agent`
+    // against the sqlite scratch `app.db`, leaving postgres-backed
+    // daemons with POST→sqlite and GET→postgres asymmetry — registered
+    // agents never appeared in the list. Mirrors the import_memories +
+    // bulk_create dual-backend dispatch pattern. Federation fanout
+    // remains sqlite-only (broadcast_store_quorum uses sqlite-coupled
+    // fed-tracker state).
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let ctx = crate::store::CallerContext::for_agent("daemon");
+        let now = Utc::now().to_rfc3339();
+        let mut metadata = json!({
+            "agent_id": &body.agent_id,
+            "agent_type": &body.agent_type,
+        });
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert(
+                "capabilities".to_string(),
+                serde_json::to_value(&capabilities).unwrap_or_else(|_| json!([])),
+            );
+        }
+        let agent_mem = Memory {
+            id: Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: "_agents".to_string(),
+            title: format!("agent:{}", &body.agent_id),
+            content: format!("agent registration for {}", &body.agent_id),
+            tags: vec!["_agent_registration".to_string()],
+            priority: 5,
+            confidence: 1.0,
+            source: "api".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata,
+            reflection_depth: 0,
+            memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
+        };
+        return match app.store.store(&ctx, &agent_mem).await {
+            Ok(id) => (
+                StatusCode::CREATED,
+                Json(json!({
+                    "id": id,
+                    "agent_id": body.agent_id,
+                    "agent_type": body.agent_type,
+                    "capabilities": capabilities,
+                    "storage_backend": "postgres",
+                })),
+            )
+                .into_response(),
+            Err(e) => store_err_to_response(e),
+        };
+    }
+
     let lock = app.db.lock().await;
     let register_result =
         db::register_agent(&lock.0, &body.agent_id, &body.agent_type, &capabilities);
