@@ -7265,15 +7265,18 @@ impl MemoryStore for PostgresStore {
         pending_id: &str,
         approver_agent_id: &str,
     ) -> StoreResult<super::ApproveOutcome> {
-        // Load the pending row + assert state.
-        let pa = match self.get_pending(ctx, pending_id).await? {
-            Some(p) => p,
-            None => {
-                return Ok(super::ApproveOutcome::Rejected(format!(
-                    "pending action not found: {pending_id}"
-                )));
-            }
-        };
+        // Load the pending row + assert state. Missing pending_id surfaces
+        // as StoreError::NotFound so the HTTP layer maps it to 404 (the
+        // contract the sqlite path provides via db::approve_with_approver_type's
+        // ApproveOutcome::NotFound variant). Returning Rejected here would
+        // collapse "missing row" into the "policy refused" 403 bucket, which
+        // hides a real distinction from operators.
+        let pa = self
+            .get_pending(ctx, pending_id)
+            .await?
+            .ok_or_else(|| StoreError::NotFound {
+                id: pending_id.to_string(),
+            })?;
         if pa.status != "pending" {
             return Ok(super::ApproveOutcome::Rejected(format!(
                 "already decided: status={}",
