@@ -427,6 +427,45 @@ If the agent's report does NOT include the close-comment URL,
 the task is not done. The orchestrator MUST refuse to mark
 the task complete until the URL is produced.
 
+**Enforceable Orchestrator Safeguards (canonical memory
+`a1cc142d-053a-49ab-83bd-1a99992fa93e`, namespace
+`_v070_orchestrator_safeguards`, set as the namespace
+standard).** Seven HARD-BLOCK checks the orchestrator MUST
+run on every agent return BEFORE marking the task complete:
+
+- **C1** Banned-phrase scan ("no network access", "operator
+  should close", "DEFER-TO-V080", "v0.7.1-blocker",
+  "I cannot", "I lack", "out of scope" for assigned work, etc.)
+- **C2** Close-comment URL presence (mandatory for any GH
+  issue closure scope)
+- **C3** Commit SHA verifiability (every "I committed X"
+  must cite a SHA that `git show <SHA> --stat` resolves)
+- **C4** Test-evidence verifiability (every "tests pass"
+  must cite exact `cargo test --test <name>` + result line)
+- **C5** Six-step verification for any incapacity claim
+  (command attempted x2, exact errors logged, transient vs
+  structural, earlier-session evidence, asked-orchestrator)
+- **C6** Per-issue end-to-end protocol (fix + test + 4 gates
+  + commit + gh close + URL in report + ai-memory updated)
+- **C7** Discrepancy detection (report claims vs observable
+  state via git log / gh issue list / cargo test / LOC counts)
+
+On any HARD-BLOCK fail: orchestrator (1) verifies the claim
+independently, (2) completes the work the agent shirked,
+(3) files an `agent-quality-violation` GH issue against the
+agent, (4) appends an entry to the violations log at
+`_v070_orchestrator_safeguards/violations` (memory
+`3b5378e4-c709-40be-900d-8b09cdb05833`), (5) does NOT mark
+the task complete until the discrepancy is reconciled.
+
+Violations log enforcement:
+- The first violation per agent_id is logged + remediated.
+- The second violation per agent_id triggers a fresh-base
+  re-dispatch with the orchestrator citing the prior violation.
+- Three violations per agent_id within one session triggers a
+  HALT + operator-decision-required gate before the agent type
+  is dispatched again.
+
 **Testing-loop discipline (operator addendum 2026-05-18 pm).**
 During ANY testing session (NHI playbook, A2A campaigns,
 integration tests, chaos probes, security audits, manual smoke
