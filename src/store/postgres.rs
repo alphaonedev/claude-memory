@@ -6478,61 +6478,68 @@ impl MemoryStore for PostgresStore {
         // (1h short / 1d mid), auto-promote mid→long at 5 accesses,
         // increment priority every 10 accesses.
         //
-        // We run all three updates inside a single transaction so an
-        // operator-visible recall stays consistent — the access_count
-        // increment, the tier promotion, and the priority bump must
-        // either all land or all roll back.
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| to_store_err("touch_after_recall begin", e))?;
-
+        // Wave-2 Tier-A4 (#852) — collapsed three sequential UPDATEs
+        // into a single statement with CASE expressions. The previous
+        // implementation issued one prepare+execute roundtrip per
+        // operation (3 prepares, 3 executes, plus an explicit
+        // transaction); the single-UPDATE form removes the per-call
+        // tx framing (statement-level atomicity covers it) and brings
+        // the wire cost to one parse + one bind + one execute. The
+        // SQL preserves the original semantics exactly:
+        //
+        //   * access_count = LEAST(access_count + 1, 1_000_000)
+        //   * last_accessed_at = NOW()
+        //   * expires_at — sliding-window replacement per tier
+        //     (1h short / 1d mid, cleared when a mid→long promotion
+        //     fires this round), see memory 830 (pm-v33 fix)
+        //   * tier — auto-promote mid → long once access_count + 1
+        //     would land at or above PROMOTION_THRESHOLD (5)
+        //   * updated_at — bumped only when the tier flip actually
+        //     fires, matching the original two-statement contract
+        //   * priority — bumped by 1 (capped at 10) every 10th
+        //     touch, evaluated against the post-increment / capped
+        //     access_count to remain bit-identical with the original
+        //     two-statement sequence even at the 1_000_000 ceiling
+        //
+        // All CASE predicates read the pre-UPDATE row values per the
+        // SQL standard (RHS of SET evaluates against the OLD row),
+        // so the `access_count + 1` / `LEAST(...)` arithmetic
+        // mirrors what the original ordered sequence saw.
         sqlx::query(
             "UPDATE memories SET
                 access_count = LEAST(access_count + 1, 1000000),
                 last_accessed_at = NOW(),
                 expires_at = CASE
+                    WHEN tier = 'mid' AND access_count + 1 >= 5 THEN NULL
                     WHEN tier = 'long' THEN expires_at
                     WHEN tier = 'short' AND expires_at IS NOT NULL
                         THEN NOW() + INTERVAL '1 hour'
                     WHEN tier = 'mid' AND expires_at IS NOT NULL
                         THEN NOW() + INTERVAL '1 day'
                     ELSE expires_at
+                END,
+                tier = CASE
+                    WHEN tier = 'mid' AND access_count + 1 >= 5 THEN 'long'
+                    ELSE tier
+                END,
+                updated_at = CASE
+                    WHEN tier = 'mid' AND access_count + 1 >= 5 THEN NOW()
+                    ELSE updated_at
+                END,
+                priority = CASE
+                    WHEN LEAST(access_count + 1, 1000000) > 0
+                         AND LEAST(access_count + 1, 1000000) % 10 = 0
+                         AND priority < 10
+                        THEN LEAST(priority + 1, 10)
+                    ELSE priority
                 END
              WHERE id = ANY($1)",
         )
         .bind(ids)
-        .execute(&mut *tx)
+        .execute(&self.pool)
         .await
-        .map_err(|e| to_store_err("touch_after_recall extend", e))?;
+        .map_err(|e| to_store_err("touch_after_recall", e))?;
 
-        // Auto-promote mid → long at 5 accesses.
-        sqlx::query(
-            "UPDATE memories SET tier = 'long', expires_at = NULL, updated_at = NOW()
-             WHERE id = ANY($1) AND tier = 'mid' AND access_count >= 5",
-        )
-        .bind(ids)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| to_store_err("touch_after_recall promote", e))?;
-
-        // Increment priority every 10 accesses.
-        sqlx::query(
-            "UPDATE memories SET priority = LEAST(priority + 1, 10)
-             WHERE id = ANY($1)
-               AND access_count > 0
-               AND access_count % 10 = 0
-               AND priority < 10",
-        )
-        .bind(ids)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| to_store_err("touch_after_recall priority", e))?;
-
-        tx.commit()
-            .await
-            .map_err(|e| to_store_err("touch_after_recall commit", e))?;
         Ok(())
     }
 
