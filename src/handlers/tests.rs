@@ -4217,8 +4217,9 @@ async fn http_list_subscriptions_empty_returns_zero() {
 
 #[tokio::test]
 async fn http_list_subscriptions_filters_by_agent_id() {
-    // No subscriptions exist yet — filter still works (returns 0).
-    // Confirms the agent_id filter branch executes.
+    // #872 / #874 (security-high/medium, 2026-05-18) — listing is
+    // owner-scoped via the authenticated X-Agent-Id header; the
+    // `?agent_id=` query parameter must match the header or 403.
     let state = test_state();
     let app = Router::new()
         .route(
@@ -4230,6 +4231,7 @@ async fn http_list_subscriptions_filters_by_agent_id() {
         .oneshot(
             axum::http::Request::builder()
                 .uri("/api/v1/subscriptions?agent_id=alice")
+                .header("x-agent-id", "alice")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -11924,6 +11926,9 @@ async fn http_unsubscribe_by_agent_namespace_after_subscribe_returns_removed() {
             axum::http::Request::builder()
                 .uri("/api/v1/subscribe?agent_id=ai:alice&namespace=team/alice")
                 .method("DELETE")
+                // #870 / #874 (security-high/medium) — DELETE is
+                // owner-scoped; authenticated caller comes from header.
+                .header("x-agent-id", "ai:alice")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -11968,6 +11973,10 @@ async fn http_list_subscriptions_returns_subscription_rows() {
         .oneshot(
             axum::http::Request::builder()
                 .uri("/api/v1/subscriptions")
+                // #872 (security-high) — listing is owner-scoped to the
+                // authenticated header; provide it so the seeded
+                // `ai:carol` row is returned.
+                .header("x-agent-id", "ai:carol")
                 .body(Body::empty())
                 .unwrap(),
         )
