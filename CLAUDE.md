@@ -226,6 +226,7 @@ script (Docker / Plan C deployments).
 | 26 | `AI_MEMORY_AUTO_EXPORT_INJECT_PANIC` | bool (`1`) | unset | hooks (post-reflect) | **test-only** | Forces a panic inside `auto_export` to exercise the recovery path. Production deployments MUST leave unset. |
 | 27 | `AI_MEMORY_TEST_POSTGRES_URL` | conn-string | unset | tests (CLI `schema-init`, postgres store) | **test-only** | Points the Postgres backend tests at a live instance. Carries credentials — treat as **secret** when set. |
 | 28 | `AI_MEMORY_TEST_AGE_URL` | conn-string | unset | tests (Apache AGE store) | **test-only** | Same shape as `AI_MEMORY_TEST_POSTGRES_URL` for the AGE-backed graph tests. |
+| 29 | `AI_MEMORY_FED_REQUIRE_SIG` | bool (`1`/`0`) | `1` (v0.7.0 secure default) | federation | config | #791 — when truthy (default), `/sync/push` rejects missing / invalid `X-Memory-Sig` headers with `401 Unauthorized`. Set to `0` to fall back to v0.6.x permissive posture during peer Ed25519-key enrolment. |
 | — | `RUST_LOG` | tracing filter | unset (= `info`) | all | config | Standard `tracing-subscriber` filter (e.g. `RUST_LOG=ai_memory=debug`). Not an `AI_MEMORY_*` var — listed for completeness. |
 
 **Regression tests.** Precedence + secret-classification invariants
@@ -348,8 +349,49 @@ manageability so the codebase lasts for a very long time.
   real defect. File AND fix the docs (or fix the behavior so it
   matches the docs).
 - The phrases "non-blocking", "trend-line gap",
-  "surface-level", "P2/P3 follow-up", and "vN+1 polish" are
-  banned in finding writeups.
+  "surface-level", "P2/P3 follow-up", "vN+1 polish",
+  "DEFER-TO-V080", "WONTFIX", "operator-decision-pending",
+  "address with rationale", "no network access from this
+  worktree", "out of scope for this session" (when scope
+  was actually you-just-haven't-done-it), "operator should
+  close…", "operator should commit…", and "I lack capability
+  X" (without verification) are all BANNED in finding writeups
+  and agent reports.
+
+**Verify-before-claiming + no-operator-handoffs (operator
+addendum 2026-05-18 pm-v3, canonical memory
+`cd8ede94-3376-4837-b570-9d975290ae08`).** Agents are
+forbidden from claiming they lack a capability without first
+verifying that claim, and forbidden from handing off
+completable work to the operator.
+
+Before reporting "I can't do X" / "operator should do X" /
+"no access to X" the agent MUST:
+
+1. Attempt X at least twice with different inputs (transient
+   errors masquerade as capability gaps)
+2. Log the exact command + exact error received
+3. Reason about whether this is a permanent gap or a
+   transient/retry-able failure
+4. Confirm the gap is structural (binary missing, auth
+   missing the entire session, etc.), not flaky
+5. Check whether the same session had the capability earlier
+   (if yes, it's likely environmental, not capability)
+6. Ask the orchestrator before giving up
+
+If you can't check all six boxes, you don't get to claim the
+incapacity. End-to-end completion is the contract: a task isn't
+done when the code lands — it's done when the audit trail
+closes (GitHub issue closed with retest evidence, ai-memory
+updated, commit pushed if push is in scope). Handing the last
+5% to the operator is a violation of this directive.
+
+The orchestrator MUST enforce: if an agent's report contains
+a banned phrase OR an unverified-inability claim, the
+orchestrator MUST (1) verify the claim independently, (2)
+complete the work the agent shirked, (3) surface the
+violation to the operator + record it in the directive's
+violations log.
 
 **Testing-loop discipline (operator addendum 2026-05-18 pm).**
 During ANY testing session (NHI playbook, A2A campaigns,
@@ -445,10 +487,14 @@ re-runs on the Wave-3 post-refactor binary; Lane 5 final sweep is
 post-refactor; Lane 6 can run in parallel with Lane 4; Track E
 captures feed Lane 6 case-study content.
 
-**Provenance.** Live memory `f1dca8fa-6c33-4139-b0b5-389cca45b921`
+**Provenance.** Live memory `cd8ede94-3376-4837-b570-9d975290ae08`
 in namespace `global/policies` is the canonical version of this
-directive (testing-loop addendum 2026-05-18 pm) and supersedes
-`5d703efe-273b-4c84-8f40-ceb97b55d71e` which superseded
+directive (pm-v3 verify-before-claiming + no-operator-handoffs,
+2026-05-18 pm-v3) and supersedes
+`28860423-d12c-4959-bc8b-8fa9a94a33d9` (pm-v2 fix-all-no-deferrals),
+which superseded `f1dca8fa-6c33-4139-b0b5-389cca45b921`
+(testing-loop addendum), which superseded
+`5d703efe-273b-4c84-8f40-ceb97b55d71e`, which superseded
 `71ecce23-611b-4984-962d-d37c4309f261`.
 
 ## v0.7.0 release gate (operator-set 2026-05-17 pm-v5)
