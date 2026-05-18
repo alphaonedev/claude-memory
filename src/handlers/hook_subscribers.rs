@@ -176,7 +176,11 @@ pub async fn notify(
             }
             (StatusCode::CREATED, Json(v)).into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+        // Issue #851: `mcp::handle_notify` returns Result<_, String> where
+        // the inner string can include raw rusqlite text from
+        // db::insert(...).map_err(|e| e.to_string()). Sanitize via the
+        // standard bad_request_opaque helper.
+        Err(e) => super::bad_request_opaque("notify handler error", &e),
     }
 }
 

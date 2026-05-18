@@ -5868,7 +5868,14 @@ pub async fn import_memories(
         let mut pending: Vec<serde_json::Value> = Vec::new();
         for mem in body.memories {
             if let Err(e) = validate::validate_memory(&mem) {
-                errors.push(format!("{}: {}", mem.id, e));
+                // Issue #851: never echo the raw `e` to the wire paired
+                // with the user-supplied id (the combo reflects the
+                // caller's request). Sanitize + log instead.
+                tracing::warn!(
+                    "import_memories(postgres): validate_memory failed for {}: {e}",
+                    mem.id
+                );
+                errors.push(super::sanitize_bulk_row_error(&e.to_string()).to_string());
                 continue;
             }
 
@@ -5923,7 +5930,15 @@ pub async fn import_memories(
 
             match app.store.store(&ctx, &mem).await {
                 Ok(_) => imported += 1,
-                Err(e) => errors.push(format!("{}: {}", mem.id, e)),
+                Err(e) => {
+                    // Issue #851: SAL `store.store` errors can carry raw
+                    // sqlx/sqlite text — sanitize before echoing.
+                    tracing::warn!(
+                        "import_memories(postgres): store.store failed for {}: {e}",
+                        mem.id
+                    );
+                    errors.push(super::sanitize_bulk_row_error(&e.to_string()).to_string());
+                }
             }
         }
         for link in body.links.unwrap_or_default() {
@@ -5948,12 +5963,24 @@ pub async fn import_memories(
     let mut errors = Vec::new();
     for mem in body.memories {
         if let Err(e) = validate::validate_memory(&mem) {
-            errors.push(format!("{}: {}", mem.id, e));
+            // Issue #851: never echo `<id>: <validate error>` paired —
+            // the combo reflects the caller's request and the inner
+            // string can carry validate template detail. Sanitize + log.
+            tracing::warn!(
+                "import_memories: validate_memory failed for {}: {e}",
+                mem.id
+            );
+            errors.push(super::sanitize_bulk_row_error(&e.to_string()).to_string());
             continue;
         }
         match db::insert(&lock.0, &mem) {
             Ok(_) => imported += 1,
-            Err(e) => errors.push(format!("{}: {}", mem.id, e)),
+            Err(e) => {
+                // Issue #851: db::insert errors include raw rusqlite
+                // text (SQL fragments, constraint names). Sanitize.
+                tracing::warn!("import_memories: db::insert failed for {}: {e}", mem.id);
+                errors.push(super::sanitize_bulk_row_error(&e.to_string()).to_string());
+            }
         }
     }
     for link in body.links.unwrap_or_default() {
@@ -6800,7 +6827,12 @@ pub async fn bulk_create(
         let mut pending: Vec<serde_json::Value> = Vec::new();
         for body in bodies {
             if let Err(e) = validate::validate_create(&body) {
-                errors.push(format!("{}: {}", body.title, e));
+                // Issue #851: do not echo the caller's title back paired
+                // with the raw error — both are caller-influenced, and
+                // the combo can be used to verify presence/shape of
+                // server-side fields. Sanitize and log instead.
+                tracing::warn!("bulk_create(postgres): validate_create failed: {e}");
+                errors.push(super::sanitize_bulk_row_error(&e.to_string()).to_string());
                 continue;
             }
             let expires_at = body.expires_at.clone().or_else(|| {
@@ -6889,7 +6921,12 @@ pub async fn bulk_create(
 
             match app.store.store(&ctx, &mem).await {
                 Ok(_) => created += 1,
-                Err(e) => errors.push(e.to_string()),
+                Err(e) => {
+                    // Issue #851: SAL store errors can carry raw
+                    // sqlx/sqlite text. Sanitize before echoing.
+                    tracing::warn!("bulk_create(postgres): store.store failed: {e}");
+                    errors.push(super::sanitize_bulk_row_error(&e.to_string()).to_string());
+                }
             }
         }
         return Json(json!({
@@ -6910,7 +6947,10 @@ pub async fn bulk_create(
         let lock = app.db.lock().await;
         for body in bodies {
             if let Err(e) = validate::validate_create(&body) {
-                errors.push(format!("{}: {}", body.title, e));
+                // Issue #851: do not echo the caller's title back paired
+                // with the raw error. Sanitize and log instead.
+                tracing::warn!("bulk_create: validate_create failed: {e}");
+                errors.push(super::sanitize_bulk_row_error(&e.to_string()).to_string());
                 continue;
             }
             let expires_at = body.expires_at.or_else(|| {
@@ -6947,7 +6987,12 @@ pub async fn bulk_create(
             };
             match db::insert(&lock.0, &mem) {
                 Ok(_) => created_mems.push(mem),
-                Err(e) => errors.push(e.to_string()),
+                Err(e) => {
+                    // Issue #851: db::insert errors include raw rusqlite
+                    // text (constraint names, SQL fragments). Sanitize.
+                    tracing::warn!("bulk_create: db::insert failed: {e}");
+                    errors.push(super::sanitize_bulk_row_error(&e.to_string()).to_string());
+                }
             }
         }
     }
