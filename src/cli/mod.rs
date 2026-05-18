@@ -33,6 +33,11 @@ pub mod export;
 pub mod forget;
 pub mod gc;
 pub mod governance;
+/// v0.7.0 issue #863 — `ai-memory governance check-action` subcommand.
+/// Shell-side parity for the MCP tool `memory_check_agent_action` so
+/// operators can dry-run a substrate rule from a terminal without
+/// driving JSON-RPC over stdio.
+pub mod governance_check_action;
 /// v0.7.0 7th-form (issue #760) — `ai-memory governance install-defaults`
 /// subcommand. Bulk-flip seed rules R001-R004 to `enabled = 1` after
 /// operator confirmation (interactive prompt; `--yes` overrides).

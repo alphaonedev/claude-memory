@@ -178,7 +178,11 @@ pub enum Command {
         /// `core,graph,archive`). Default `core` (5 tools). Resolution
         /// order: this CLI flag > `AI_MEMORY_PROFILE` env > `[mcp].profile`
         /// in config.toml > `core`. Set `--profile full` to expose
-        /// every family (71 tools at v0.7.0 — `Profile::full().expected_tool_count()`).
+        /// every family (71 advertised entries at v0.7.0 — 70 callable
+        /// "memory tools" + the always-on `memory_capabilities` bootstrap;
+        /// `Profile::full().expected_tool_count()` returns 71, while
+        /// `memory_capabilities` summary reports the 70-memory-tool count
+        /// — both numbers are intentional, the +1 is the always-on entry).
         #[arg(long, env = "AI_MEMORY_PROFILE")]
         profile: Option<String>,
     },
@@ -426,6 +430,11 @@ pub enum GovernanceAction {
     /// `0024_v07_governance_rules.sql`) to `enabled = 1`. Interactive
     /// confirmation by default; `--yes` overrides for CI/scripts.
     InstallDefaults(crate::cli::governance_install_defaults::InstallDefaultsArgs),
+    /// v0.7.0 issue #863 — shell-side parity for the MCP tool
+    /// `memory_check_agent_action`. Dry-run a substrate agent-action
+    /// rule (R001-R004 plus any operator-added rule) and emit the
+    /// Allow / Refuse / Warn verdict.
+    CheckAction(crate::cli::governance_check_action::CheckActionArgs),
 }
 
 /// Arguments for the `doctor` subcommand. Lives next to `Cli` so clap
@@ -1240,6 +1249,9 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
                 }
                 GovernanceAction::InstallDefaults(args) => {
                     cli::governance_install_defaults::run(&db_path, args, &mut out)
+                }
+                GovernanceAction::CheckAction(args) => {
+                    cli::governance_check_action::run(&db_path, &args, &mut out)
                 }
             }
         }

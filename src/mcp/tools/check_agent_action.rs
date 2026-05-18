@@ -24,6 +24,12 @@ use serde_json::{Value, json};
 
 use crate::governance::agent_action::{AgentAction, check_agent_action};
 
+/// Default `agent_id` echoed back when the caller (MCP or CLI) does
+/// not supply one. Kept as a `pub const` so the CLI `governance
+/// check-action` handler reuses the exact same wire string and the
+/// MCP/CLI surfaces stay symmetric for issue #863.
+pub const DEFAULT_AGENT_ID: &str = "anonymous:mcp";
+
 /// Handler for `memory_check_agent_action`. Expects `arguments`:
 ///
 /// ```json
@@ -52,9 +58,33 @@ pub fn handle_check_agent_action(
     let agent_id = arguments
         .get("agent_id")
         .and_then(Value::as_str)
-        .unwrap_or("anonymous:mcp")
+        .unwrap_or(DEFAULT_AGENT_ID)
         .to_string();
-    let decision = check_agent_action(conn, &agent_id, &action).map_err(|e| e.to_string())?;
+    run_check(conn, &agent_id, kind, &action)
+}
+
+/// Shared core: evaluate a pre-built [`AgentAction`] against the
+/// `governance_rules` table on the supplied connection and return
+/// the canonical MCP/CLI JSON envelope (`{decision, kind, agent_id}`).
+///
+/// Issue #863 — extracted from [`handle_check_agent_action`] so the
+/// `ai-memory governance check-action` CLI subcommand can reuse the
+/// exact same path. DRY: there is only ONE implementation of "check
+/// an agent action against the rules table"; the MCP tool and the
+/// CLI verb are both thin parsers that funnel into this function.
+///
+/// # Errors
+///
+/// Propagates any error from [`check_agent_action`] (rules DB query
+/// failure, audit emit failure) as a `String` so both call sites can
+/// surface it without an `anyhow` dependency in the response shape.
+pub fn run_check(
+    conn: &rusqlite::Connection,
+    agent_id: &str,
+    kind: &str,
+    action: &AgentAction,
+) -> Result<Value, String> {
+    let decision = check_agent_action(conn, agent_id, action).map_err(|e| e.to_string())?;
     Ok(json!({
         "decision": decision,
         "kind": kind,
@@ -62,7 +92,16 @@ pub fn handle_check_agent_action(
     }))
 }
 
-fn build_action(kind: &str, arguments: &Value) -> Result<AgentAction, String> {
+/// Build an [`AgentAction`] from the MCP/CLI JSON arg-bag for the
+/// given `kind`. Shared between the MCP tool handler and the CLI
+/// `governance check-action` subcommand (issue #863).
+///
+/// # Errors
+///
+/// Returns a `String` error when `kind` is not one of the five
+/// canonical kinds or when the required per-kind fields are missing
+/// (`command` for bash, `path` for filesystem_write, etc.).
+pub fn build_action(kind: &str, arguments: &Value) -> Result<AgentAction, String> {
     use std::path::PathBuf;
 
     match kind {

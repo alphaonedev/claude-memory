@@ -494,6 +494,19 @@ pub mod tools {
     // through this re-export.
     pub use super::ingest_multistep::{IngestMultistepHandler, handle_ingest_multistep};
 
+    /// v0.7.0 issue #863 — re-export the substrate-shared check-action
+    /// helpers so the CLI subcommand `ai-memory governance check-action`
+    /// (`src/cli/governance_check_action.rs`) can reuse the exact same
+    /// rule-engine path as the MCP tool `memory_check_agent_action`.
+    /// DRY: there is one implementation of "evaluate an agent action
+    /// against the rules table"; both the MCP tool and the CLI verb
+    /// funnel into it.
+    pub mod check_agent_action {
+        pub use super::super::check_agent_action::{
+            DEFAULT_AGENT_ID, build_action, handle_check_agent_action, run_check,
+        };
+    }
+
     // v0.7.0 COV-8 (Cluster D, issue #767) — re-export the
     // `memory_kg_invalidate` substrate handler so the K9
     // governance-gate regression test
