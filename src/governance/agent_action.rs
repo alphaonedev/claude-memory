@@ -853,6 +853,20 @@ mod tests {
         conn
     }
 
+    /// Issue #819 — short alias for the test-only thread-local guard
+    /// that forces [`rules_store::resolve_operator_pubkey`] to return
+    /// `None`. Tests that insert unsigned rules and expect
+    /// `check_agent_action` to honor them must hold this guard for
+    /// their full body, otherwise on dev hosts with a real
+    /// `operator.key.pub` staged at the platform config path the
+    /// L1-6 signature gate will skip the unsigned fixtures and the
+    /// assertions will fail (test failures don't reproduce on
+    /// clean-HOME CI; the guard makes the local dev loop match CI).
+    #[must_use = "the guard must be held for the scope of the test"]
+    fn no_operator_pubkey() -> rules_store::ForceNoOperatorPubkeyGuard {
+        rules_store::force_no_operator_pubkey_for_test()
+    }
+
     fn add_rule(
         conn: &Connection,
         id: &str,
@@ -946,6 +960,7 @@ mod tests {
 
     #[test]
     fn refuse_filesystem_write_glob_match() {
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1007,6 +1022,7 @@ mod tests {
 
     #[test]
     fn warn_rule_returns_warn_not_refuse() {
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1029,6 +1045,7 @@ mod tests {
 
     #[test]
     fn refuse_wins_over_warn_when_both_match() {
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1056,6 +1073,7 @@ mod tests {
 
     #[test]
     fn process_spawn_binary_match() {
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1094,6 +1112,7 @@ mod tests {
 
     #[test]
     fn network_request_exact_host_match() {
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1120,6 +1139,7 @@ mod tests {
 
     #[test]
     fn custom_action_matches_on_kind() {
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1183,6 +1203,7 @@ mod tests {
 
     #[test]
     fn count_matching_rules_skips_audit() {
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1293,6 +1314,7 @@ mod tests {
 
     #[test]
     fn no_audit_refuses_with_same_shape_as_audited_path() {
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1341,6 +1363,7 @@ mod tests {
 
     #[test]
     fn no_audit_warn_returned_when_no_refuse_matches() {
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1563,6 +1586,7 @@ mod tests {
 
     #[test]
     fn count_matching_rules_returns_count() {
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1796,6 +1820,7 @@ mod tests {
 
     #[test]
     fn rule_engine_load_for_action_round_trips_through_sqlite() {
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,

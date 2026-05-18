@@ -260,6 +260,25 @@ pub fn enforced_rule_passes(
 /// present but no pubkey is resolved).
 #[must_use]
 pub fn resolve_operator_pubkey() -> Option<ed25519_dalek::VerifyingKey> {
+    // Test-only escape hatch (issue #819). On dev hosts where the
+    // operator has staged a real operator.key.pub at
+    // `~/Library/Application Support/ai-memory/operator.key.pub`,
+    // the unit-test fixtures in `src/governance/agent_action.rs` +
+    // various integration tests insert unsigned rules and then call
+    // `check_agent_action` expecting Warn/Refuse. With a real pubkey
+    // resolvable on disk, `enforced_rule_passes` correctly skips the
+    // unsigned rules and the assertions fail.
+    //
+    // The thread-local guard below — only compiled in under
+    // `#[cfg(test)]` — lets a specific test scope force this
+    // function to return `None` so the dev-host posture matches the
+    // clean-HOME CI posture. Production code paths are entirely
+    // unaffected.
+    #[cfg(test)]
+    if force_no_operator_pubkey_active() {
+        return None;
+    }
+
     use base64::Engine;
     let try_decode = |s: &str| -> Option<ed25519_dalek::VerifyingKey> {
         let trimmed = s.trim();
@@ -286,6 +305,59 @@ pub fn resolve_operator_pubkey() -> Option<ed25519_dalek::VerifyingKey> {
     let pub_path = base.join("ai-memory").join("operator.key.pub");
     let contents = std::fs::read_to_string(&pub_path).ok()?;
     try_decode(&contents)
+}
+
+/// Issue #819 — test-only escape hatch for [`resolve_operator_pubkey`].
+///
+/// Returns true when the current thread has an active
+/// [`ForceNoOperatorPubkeyGuard`] in scope. Production code does
+/// not call this (the `#[cfg(test)]` gate strips it from non-test
+/// builds entirely).
+#[cfg(test)]
+fn force_no_operator_pubkey_active() -> bool {
+    FORCE_NO_OPERATOR_PUBKEY.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_NO_OPERATOR_PUBKEY: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Issue #819 — return a RAII guard that forces
+/// [`resolve_operator_pubkey`] to return `None` for the duration of
+/// the current scope on the current thread.
+///
+/// Per-thread (not process-wide) so parallel tests in the same
+/// binary don't race on env mutation. The guard restores the prior
+/// state on drop.
+///
+/// Use:
+/// ```ignore
+/// let _no_pubkey = force_no_operator_pubkey_for_test();
+/// let decision = check_agent_action(&conn, "agent:t", &action)?;
+/// // ... assertions ...
+/// // `_no_pubkey` drops at end of scope, restoring resolver behavior.
+/// ```
+#[cfg(test)]
+#[must_use = "the guard must be held for its scope to suppress pubkey resolution"]
+pub fn force_no_operator_pubkey_for_test() -> ForceNoOperatorPubkeyGuard {
+    let prior = FORCE_NO_OPERATOR_PUBKEY.with(|c| c.replace(true));
+    ForceNoOperatorPubkeyGuard { prior }
+}
+
+/// RAII guard returned by [`force_no_operator_pubkey_for_test`].
+/// Restores the prior value on drop so nested scopes compose.
+#[cfg(test)]
+pub struct ForceNoOperatorPubkeyGuard {
+    prior: bool,
+}
+
+#[cfg(test)]
+impl Drop for ForceNoOperatorPubkeyGuard {
+    fn drop(&mut self) {
+        FORCE_NO_OPERATOR_PUBKEY.with(|c| c.set(self.prior));
+    }
 }
 
 /// v0.7.0 SEC-2 (Cluster D, issue #767) — count of `enabled = 1`
