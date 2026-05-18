@@ -632,11 +632,11 @@ pub fn tool_definitions() -> Value {
             {
                 "name": "memory_load_family",
                 "description": "Load top-k recent + high-priority memories from a Family.",
-                "docs": "B1: top-k by metadata.family. Always-on; alternative to memory_recall when family is known.",
+                "docs": "B1: top-k by metadata.family. Always-on; alternative to memory_recall when family is known. Issue #864 — `family` here is the MCP tool family (8 groups: core/lifecycle/graph/governance/power/meta/archive/other), NOT the memory_kind taxonomy (Observation/Reflection/Plan/Decision/etc).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "family": {"type": "string", "enum": ["core", "lifecycle", "graph", "governance", "power", "meta", "archive", "other"], "description": "Family taxonomy."},
+                        "family": {"type": "string", "enum": ["core", "lifecycle", "graph", "governance", "power", "meta", "archive", "other"], "description": "MCP tool family (8 groups) — NOT the memory_kind taxonomy. See #864."},
                         "namespace": {"type": "string", "description": "Namespace filter. Default all."},
                         "k": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Top-k cap 100."}
                     },
@@ -646,7 +646,7 @@ pub fn tool_definitions() -> Value {
             {
                 "name": "memory_smart_load",
                 "description": "Intent-routed loader: free-text intent picks the best Family.",
-                "docs": "B2: pick best Family from free-text intent, then forward to memory_load_family.",
+                "docs": "B2: pick best Family from free-text intent, then forward to memory_load_family. Issue #864 — `Family` here is the MCP tool family (8 groups: core/lifecycle/graph/governance/power/meta/archive/other), NOT the memory_kind taxonomy (Observation/Reflection/Plan/Decision/etc).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1053,7 +1053,7 @@ pub fn tool_definitions() -> Value {
             {
                 "name": "memory_capabilities",
                 "description": "Discover runtime capabilities; family=<name> drills in.",
-                "docs": "Caps-v3: tier, profile, summary, callable_now, agent_permitted_families, harness detection. family + include_schema enumerates one family. C2/C4: verbose=true restores `docs` + full inputSchema (default trim keeps required + namespace/format only).",
+                "docs": "Caps-v3: tier, profile, summary, callable_now, agent_permitted_families, harness detection. family + include_schema enumerates one family. C2/C4: verbose=true restores `docs` + full inputSchema (default trim keeps required + namespace/format only).\n\n## Families vs Memory Kinds (issue #864)\n\n`family` (a.k.a. MCP tool family) and `memory_kind` are TWO DIFFERENT taxonomies that share the word \"family\" in the codebase. Do not confuse them:\n\n- **MCP tool family** (this parameter) — 8 groups that bucket the 70+ MCP tools for discovery / profile filtering: core, lifecycle, graph, governance, power, meta, archive, other. Drives `memory_load_family`, `memory_smart_load`, `--profile`, and the `family` field on every tool definition.\n- **memory_kind** — the per-row content taxonomy stored on `memories.memory_kind`: Observation, Reflection, Plan, Decision, Skill, Persona, Entity, etc. Drives content-classification handlers (atomise, persona, curator) and the substrate's typed-memory invariants.\n\nA memory carrying `memory_kind = Reflection` is unrelated to the `meta` tool family; a tool in the `governance` tool family operates on memories of ANY `memory_kind`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
