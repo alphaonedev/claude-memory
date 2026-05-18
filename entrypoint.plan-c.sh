@@ -92,6 +92,44 @@ if [ -n "$PEER_URLS" ]; then
   fi
 fi
 
+# Issue #878 — peer-mesh reach preflight.
+#
+# Plan-C re-test surfaced that `host.docker.internal:<port>` URLs in the
+# peer mesh silently shadow when another host process owns those ports
+# (SSH forwards, python -m http.server, stale docker proxy after
+# `colima delete`, etc.). The published port-bind "succeeds" but quorum
+# POSTs land on the unrelated process and 404 / hang forever.
+#
+# Long-term fix: user-defined bridge + container-DNS in
+# `infra/plan-c/docker-compose.yml` (peer URLs become `http://ic-bob:19077`
+# routed through the docker network, never touching the host). For
+# operators still on the `host.docker.internal` recipe, the preflight
+# below probes every declared peer URL before exec'ing `serve` and
+# aborts with EX_CONFIG (78) if any peer is unreachable.
+#
+# Logic lives in `infra/plan-c/peer-preflight.sh` so it can be unit-
+# tested via `tests/plan_c_preflight.sh` without bringing the rest of
+# the entrypoint side-effects (mkdir /etc, /root/.config) into scope.
+# Opt-out: `AI_MEMORY_SKIP_PEER_PREFLIGHT=1` disables the check.
+PREFLIGHT="${AI_MEMORY_PEER_PREFLIGHT_SCRIPT:-/usr/local/lib/ai-memory/peer-preflight.sh}"
+if [ ! -f "$PREFLIGHT" ]; then
+  for candidate in \
+    "$(dirname "$0")/infra/plan-c/peer-preflight.sh" \
+    "/usr/local/lib/ai-memory/peer-preflight.sh"; do
+    if [ -f "$candidate" ]; then
+      PREFLIGHT="$candidate"
+      break
+    fi
+  done
+fi
+if [ -f "$PREFLIGHT" ]; then
+  PEER_URLS="$PEER_URLS" \
+  AI_MEMORY_SKIP_PEER_PREFLIGHT="${AI_MEMORY_SKIP_PEER_PREFLIGHT:-0}" \
+    bash "$PREFLIGHT" || exit $?
+else
+  echo "[entrypoint] #878 preflight script not found at any candidate path — skipping" >&2
+fi
+
 echo "[entrypoint] starting ai-memory:"
 echo "  agent_id=$AI_MEMORY_AGENT_ID tier=$TIER listen=$AI_MEMORY_LISTEN_HOST:$AI_MEMORY_LISTEN_PORT"
 echo "  store_url=$(echo $AI_MEMORY_STORE_URL | sed -E 's|//[^@]+@|//<redacted>@|')"

@@ -108,7 +108,9 @@ RUN chmod +x /opt/tests/* /opt/benches/* && \
     chmod 0777 /opt/ai-memory-src/target/bench
 
 COPY entrypoint.plan-c.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+# Issue #878 — peer-mesh reach preflight (invoked by entrypoint.sh).
+COPY infra/plan-c/peer-preflight.sh /usr/local/lib/ai-memory/peer-preflight.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/lib/ai-memory/peer-preflight.sh
 
 EXPOSE 19077
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
