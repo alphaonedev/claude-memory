@@ -333,8 +333,61 @@ manageability so the codebase lasts for a very long time.
 - Documentation drift between code behavior and docstrings is a
   real defect. File AND fix the docs (or fix the behavior so it
   matches the docs).
-- The phrases "non-blocking", "trend-line gap", and
-  "surface-level" are banned in finding writeups.
+- The phrases "non-blocking", "trend-line gap",
+  "surface-level", "P2/P3 follow-up", and "vN+1 polish" are
+  banned in finding writeups.
+
+**Testing-loop discipline (operator addendum 2026-05-18 pm).**
+During ANY testing session (NHI playbook, A2A campaigns,
+integration tests, chaos probes, security audits, manual smoke
+tests, anything that exercises the system):
+
+1. EVERY issue surfaced during testing — even ones the test
+   framework would call "informational", "expected drift",
+   "warning", or "minor" — MUST be filed as a GitHub issue at
+   the moment of discovery.
+2. The issue must be documented with root cause one-liner,
+   evidence (file:line or test output), reproduction, proposed
+   fix size, related memory ids.
+3. The issue must be tracked through fix → retest → re-check
+   → close, in the CURRENT release (v0.7.0 in this campaign).
+   No deferral to a future release is permitted unless the
+   operator explicitly approves the defer in writing.
+4. The fix must be retested against the same scenario that
+   surfaced it.
+5. The fix must be re-CHECKED via a fresh probe that didn't
+   run the original test path, to confirm the fix doesn't
+   merely make the test pass while leaving the underlying
+   defect.
+6. Iteration continues until 100% remediation. No "close as
+   fixed" without the retest + re-check both green.
+7. Audit trail is mandatory: GH issue body links to ai-memory
+   evidence; ai-memory evidence links to GH issue id; commit
+   messages reference both; campaign docs
+   (`docs/v0.7.0/test-campaign-*/`) cite both.
+
+Banned mid-testing behaviors:
+- Deferring a found issue to "after the campaign" — file NOW.
+- Closing the campaign with open findings unresolved — every
+  found issue must be resolved (fixed + retested + closed)
+  before the campaign verdict can mint as SHIP.
+- Bundling many findings into one issue — each finding gets
+  its own issue so each gets its own audit trail.
+- Counting "blocked tests" or "out-of-scope" as resolution —
+  if a test couldn't run, that's a test-infra defect. File +
+  fix it.
+
+Recompile + batch retest discipline (operator addendum 2026-05-18 pm):
+- After a batch of fixes lands, recompile ONCE (`cargo build
+  --release`), then run a BATCH retest of every issue the
+  batch was meant to fix — not one-issue-at-a-time piecemeal
+  retesting mid-stream.
+- The MCP session running while you fix the binary keeps the
+  OLD binary loaded in memory; retest the NEW binary via CLI
+  (`ai-memory <cmd>`), via raw MCP probes (`printf JSONRPC |
+  ai-memory mcp ...`), or by spawning fresh MCP sub-processes.
+  Operator restart is only needed to UPGRADE their live
+  session, not for AI NHI to validate the fix.
 
 **Three-wave refactor mandate (pre-v0.7.0 release).** Three
 sequenced waves of refactor + review work must complete BEFORE
@@ -378,9 +431,10 @@ re-runs on the Wave-3 post-refactor binary; Lane 5 final sweep is
 post-refactor; Lane 6 can run in parallel with Lane 4; Track E
 captures feed Lane 6 case-study content.
 
-**Provenance.** Live memory `5d703efe-273b-4c84-8f40-ceb97b55d71e`
+**Provenance.** Live memory `f1dca8fa-6c33-4139-b0b5-389cca45b921`
 in namespace `global/policies` is the canonical version of this
-directive and supersedes the earlier
+directive (testing-loop addendum 2026-05-18 pm) and supersedes
+`5d703efe-273b-4c84-8f40-ceb97b55d71e` which superseded
 `71ecce23-611b-4984-962d-d37c4309f261`.
 
 ## v0.7.0 release gate (operator-set 2026-05-17 pm-v5)
