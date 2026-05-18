@@ -187,10 +187,16 @@ mod tests {
     /// failures.
     #[test]
     fn table_has_51_entries_matching_tool_definitions_count() {
+        // v0.7.0 refactor PR-2 (#793) — tool-count SSOT. Anchor the
+        // assertion on `Profile::full().expected_tool_count()` rather
+        // than a hardcoded literal so adding a new MCP tool touches
+        // ONE site (the per-Family `expected_tool_count` arm) instead
+        // of N hardcoded assertions across the codebase.
         let n = tool_sizes().len();
+        let expected = crate::profile::Profile::full().expected_tool_count();
         assert_eq!(
-            n, 71,
-            "expected exactly 71 tools (v0.6.3.1 baseline 43 + v0.7.0 I4 \
+            n, expected,
+            "expected exactly {expected} tools (v0.6.3.1 baseline 43 + v0.7.0 I4 \
              `memory_replay` + v0.7 H4 `memory_verify` + v0.7 B1 \
              `memory_load_family` + v0.7 B2 `memory_smart_load` + v0.7 K7 \
              `memory_subscription_replay` + `memory_subscription_dlq_list` \
