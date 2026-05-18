@@ -84,6 +84,13 @@ pub mod offload;
 // and re-writes each atom as a first-class memory with provenance.
 // Curator-pass tool family (semantic+ tier).
 pub(super) mod atomise;
+// v0.7.0 (issues #224 + #311) — `memory_share` MCP tool.
+// Phase 3 Memory Sharing & Sync RFC (v0.8 target) pulled forward per
+// operator directive `28860423-d12c-4959-bc8b-8fa9a94a33d9` (2026-05-18).
+// MVP scope: point-to-point copy into target agent's shared namespace
+// `_shared/<from>→<to>/`. CRDT-lite merge rules, bi-directional sync,
+// federation wire-level distribution remain v0.8 Phase 3 work.
+pub(super) mod share;
 
 // Re-export all handler functions and types to make them accessible from
 // the parent `mcp` module (super) without requiring callers to know the
