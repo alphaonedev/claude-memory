@@ -343,6 +343,9 @@ mod quota_status;
 mod check_agent_action;
 #[path = "tools/recall.rs"]
 mod recall;
+// v0.7.0 Provenance Gap 3 (#886) — recall-consumption observation tier.
+#[path = "tools/recall_observations.rs"]
+mod recall_observations;
 #[path = "tools/reflect.rs"]
 mod reflect;
 #[path = "tools/reflection_origin.rs"]
@@ -423,6 +426,11 @@ pub use quota_status::handle_quota_status;
 pub use check_agent_action::handle_check_agent_action;
 pub use recall::handle_recall;
 pub use recall::handle_recall_with_pre_recall_hook;
+// v0.7.0 Provenance Gap 3 (#886) — recall-consumption observation tier.
+// `handle_recall_observations` lives in `src/mcp/tools/recall_observations.rs`
+// (sibling-agent landing); the function is dispatched via
+// `dispatch_memory_recall_observations` below.
+pub use recall_observations::handle_recall_observations;
 pub use replay::handle_replay;
 pub use rule_list::handle_rule_list;
 pub(crate) use session_start::handle_session_start;
@@ -885,6 +893,12 @@ fn dispatch_memory_recall(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
     )
 }
 
+/// v0.7.0 Gap 3 (#886) — read-side dispatch for the
+/// `memory_recall_observations` tool.
+fn dispatch_memory_recall_observations(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
+    handle_recall_observations(ctx.conn, ctx.arguments)
+}
+
 fn dispatch_memory_search(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
     handle_search(ctx.conn, ctx.arguments)
 }
@@ -1336,6 +1350,10 @@ fn dispatch_memory_deref(ctx: &ToolDispatchCtx<'_>) -> Result<Value, String> {
 pub(crate) static TOOL_DISPATCH_TABLE: &[(&str, DispatchFn)] = &[
     register_mcp_tool!("memory_store", dispatch_memory_store),
     register_mcp_tool!("memory_recall", dispatch_memory_recall),
+    register_mcp_tool!(
+        "memory_recall_observations",
+        dispatch_memory_recall_observations
+    ),
     register_mcp_tool!("memory_search", dispatch_memory_search),
     register_mcp_tool!("memory_list", dispatch_memory_list),
     register_mcp_tool!("memory_load_family", dispatch_memory_load_family),
@@ -2396,9 +2414,12 @@ mod tests {
         // v0.7.0 issues #224 + #311 adds memory_share (Family::Power) → 72
         // — Phase 3 Memory Sharing & Sync RFC pulled forward per operator
         // directive `28860423-d12c-4959-bc8b-8fa9a94a33d9`.
+        // v0.7.0 Gap 3 (#886) adds memory_recall_observations
+        // (Family::Meta) → 73 — read-side ledger probe over the new
+        // `recall_observations` table.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 72);
+        assert_eq!(tools.len(), 73);
     }
 
     /// v0.6.4-002 acceptance gate (RFC §S25/S26): `--profile core`
@@ -2448,17 +2469,16 @@ mod tests {
     }
 
     #[test]
-    fn tool_definitions_for_profile_full_registers_72() {
+    fn tool_definitions_for_profile_full_registers_73() {
         let defs = tool_definitions_for_profile(&crate::profile::Profile::full());
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
             crate::profile::Profile::full().expected_tool_count(),
             "full profile registration count must match \
-             `Profile::full().expected_tool_count()` = 72 at v0.7.0 \
-             (issues #224 + #311 pulled memory_share forward from v0.8 \
-             Phase 3 Memory Sharing & Sync RFC per operator directive \
-             `28860423-d12c-4959-bc8b-8fa9a94a33d9`)"
+             `Profile::full().expected_tool_count()` = 73 at v0.7.0 \
+             (issues #224 + #311 pulled memory_share forward; Gap 3 \
+             (#886) added memory_recall_observations under Family::Meta)"
         );
     }
 
@@ -3830,6 +3850,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_get", json!({"id": id}));
@@ -3916,6 +3937,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_delete", json!({"id": id}));
@@ -3969,6 +3991,7 @@ mod tests {
                 confidence_source: crate::models::ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             ids.push(db::insert(&conn, &mem).unwrap());
         }
@@ -4025,6 +4048,7 @@ mod tests {
                 confidence_source: crate::models::ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             ids.push(db::insert(&conn, &mem).unwrap());
         }
@@ -4135,6 +4159,7 @@ mod tests {
                 confidence_source: crate::models::ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             source_ids.push(db::insert(&conn, &mem).unwrap());
         }
@@ -4695,6 +4720,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let std_id = db::insert(&conn, &mem).unwrap();
         db::set_namespace_standard(&conn, "m9-parent", &std_id, None).unwrap();
@@ -4725,6 +4751,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let child_id = db::insert(&conn, &child_mem).unwrap();
         db::set_namespace_standard(&conn, "repo/team/sub", &child_id, None).unwrap();
@@ -4798,6 +4825,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let parent_id = db::insert(&conn, &parent_mem).unwrap();
         db::set_namespace_standard(&conn, "m9-explicit-parent", &parent_id, None).unwrap();
@@ -4828,6 +4856,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let child_id = db::insert(&conn, &child_mem).unwrap();
         db::set_namespace_standard(
@@ -4895,6 +4924,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = db::insert(conn, &mem).unwrap();
         db::set_namespace_standard(conn, namespace, &id, None).unwrap();
@@ -5187,6 +5217,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -5316,6 +5347,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -5538,6 +5570,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let std_id = db::insert(&conn, &mem).unwrap();
 
@@ -5653,6 +5686,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -6007,6 +6041,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -6049,6 +6084,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -6130,6 +6166,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -6176,6 +6213,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -6217,6 +6255,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let mut mem_b = mem_a.clone();
         mem_b.id = uuid::Uuid::new_v4().to_string();
@@ -6510,6 +6549,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let pid = db::insert(&conn, &parent_mem).unwrap();
         db::set_namespace_standard(&conn, "w12-explicit-grand", &pid, None).unwrap();
@@ -6617,6 +6657,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_promote", json!({"id": id}));
@@ -6758,6 +6799,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -6813,6 +6855,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -6865,6 +6908,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_get", json!({"id": id}));
@@ -6910,6 +6954,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -6964,6 +7009,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -7011,6 +7057,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -7064,6 +7111,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -7490,6 +7538,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let mut mem_b = mem_a.clone();
         mem_b.id = uuid::Uuid::new_v4().to_string();
@@ -7551,6 +7600,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_update", json!({"id": id, "expires_at": ""}));
@@ -7592,6 +7642,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -7641,6 +7692,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_delete", json!({"id": id}));
@@ -8043,6 +8095,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(conn, &mem).unwrap()
     }
@@ -8087,6 +8140,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let std_id = db::insert(conn, &standard).unwrap();
         db::set_namespace_standard(conn, namespace, &std_id, None).unwrap();
@@ -8802,6 +8856,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -8959,6 +9014,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let a = db::insert(&conn, &mk("a")).unwrap();
         let b = db::insert(&conn, &mk("b")).unwrap();
@@ -9066,6 +9122,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -9266,6 +9323,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -9321,6 +9379,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -9388,6 +9447,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -9468,6 +9528,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -9559,6 +9620,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -9651,6 +9713,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -9758,6 +9821,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(conn, &mem).unwrap()
     }
@@ -9796,6 +9860,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(conn, &mem).unwrap()
     }
@@ -10958,6 +11023,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&conn, &stale).unwrap();
         let resp = crate::mcp::handle_load_family(
@@ -11243,6 +11309,7 @@ mod tests {
                 confidence_source: crate::models::ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             db::insert(&conn, &mem).unwrap()
         };
@@ -11311,6 +11378,7 @@ mod tests {
                 confidence_source: crate::models::ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             db::insert(&conn, &mem).unwrap()
         };
@@ -11928,6 +11996,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_gc", json!({"dry_run": false}));
@@ -11970,6 +12039,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_gc", json!({"dry_run": true}));

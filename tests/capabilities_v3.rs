@@ -177,8 +177,8 @@ fn cap_v3_summary_core_profile_counts_and_names_recovery_paths() {
     // bumped via v0.7.0 L1-5 5×memory_skill_* + v0.7.0 L2-7
     // memory_skill_compositional_context).
     assert!(
-        summary.starts_with("7 of 73 memory tools"),
-        "core profile summary should open with \"7 of 73 memory tools\" (Round-2 F13; \
+        summary.starts_with("7 of 72 memory tools"),
+        "core profile summary should open with \"7 of 72 memory tools\" (Round-2 F13; \
          v0.7.0 issues #224 + #311 added memory_share to Family::Power, \
          pulled forward from v0.8 Phase 3 Memory Sharing & Sync RFC per \
          operator directive `28860423-d12c-4959-bc8b-8fa9a94a33d9` — \
@@ -186,8 +186,8 @@ fn cap_v3_summary_core_profile_counts_and_names_recovery_paths() {
     );
     assert!(summary.contains("(core)"), "must label the profile as core");
     assert!(
-        summary.contains("66 are listed in this manifest"),
-        "core profile must report 66 unloaded (73 - 7); got: {summary}"
+        summary.contains("65 are listed in this manifest"),
+        "core profile must report 65 unloaded (72 - 7); got: {summary}"
     );
 
     // Three named recovery paths must all appear (verbatim names — these
@@ -224,8 +224,8 @@ fn cap_v3_summary_full_profile_reports_all_visible() {
     // 5 memory_skill_* tools to Family::Other, bumping the substantive
     // total from 51 to 56.
     assert!(
-        summary.starts_with("73 of 73 memory tools"),
-        "full profile summary should open with \"73 of 73 memory tools\" (Round-2 F13; \
+        summary.starts_with("72 of 72 memory tools"),
+        "full profile summary should open with \"72 of 72 memory tools\" (Round-2 F13; \
          v0.7.0 issues #224 + #311 added memory_share to Family::Power, \
          pulled forward from v0.8 Phase 3 RFC); got: {summary}"
     );
@@ -254,14 +254,14 @@ fn cap_v3_summary_graph_profile_counts() {
     // memory tools. Total = 55 (56 - bootstrap; v0.7.0 L1-5 added 5
     // memory_skill_* tools to Family::Other, bumping total from 51 to 56).
     assert!(
-        summary.starts_with("18 of 71 memory tools"),
+        summary.starts_with("18 of 72 memory tools"),
         "graph profile = 7 core (v0.7 B1+B2) + 11 graph (v0.7 J7) = 18 memory tools \
          (Round-2 F13: bootstrap excluded; v0.7.0 issues #224 + #311 added \
-         memory_share to Family::Power, pulled forward from v0.8 Phase 3 RFC, \
-         bumping the substantive total to 71); got: {summary}"
+         memory_share + Gap 3 #886 added memory_recall_observations, \
+         bumping the substantive total to 73); got: {summary}"
     );
     assert!(summary.contains("(graph)"));
-    assert!(summary.contains("53 are listed in this manifest"));
+    assert!(summary.contains("54 are listed in this manifest"));
 }
 
 // ---------------------------------------------------------------------------
@@ -363,10 +363,11 @@ fn cap_v3_describe_core_profile_is_plain_english_with_loaded_names() {
     // forward from v0.8 Phase 3 Memory Sharing & Sync RFC per operator
     // directive `28860423-d12c-4959-bc8b-8fa9a94a33d9`).
     assert!(
-        describe.contains("64 more"),
-        "core profile must report 64 unloaded (71 - 7); v0.7.0 issues \
-         #224 + #311 added memory_share to Family::Power, bumping the \
-         substantive total to 71; got: {describe}"
+        describe.contains("65 more"),
+        "core profile must report 65 unloaded (72 - 7); v0.7.0 issues \
+         #224 + #311 added memory_share + Gap 3 #886 added \
+         memory_recall_observations, bumping the substantive total to 72; \
+         got: {describe}"
     );
     // Sample of unloaded tools is plain (no memory_ prefix). The first
     // four unloaded under core are lifecycle's update/delete/forget/gc.
@@ -405,12 +406,12 @@ fn cap_v3_describe_core_profile_is_plain_english_with_loaded_names() {
 fn cap_v3_describe_full_profile_uses_nothing_more_form() {
     let describe = build_capabilities_describe_to_user(&Profile::full());
 
-    // 71 = 72 total - 1 always-on bootstrap excluded from describe.
-    // Bumped to 71 in v0.7.0 issues #224 + #311 (memory_share, Family::Power,
-    // pulled forward from v0.8 Phase 3 RFC per operator directive
-    // `28860423-d12c-4959-bc8b-8fa9a94a33d9`).
+    // 72 = 73 total - 1 always-on bootstrap excluded from describe.
+    // Bumped to 71 in v0.7.0 issues #224 + #311 (memory_share, Family::Power);
+    // bumped to 72 in v0.7.0 Gap 3 #886 (memory_recall_observations,
+    // Family::Meta).
     assert!(
-        describe.starts_with("I can directly use all 71 memory tools right now ("),
+        describe.starts_with("I can directly use all 72 memory tools right now ("),
         "full profile describe must open with all-loaded form; got: {describe}"
     );
     assert!(describe.contains("Nothing more to load"));
@@ -433,10 +434,10 @@ fn cap_v3_describe_graph_profile_uses_preview_ellipsis() {
     );
     // Preview is the first 5 of the 18 loaded — the first 5 core tools.
     assert!(describe.contains("(store, recall, list, get, search, ...)"));
-    // 53 more = 71 substantive - 18 loaded. Issues #224 + #311 added
-    // memory_share to Family::Power (52 → 53), pulled forward from v0.8
-    // Phase 3 RFC.
-    assert!(describe.contains("53 more"));
+    // 54 more = 72 substantive - 18 loaded. Issues #224 + #311 added
+    // memory_share to Family::Power (52 → 53) + Gap 3 #886 added
+    // memory_recall_observations to Family::Meta (53 → 54).
+    assert!(describe.contains("54 more"));
 }
 
 // ---------------------------------------------------------------------------
@@ -600,7 +601,7 @@ fn cap_v3_a3_allowlist_on_agent_denied_callable_now_false() {
 // memory_skill_get, memory_skill_resource, memory_skill_export.)
 // ---------------------------------------------------------------------------
 #[test]
-fn cap_v3_response_carries_tools_array_with_72_entries() {
+fn cap_v3_response_carries_tools_array_with_73_entries() {
     let tier_config = semantic_tier();
     let conn = fresh_conn();
     let val = handle_capabilities_with_conn_v3(
@@ -622,10 +623,9 @@ fn cap_v3_response_carries_tools_array_with_72_entries() {
         tools.len(),
         Profile::full().expected_tool_count(),
         "v3 must surface every tool regardless of profile; canonical \
-         count is `Profile::full().expected_tool_count()` = 72 at v0.7.0 \
-         (issues #224 + #311 pulled memory_share forward from v0.8 Phase 3 \
-         Memory Sharing & Sync RFC per operator directive \
-         `28860423-d12c-4959-bc8b-8fa9a94a33d9`); got {}",
+         count is `Profile::full().expected_tool_count()` = 73 at v0.7.0 \
+         (issues #224 + #311 pulled memory_share forward; Gap 3 #886 added \
+         memory_recall_observations under Family::Meta); got {}",
         tools.len()
     );
 

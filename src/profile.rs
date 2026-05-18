@@ -220,12 +220,14 @@ impl Family {
             // `28860423-d12c-4959-bc8b-8fa9a94a33d9`. Substrate-level
             // point-to-point copy into `_shared/<from>→<to>/`.
             | "memory_share" => Some(Self::Power),
-            // meta (5)
+            // meta (6 — 5 baseline + v0.7.0 Gap 3 (#886)
+            // memory_recall_observations).
             "memory_capabilities"
             | "memory_agent_register"
             | "memory_agent_list"
             | "memory_session_start"
-            | "memory_stats" => Some(Self::Meta),
+            | "memory_stats"
+            | "memory_recall_observations" => Some(Self::Meta),
             // archive (4)
             "memory_archive_list"
             | "memory_archive_purge"
@@ -286,7 +288,10 @@ impl Family {
             // Core: 5 baseline + memory_load_family (v0.7 B1) +
             // memory_smart_load (v0.7 B2) = 7.
             Self::Core => 7,
-            Self::Lifecycle | Self::Meta => 5,
+            Self::Lifecycle => 5,
+            // v0.7.0 Gap 3 (#886) — `memory_recall_observations`
+            // surfaced under Meta as the read-side ledger probe.
+            Self::Meta => 6,
             // Graph: 8 baseline + memory_replay (v0.7.0 I4) + memory_verify (v0.7 H4) +
             // memory_find_paths (v0.7 J7) = 11.
             Self::Graph => 11,
@@ -468,6 +473,9 @@ impl Family {
                 "memory_agent_list",
                 "memory_session_start",
                 "memory_stats",
+                // v0.7.0 Gap 3 (#886) — read-side surface for the
+                // `recall_observations` ledger.
+                "memory_recall_observations",
             ],
             Self::Archive => &[
                 "memory_archive_list",
@@ -757,10 +765,10 @@ mod tests {
     }
 
     #[test]
-    fn family_expected_tool_counts_sum_to_72() {
+    fn family_expected_tool_counts_sum_to_73() {
         let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
         assert_eq!(
-            total, 72,
+            total, 73,
             "v0.6.3.1 baseline (43) + v0.7.0 I4 `memory_replay` + v0.7 H4 \
              `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 B2 \
              `memory_smart_load` + v0.7 K7 `memory_subscription_replay` \
@@ -778,9 +786,8 @@ mod tests {
              v0.7.0 QW-2 `memory_persona` + `memory_persona_generate` + \
              v0.7.0 Form 3 `memory_ingest_multistep` + \
              v0.7.0 Form 5 `memory_calibrate_confidence` + \
-             v0.7.0 issues #224 + #311 `memory_share` (Phase 3 Memory \
-             Sharing & Sync RFC pulled forward per operator directive \
-             `28860423-d12c-4959-bc8b-8fa9a94a33d9`) = 72. \
+             v0.7.0 issues #224 + #311 `memory_share` + \
+             v0.7.0 Gap 3 (#886) `memory_recall_observations` = 73. \
              If this drifts, update Family::expected_tool_count and the \
              family map docs together."
         );
@@ -901,8 +908,9 @@ mod tests {
         // memory_calibrate_confidence (Form 5, Family::Power) +
         // memory_share (Phase 3 Memory Sharing & Sync RFC pulled forward
         // per operator directive `28860423-d12c-4959-bc8b-8fa9a94a33d9`,
-        // Family::Power) = 72.
-        assert_eq!(p.expected_tool_count(), 72);
+        // Family::Power) +
+        // v0.7.0 Gap 3 (#886) memory_recall_observations (Family::Meta) = 73.
+        assert_eq!(p.expected_tool_count(), 73);
 
         // The K7+K8 + Task 4/8 + L2-2 + L2-3 + #691 + QW-1 + QW-3 follow-up
         // + WT-1-C + QW-2 + Form 3 + Form 5 + #224/#311 memory_share additions

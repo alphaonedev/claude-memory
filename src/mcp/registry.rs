@@ -592,9 +592,26 @@ pub fn tool_definitions() -> Value {
                             ],
                             "description": "Form 6 (#759) kind filter. Array or comma-string. OR within kinds; AND with other filters. 'all'/omit = no filter. Unknown tokens dropped."
                         },
+                        "confidence_tier": {"type": "string", "enum": ["confirmed", "likely", "ambiguous"], "description": "Gap 4 (#887) tier filter."},
+                        "verbose_provenance": {"type": "boolean", "default": true, "description": "Gap 7 (#890): per-row provenance decoration."},
                         "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "toon_compact", "description": "Response format. toon_compact saves 79% vs json."}
                     },
                     "required": ["context"]
+                }
+            },
+            {
+                "name": "memory_recall_observations",
+                "description": "List recall_observations (#886).",
+                "docs": "Gap 3 (#886): recall-consumption ledger filter.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "recall_id": {"type": "string"},
+                        "consumed": {"type": "boolean"},
+                        "since": {"type": "string"},
+                        "until": {"type": "string"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 200}
+                    }
                 }
             },
             {

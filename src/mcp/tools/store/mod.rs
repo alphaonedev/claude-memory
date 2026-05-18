@@ -553,6 +553,18 @@ pub(crate) fn handle_store(
         response["atomise_mode"] = json!("synchronous");
         response["atomise_outcome"] = json!(outcome);
     }
+
+    // v0.7.0 Gap 3 (#886) — recall-consumption hook.
+    //
+    // When the request body cites a prior `recall_id` plus a list
+    // of `cited_memory_ids` the caller used to compose this store
+    // request, flip the matching `recall_observations` rows to
+    // `consumed = TRUE` with `consumed_by_memory_id = actual_id`.
+    // Best-effort; a substrate error here does NOT roll back the
+    // store (audit-trail discipline: never let the ledger block
+    // the underlying write).
+    crate::observations::try_mark_consumed_from_params(conn, params, &actual_id);
+
     Ok(response)
 }
 

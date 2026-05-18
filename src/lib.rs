@@ -101,6 +101,11 @@ pub mod multistep_ingest;
 // edge lands: walks `reflects_on` edges from dependents and writes
 // notification memories into `<namespace>/_invalidations`.
 pub mod notification;
+// v0.7.0 Gap 3 (#886) — recall-consumption observation tier. Writes
+// one row per returned candidate at recall time and flips the
+// `consumed` flag when a subsequent store/link request cites the
+// candidate. Backed by the `recall_observations` table (schema v47).
+pub mod observations;
 // v0.7.0 QW-3 — context-offload substrate primitive. Offload+deref
 // store with Ed25519-signed audit events; v0.8.0 short-term-context-
 // compression (Mermaid canvas + auto-cadence + node_id integration)

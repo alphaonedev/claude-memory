@@ -84,12 +84,12 @@ fn f13_summary_and_describe_to_user_agree_on_count_full_profile() {
     // operator directive `28860423-d12c-4959-bc8b-8fa9a94a33d9` —
     // bumping the substantive total to 71.
     assert!(
-        summary.contains("71 of 71 memory tools"),
-        "summary must report 71 of 71 memory tools; got: {summary}"
+        summary.contains("72 of 72 memory tools"),
+        "summary must report 72 of 72 memory tools; got: {summary}"
     );
     assert!(
-        describe.contains("all 71 memory tools"),
-        "describe_to_user must report all 71 memory tools; got: {describe}"
+        describe.contains("all 72 memory tools"),
+        "describe_to_user must report all 72 memory tools; got: {describe}"
     );
 }
 
@@ -104,8 +104,8 @@ fn f13_summary_and_describe_to_user_agree_on_count_core_profile() {
     // v0.8 Phase 3 Memory Sharing & Sync RFC per operator directive
     // `28860423-d12c-4959-bc8b-8fa9a94a33d9`.
     assert!(
-        summary.contains("7 of 71 memory tools"),
-        "summary must report 7 of 71 memory tools; got: {summary}"
+        summary.contains("7 of 72 memory tools"),
+        "summary must report 7 of 72 memory tools; got: {summary}"
     );
     assert!(
         describe.contains("7 memory tools"),

@@ -7,6 +7,10 @@
 
 pub(super) mod store;
 pub(super) mod recall;
+// v0.7.0 Gap 3 (#886) — read-side surface for the recall-consumption
+// observation ledger. Returns recent rows from `recall_observations`
+// filtered by recall_id, consumed flag, and a time window.
+pub(super) mod recall_observations;
 pub(super) mod capabilities;
 pub(super) mod expand_query;
 pub(super) mod auto_tag;
@@ -99,6 +103,7 @@ pub(super) use self::{
     store::handle_store,
     recall::handle_recall,
     recall::handle_recall_with_pre_recall_hook,
+    recall_observations::handle_recall_observations,
     capabilities::CapabilitiesAccept,
     capabilities::handle_capabilities_with_conn,
     capabilities::handle_capabilities_with_conn_v3,
