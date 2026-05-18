@@ -8,6 +8,9 @@
 // AI_MEMORY_NO_CONFIG=1 prevents loading ~/.config/ai-memory/config.toml
 // which may set tier=autonomous and trigger embedder/LLM initialization.
 
+mod common;
+use common::free_port;
+
 fn cmd(binary: &str) -> std::process::Command {
     let mut c = std::process::Command::new(binary);
     c.env("AI_MEMORY_NO_CONFIG", "1");
@@ -8053,14 +8056,6 @@ fn test_cli_sync_dry_run_writes_nothing() {
 // The defining grand-slam test: one peer's memory ends up on the other
 // within a couple of daemon cycles, no cloud, no login, no manual sync.
 // ---------------------------------------------------------------------------
-
-/// Find a free localhost TCP port by binding to :0 and dropping.
-fn free_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = l.local_addr().unwrap().port();
-    drop(l);
-    port
-}
 
 /// Wait for the `/api/v1/health` endpoint to respond 200 — up to ~10s.
 ///

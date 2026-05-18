@@ -55,10 +55,8 @@ use ai_memory::store::postgres::PostgresStore;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
-/// Returns Some(url) when the live-PG fixture is configured, None otherwise.
-fn postgres_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-}
+mod common;
+use common::postgres_url;
 
 /// Open an out-of-band `sqlx` pool against the same URL the adapter
 /// uses. We deliberately bypass `PostgresStore` for the mutation +

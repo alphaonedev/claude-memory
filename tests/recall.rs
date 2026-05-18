@@ -8,5 +8,8 @@
 //! from `tests/recall/wt1e.rs`. Mirrors the
 //! `tests/forensic.rs` ↔ `tests/forensic/bundle_test.rs` pattern.
 
+#[path = "common/mod.rs"]
+mod common;
+
 #[path = "recall/wt1e.rs"]
 mod wt1e;

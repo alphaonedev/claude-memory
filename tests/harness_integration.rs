@@ -46,16 +46,13 @@ use ai_memory::profile::Profile;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
+mod common;
+use common::fresh_conn;
+
 // ---------------------------------------------------------------------------
 // Helpers — mirror the patterns in tests/capabilities_v3.rs so the two
 // suites stay legible side by side.
 // ---------------------------------------------------------------------------
-
-/// Fresh in-memory rusqlite connection so each test gets a clean DB
-/// state for the live-count overlays inside the capabilities builder.
-fn fresh_conn() -> rusqlite::Connection {
-    ai_memory::db::open(std::path::Path::new(":memory:")).expect("open in-memory db")
-}
 
 /// Default tier for these tests. Matches `tests/capabilities_v3.rs`.
 fn semantic_tier() -> TierConfig {

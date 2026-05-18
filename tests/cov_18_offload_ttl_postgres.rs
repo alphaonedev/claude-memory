@@ -43,9 +43,8 @@
 use ai_memory::store::postgres::PostgresStore;
 use sqlx::Row;
 
-fn postgres_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-}
+mod common;
+use common::postgres_url;
 
 /// Open a sqlx pool against the same URL. The `PostgresStore::connect`
 /// call ensures the v34 schema is in place; the pool is then used to

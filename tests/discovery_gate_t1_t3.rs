@@ -43,9 +43,8 @@ use ai_memory::mcp::handle_capabilities_with_conn_v3;
 use ai_memory::profile::Profile;
 use serde_json::Value;
 
-fn fresh_conn() -> rusqlite::Connection {
-    ai_memory::db::open(std::path::Path::new(":memory:")).expect("open in-memory db")
-}
+mod common;
+use common::fresh_conn;
 
 fn semantic_tier() -> TierConfig {
     FeatureTier::Semantic.config()

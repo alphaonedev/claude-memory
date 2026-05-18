@@ -52,10 +52,8 @@ use ai_memory::store::sqlite::SqliteStore;
 use serde_json::Value;
 use tokio::sync::{Mutex, Notify, RwLock};
 
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    listener.local_addr().expect("local_addr").port()
-}
+mod common;
+use common::free_port;
 
 /// Build an `AppState` with a SAL-routed `SqliteStore` opened against
 /// a tempfile so the freshly-applied migrations populate the

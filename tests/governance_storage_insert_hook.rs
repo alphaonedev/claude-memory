@@ -56,6 +56,9 @@ use ai_memory::errors::MemoryError;
 use ai_memory::models::{Memory, MemoryKind, Tier};
 use ai_memory::storage::{self, GovernanceRefusal};
 
+mod common;
+use common::{free_port, fresh_conn};
+
 // ---------------------------------------------------------------------------
 // Process-wide hook dispatcher (OnceLock workaround)
 // ---------------------------------------------------------------------------
@@ -108,10 +111,6 @@ fn set_mode(mode: HookMode) {
 // ---------------------------------------------------------------------------
 // In-process helpers
 // ---------------------------------------------------------------------------
-
-fn fresh_conn() -> rusqlite::Connection {
-    db::open(std::path::Path::new(":memory:")).expect("open in-memory db")
-}
 
 fn fresh_memory(title: &str, ns: &str) -> Memory {
     let now = chrono::Utc::now().to_rfc3339();
@@ -373,13 +372,6 @@ fn cli_one_shot_does_not_install_hook() {
 // substrate's installed hook short-circuits with a refusal which the
 // HTTP handler maps to 403 / `GOVERNANCE_REFUSED`.
 // ---------------------------------------------------------------------------
-
-fn free_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = l.local_addr().unwrap().port();
-    drop(l);
-    port
-}
 
 fn wait_for_health(port: u16) -> bool {
     for _ in 0..100 {

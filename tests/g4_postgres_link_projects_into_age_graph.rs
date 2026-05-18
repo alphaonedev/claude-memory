@@ -62,15 +62,16 @@ use serde_json::{Value, json};
 use sqlx::Row;
 use tokio::sync::{Mutex, Notify, RwLock};
 
+mod common;
+use common::free_port;
+
+/// AGE-or-Postgres URL fallback — sibling of g2/g4_unsigned/g5; differs
+/// from `common::age_url` because the AGE-projection wiring is tested
+/// against whatever Postgres is available.
 fn age_url() -> Option<String> {
     std::env::var("AI_MEMORY_TEST_AGE_URL")
         .ok()
         .or_else(|| std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok())
-}
-
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    listener.local_addr().expect("local_addr").port()
 }
 
 async fn build_postgres_app_state(url: &str) -> AppState {

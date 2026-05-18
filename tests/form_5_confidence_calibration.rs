@@ -42,17 +42,13 @@ use ai_memory::storage;
 
 use chrono::Utc;
 use rusqlite::Connection;
-use tempfile::NamedTempFile;
+
+mod common;
+use common::fresh_db_tempfile_conn as fresh_db;
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
 // ---------------------------------------------------------------------------
-
-fn fresh_db() -> (NamedTempFile, Connection) {
-    let tmp = NamedTempFile::new().expect("tempfile");
-    let conn = db::open(tmp.path()).expect("db::open");
-    (tmp, conn)
-}
 
 fn now() -> String {
     Utc::now().to_rfc3339()

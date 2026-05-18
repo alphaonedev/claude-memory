@@ -46,6 +46,10 @@ use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, MemoryLink, Tier};
 use chrono::Utc;
 
+mod common;
+#[cfg(feature = "sal-postgres")]
+use common::postgres_url;
+
 /// Fixture builder — returns a fully-populated `Memory` so individual
 /// tests don't repeat the 16-field literal. `reflection_depth` is
 /// surfaced so callers writing reflection-memory rows can pin the
@@ -240,11 +244,6 @@ fn sqlite_find_paths_walks_reflects_on_edges() {
 // Mirrors the gating pattern in
 // `tests/recursive_learning_task1_reflection_depth.rs`.
 // ─────────────────────────────────────────────────────────────────────
-
-#[cfg(feature = "sal-postgres")]
-fn postgres_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-}
 
 #[cfg(feature = "sal-postgres")]
 #[tokio::test]

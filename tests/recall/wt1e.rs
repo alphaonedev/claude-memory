@@ -40,7 +40,8 @@ use ai_memory::storage;
 
 use rusqlite::Connection;
 use serde_json::json;
-use tempfile::NamedTempFile;
+
+use super::common::fresh_db_tempfile_conn as fresh_db;
 
 // ---------------------------------------------------------------------------
 // Mock curator — deterministic, no network. Mirrors tests/atomisation/core.rs.
@@ -102,12 +103,6 @@ fn ensure_hook_installed() {
 // ---------------------------------------------------------------------------
 // Fixture helpers
 // ---------------------------------------------------------------------------
-
-fn fresh_db() -> (NamedTempFile, Connection) {
-    let tmp = NamedTempFile::new().expect("tempfile");
-    let conn = db::open(tmp.path()).expect("db::open");
-    (tmp, conn)
-}
 
 /// Insert a long-bodied source memory. Returns its id. Body is wide
 /// enough that the atomiser's `enforce_token_budget` won't fold it

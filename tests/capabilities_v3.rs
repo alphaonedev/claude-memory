@@ -42,6 +42,9 @@ use ai_memory::profile::Profile;
 use serde_json::Value;
 use std::collections::HashMap;
 
+mod common;
+use common::fresh_conn;
+
 /// v0.7.0 A3 — build a minimal `[mcp.allowlist]` table for tests.
 fn allowlist(rows: &[(&str, &[&str])]) -> McpConfig {
     let mut map = HashMap::new();
@@ -55,12 +58,6 @@ fn allowlist(rows: &[(&str, &[&str])]) -> McpConfig {
         profile: None,
         allowlist: Some(map),
     }
-}
-
-/// Build a fresh in-memory `rusqlite::Connection` so each test gets a
-/// clean DB state for the live-count overlays.
-fn fresh_conn() -> rusqlite::Connection {
-    ai_memory::db::open(std::path::Path::new(":memory:")).expect("open in-memory db")
 }
 
 fn semantic_tier() -> TierConfig {

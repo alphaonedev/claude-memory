@@ -48,17 +48,8 @@ use ai_memory::store::postgres::PostgresStore;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, RwLock};
 
-/// Returns Some(url) when the live-PG fixture is configured, None otherwise.
-fn postgres_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-}
-
-/// Pick a free local port. Mirrors the helper used by
-/// `tests/integration.rs::test_daemon_cmd_serve_responds_to_health_then_terminates`.
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    listener.local_addr().expect("local_addr").port()
-}
+mod common;
+use common::{free_port, postgres_url};
 
 /// Build the `AppState` for a postgres-backed in-process daemon.
 ///

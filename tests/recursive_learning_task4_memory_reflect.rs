@@ -68,6 +68,10 @@ use chrono::Utc;
 use rusqlite::Connection;
 use serde_json::Value;
 
+mod common;
+#[cfg(feature = "sal-postgres")]
+use common::postgres_url;
+
 // ─────────────────────────────────────────────────────────────────────
 // Fixture helpers.
 // ─────────────────────────────────────────────────────────────────────
@@ -601,11 +605,6 @@ fn caller_supplied_reflection_metadata_wins_on_collision() {
 // `AI_MEMORY_TEST_POSTGRES_URL`. Mirrors the gating pattern in
 // `tests/recursive_learning_task3_reflects_on.rs`.
 // ─────────────────────────────────────────────────────────────────────
-
-#[cfg(feature = "sal-postgres")]
-fn postgres_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-}
 
 #[cfg(feature = "sal-postgres")]
 #[tokio::test]

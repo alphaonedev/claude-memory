@@ -22,9 +22,8 @@ use ai_memory::models::Memory;
 use ai_memory::store::postgres::PostgresStore;
 use ai_memory::store::{CallerContext, MemoryStore};
 
-fn postgres_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-}
+mod common;
+use common::postgres_url;
 
 fn unique_title(base: &str) -> String {
     let nanos = std::time::SystemTime::now()

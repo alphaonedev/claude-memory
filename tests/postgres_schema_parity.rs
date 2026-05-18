@@ -41,6 +41,9 @@ use ai_memory::store::postgres::PostgresStore;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
+mod common;
+use common::postgres_url;
+
 /// `Postgres` `CURRENT_SCHEMA_VERSION` — tracks
 /// `src/store/postgres.rs::CURRENT_SCHEMA_VERSION`.
 ///
@@ -58,11 +61,6 @@ use sqlx::postgres::PgPoolOptions;
 /// floor assertion was retired in #797 once the namespaces inverted —
 /// see the docstring of `schema_versions_match_across_adapters`.
 const POSTGRES_CURRENT_VERSION: i64 = 41;
-
-/// Returns Some(url) when the live-PG fixture is configured, None otherwise.
-fn postgres_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-}
 
 /// Open an out-of-band `sqlx` pool against the same URL the adapter
 /// uses. We deliberately bypass `PostgresStore` for the inspection

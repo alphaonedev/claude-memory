@@ -34,6 +34,9 @@ use rusqlite::Connection;
 use serde_json::Value;
 use tokio::sync::{Mutex, Notify, RwLock};
 
+mod common;
+use common::free_port;
+
 // -------------------------------------------------------------------
 // Helpers
 // -------------------------------------------------------------------
@@ -69,12 +72,6 @@ fn fresh_db_via_open() -> (Connection, tempfile::NamedTempFile) {
     let tmp = tempfile::NamedTempFile::new().expect("tempfile");
     let conn = ai_memory::db::open(tmp.path()).expect("db::open applies migrations");
     (conn, tmp)
-}
-
-/// Free-port helper — same shape as s75_capabilities_db_schema_version.
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    listener.local_addr().expect("local_addr").port()
 }
 
 // -------------------------------------------------------------------

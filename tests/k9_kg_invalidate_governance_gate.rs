@@ -52,6 +52,9 @@ use rusqlite::Connection;
 use serde_json::json;
 use std::path::Path;
 
+mod common;
+use common::fresh_conn;
+
 /// Process-wide mutex serialising registry mutation across the
 /// scenarios below. Tests in this file MUST `let _g =
 /// registry_lock().lock().unwrap();` at function entry and hold the
@@ -61,10 +64,6 @@ use std::path::Path;
 fn registry_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn fresh_conn() -> Connection {
-    db::open(Path::new(":memory:")).expect("open in-memory DB")
 }
 
 /// Insert a memory in `namespace` and return its id.

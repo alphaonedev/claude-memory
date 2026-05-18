@@ -68,6 +68,10 @@ use rusqlite::Connection;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
+mod common;
+#[cfg(feature = "sal-postgres")]
+use common::postgres_url;
+
 // ─────────────────────────────────────────────────────────────────────
 // Fixture helpers — mirror tests/recursive_learning_task{4,5,6}_*.rs.
 // ─────────────────────────────────────────────────────────────────────
@@ -258,11 +262,6 @@ fn legacy_governance_json_without_max_reflection_depth_deserializes_to_default()
 // Bring up a fresh schema, verify `memories.reflection_depth` and the
 // `signed_events` table both exist, and round-trip a reflection.
 // ─────────────────────────────────────────────────────────────────────
-
-#[cfg(feature = "sal-postgres")]
-fn postgres_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-}
 
 #[cfg(feature = "sal-postgres")]
 #[tokio::test]
