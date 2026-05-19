@@ -107,6 +107,17 @@ min_line_coverage = 88.0
 "config.rs"                = 95    # tier B, measured 96.12 post-C5, raise to 98 by v0.8.0
 "handlers/federation_receive.rs" = 38   # tier B, measured 38.93 — EXCEPTION: PG-branch ceiling (see coverage/policy.md L0.7-3 chunk-D)
 "handlers/hook_subscribers.rs"   = 46   # tier B, measured 46.89 — EXCEPTION: PG-branch ceiling (see coverage/policy.md L0.7-3 chunk-D). v0.7.0 ship-cascade adjustment: fold-A2A1.1 (#700) added postgres-branch fanout to notify/subscribe; new lines are all `#[cfg(feature = "sal")] if matches!(StorageBackend::Postgres)` blocks calling already-unit-tested helpers (fanout_or_503) and SAL trait methods on the documented PG STRUCTURAL CEILING. Was 47/47.55; now 46/46.89 within same exception class. Phase-2 federation cell exercises the PG fanout path end-to-end.
+# v0.7.0 Wave-1-split fallout (#650): post-split handlers files; floors derived
+# floor(measured - 0.5) per playbook §8 on 2026-05-19 against HEAD 62cf9e49b.
+# Track future drift; recommend uplift toward tier-B 95% via per-file integration tests.
+"handlers/federation_signing_check.rs" = 28  # tier B, measured 28.57 — post-Wave-1 split (#650); uplift TODO
+"handlers/power_consolidation.rs" = 49  # tier B, measured 50.14 — post-Wave-1 split (#650); uplift TODO
+"handlers/governance.rs"   = 51    # tier B, measured 52.26 — post-Wave-1 split (#650); uplift TODO
+"handlers/links.rs"        = 58    # tier B, measured 58.98 — post-Wave-1 split (#650); uplift TODO
+"handlers/power.rs"        = 58    # tier B, measured 59.07 — post-Wave-1 split (#650); uplift TODO
+"handlers/admin.rs"        = 61    # tier B, measured 61.76 — post-Wave-1 split (#650); uplift TODO
+"handlers/approvals.rs"    = 62    # tier B, measured 63.38 — post-Wave-1 split (#650); uplift TODO
+"background/offload_ttl_sweep.rs" = 57  # tier C, measured 57.89 — uplift TODO
 "handlers/http.rs"               = 42   # tier B, measured 42.87 — EXCEPTION: PG-branch ceiling (see coverage/policy.md L0.7-3 chunk-D). v0.7.0 ship-cascade-2nd adjustment: fold-A2A1.5 (#705) + fold-A2A1.6 (#700) added postgres-branch governance enforcement on bulk_create/import_memories/entity_register, postgres-branch federation fanout on create_memory + post-promote, and the visibility-retry helper. New lines are all `#[cfg(feature = "sal")] if matches!(StorageBackend::Postgres)` blocks mirroring already-tested sqlite paths and calling already-unit-tested helpers (broadcast_store_quorum, finalise_quorum, QuorumNotMetPayload) on the documented PG STRUCTURAL CEILING. Was 44/45.31; now 42/42.87 within same exception class. Phase-1/2 PG cells exercise the PG fanout + governance paths end-to-end.
 "mcp/mod.rs"               = 96    # tier B, measured 97.20
 "mcp/registry.rs"          = 96    # tier B, measured 96.61
