@@ -1105,7 +1105,7 @@ pub fn update(
 ) -> Result<(bool, bool)> {
     update_with_expected_version(
         conn, id, title, content, tier, namespace, tags, priority, confidence, expires_at,
-        metadata, None,
+        metadata, None, None,
     )
 }
 
@@ -1136,6 +1136,7 @@ pub fn update_with_expected_version(
     confidence: Option<f64>,
     expires_at: Option<&str>,
     metadata: Option<&serde_json::Value>,
+    source_uri: Option<&str>,
     expected_version: Option<i64>,
 ) -> Result<(bool, bool)> {
     let mut stmt = conn.prepare("SELECT * FROM memories WHERE id = ?1")?;
@@ -1206,10 +1207,15 @@ pub fn update_with_expected_version(
     // sees a CONFLICT (their WHERE clause no longer matches the
     // bumped value). When `expected_version` is NULL the
     // `?12 IS NULL` predicate short-circuits the gate.
+    // v0.7.0 Provenance Gap 2 (#906) — `source_uri` is an opt-in patch
+    // field. When `None`, the COALESCE keeps the stored value (a
+    // patch that doesn't touch source_uri must NOT blank it out).
+    // When `Some(uri)`, the row's source_uri is rewritten verbatim
+    // (rename / scheme migration / bad-data correction).
     let update_res = conn.execute(
-        "UPDATE memories SET tier=?1, namespace=?2, title=?3, content=?4, tags=?5, priority=?6, confidence=?7, updated_at=?8, expires_at=?9, metadata=?10, version = version + 1
-         WHERE id=?11 AND (?12 IS NULL OR version = ?12)",
-        params![effective_tier.as_str(), namespace, new_title, new_content, tags_json, priority, confidence, now, expires_at, metadata_json, id, expected_version],
+        "UPDATE memories SET tier=?1, namespace=?2, title=?3, content=?4, tags=?5, priority=?6, confidence=?7, updated_at=?8, expires_at=?9, metadata=?10, source_uri = COALESCE(?11, source_uri), version = version + 1
+         WHERE id=?12 AND (?13 IS NULL OR version = ?13)",
+        params![effective_tier.as_str(), namespace, new_title, new_content, tags_json, priority, confidence, now, expires_at, metadata_json, source_uri, id, expected_version],
     );
     match update_res {
         Ok(0) => {
@@ -1321,6 +1327,7 @@ pub fn update_with_archive_on_supersede(
     confidence: Option<f64>,
     expires_at: Option<&str>,
     metadata: Option<&serde_json::Value>,
+    source_uri: Option<&str>,
     expected_version: Option<i64>,
     edit_source: crate::models::EditSource,
 ) -> Result<SupersedeResult> {
@@ -1370,6 +1377,13 @@ pub fn update_with_archive_on_supersede(
         Some(v) => Some(v.to_string()),
         None => existing.expires_at.clone(),
     };
+    // v0.7.0 Provenance Gap 2 (#906) — caller-supplied source_uri
+    // wins; otherwise inherit from the OLD row. Mirrors the pattern
+    // used for title/content/tier above.
+    let new_source_uri = match source_uri {
+        Some(uri) => Some(uri.to_string()),
+        None => existing.source_uri.clone(),
+    };
     // Stamp the edit-source provenance into the new row's metadata so
     // downstream observers can tell this row came from an
     // append-and-archive supersede vs. a direct user write.
@@ -1413,6 +1427,7 @@ pub fn update_with_archive_on_supersede(
     new_mem.confidence = new_confidence;
     new_mem.expires_at = new_expires;
     new_mem.metadata = new_metadata;
+    new_mem.source_uri = new_source_uri;
     new_mem.created_at = now.clone();
     new_mem.updated_at = now.clone();
     new_mem.access_count = 0;

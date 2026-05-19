@@ -759,6 +759,9 @@ pub fn validate_update(update: &UpdateMemory) -> Result<()> {
     if let Some(ref meta) = update.metadata {
         validate_metadata(meta)?;
     }
+    if let Some(ref uri) = update.source_uri {
+        validate_source_uri(uri)?;
+    }
     Ok(())
 }
 

@@ -1172,6 +1172,14 @@ pub struct UpdatePatch {
     pub priority: Option<i32>,
     pub confidence: Option<f64>,
     pub metadata: Option<serde_json::Value>,
+    /// v0.7.0 Provenance Gap 2 (#906) — opt-in source_uri patch.
+    /// `None` leaves the stored value untouched (COALESCE semantics
+    /// on the SQL layer). `Some("scheme:payload")` rewrites the row's
+    /// `source_uri` verbatim (rename / scheme migration / bad-data
+    /// correction). Validated via `crate::validate::validate_source_uri`
+    /// before reaching the storage layer; the storage layer trusts the
+    /// patch as already-validated.
+    pub source_uri: Option<String>,
 }
 
 /// Report produced by `verify`.

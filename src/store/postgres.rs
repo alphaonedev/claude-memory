@@ -1719,6 +1719,10 @@ impl PostgresStore {
         }
 
         let new_version = current + 1;
+        // v0.7.0 Provenance Gap 2 (#906) — source_uri ($10) follows
+        // COALESCE semantics so a patch that omits source_uri leaves
+        // the stored value alone. The expected_version gate is shifted
+        // to $11.
         let rows_affected = sqlx::query(
             "UPDATE memories SET
                 title = COALESCE($2, title),
@@ -1739,10 +1743,11 @@ impl PostgresStore {
                     )
                     ELSE $9::JSONB
                 END,
+                source_uri = COALESCE($10, source_uri),
                 updated_at = NOW(),
                 version = version + 1
              WHERE id = $1
-               AND ($10::BIGINT IS NULL OR version = $10::BIGINT)",
+               AND ($11::BIGINT IS NULL OR version = $11::BIGINT)",
         )
         .bind(id)
         .bind(patch.title)
@@ -1761,6 +1766,7 @@ impl PostgresStore {
         .bind(patch.priority)
         .bind(patch.confidence)
         .bind(patch.metadata)
+        .bind(patch.source_uri)
         .bind(expected_version)
         .execute(&self.pool)
         .await
@@ -1894,6 +1900,12 @@ impl PostgresStore {
         let new_tags = patch.tags.clone().unwrap_or_else(|| existing.tags.clone());
         let new_priority = patch.priority.unwrap_or(existing.priority);
         let new_confidence = patch.confidence.unwrap_or(existing.confidence);
+        // v0.7.0 Provenance Gap 2 (#906) — caller-supplied source_uri
+        // wins; otherwise inherit from the OLD row.
+        let new_source_uri = patch
+            .source_uri
+            .clone()
+            .or_else(|| existing.source_uri.clone());
         // Stamp edit_source + superseded_id into the new row's metadata.
         let mut new_metadata = patch
             .metadata
@@ -1949,11 +1961,13 @@ impl PostgresStore {
 
         // Step 3: insert the NEW row carrying the patched content.
         // version starts at 1 (fresh row, not a continuation).
+        // v0.7.0 Provenance Gap 2 (#906) — source_uri ($11) is carried
+        // onto the new row via patch-or-inherit composition above.
         sqlx::query(
             "INSERT INTO memories
                 (id, tier, namespace, title, content, tags, priority, confidence,
-                 source, access_count, created_at, updated_at, metadata, version)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, NOW(), NOW(), $10, 1)",
+                 source, access_count, created_at, updated_at, metadata, version, source_uri)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0, NOW(), NOW(), $10, 1, $11)",
         )
         .bind(&new_id)
         .bind(new_tier.as_str())
@@ -1969,6 +1983,7 @@ impl PostgresStore {
         .bind(new_confidence)
         .bind(&existing.source)
         .bind(&new_metadata)
+        .bind(&new_source_uri)
         .execute(&mut *tx)
         .await
         .map_err(|e| to_store_err("insert new on supersede", e))?;
@@ -6659,6 +6674,11 @@ impl MemoryStore for PostgresStore {
         // Blocker #295: `metadata.agent_id` is SQL-layer-immutable. If
         // the current row has an agent_id we preserve it against any
         // patch; otherwise the patch's metadata (if provided) wins.
+        //
+        // v0.7.0 Provenance Gap 2 (#906): `source_uri` follows COALESCE
+        // semantics — a patch that doesn't touch source_uri leaves the
+        // stored value alone; a patch that supplies one rewrites the
+        // row's source_uri verbatim.
         let rows_affected = sqlx::query(
             "UPDATE memories SET
                 title = COALESCE($2, title),
@@ -6681,6 +6701,7 @@ impl MemoryStore for PostgresStore {
                     )
                     ELSE $9::JSONB
                 END,
+                source_uri = COALESCE($10, source_uri),
                 updated_at = NOW()
              WHERE id = $1",
         )
@@ -6701,6 +6722,7 @@ impl MemoryStore for PostgresStore {
         .bind(patch.priority)
         .bind(patch.confidence)
         .bind(patch.metadata)
+        .bind(patch.source_uri)
         .execute(&self.pool)
         .await
         .map_err(|e| to_store_err("update", e))?

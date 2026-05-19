@@ -835,6 +835,13 @@ pub struct UpdateMemory {
     pub confidence: Option<f64>,
     pub expires_at: Option<String>,
     pub metadata: Option<Value>,
+    /// v0.7.0 Provenance Gap 2 (#906) — opt-in `source_uri` patch.
+    /// `None` leaves the stored value alone (COALESCE on the SQL
+    /// layer); `Some("scheme:payload")` rewrites the row's source_uri
+    /// (doc rename / URI scheme migration / bad-data correction).
+    /// Validated by `validate::validate_source_uri` before reaching
+    /// storage.
+    pub source_uri: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

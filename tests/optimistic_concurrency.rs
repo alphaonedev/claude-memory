@@ -95,6 +95,7 @@ fn expected_version_match_succeeds_and_bumps() {
         None,
         None,
         None,
+        None,
         Some(1),
     )
     .expect("update must succeed with matching expected_version");
@@ -122,6 +123,7 @@ fn expected_version_mismatch_returns_conflict_envelope() {
         None,
         None,
         None,
+        None,
         Some(1),
     )
     .expect("first update must succeed");
@@ -135,6 +137,7 @@ fn expected_version_mismatch_returns_conflict_envelope() {
         &id,
         None,
         Some("loser write"),
+        None,
         None,
         None,
         None,
@@ -182,6 +185,7 @@ fn two_concurrent_updates_produce_exactly_one_winner() {
         None,
         None,
         None,
+        None,
         Some(baseline.version),
     );
     // Caller B writes with the SAME expected_version=1 — loses.
@@ -190,6 +194,7 @@ fn two_concurrent_updates_produce_exactly_one_winner() {
         &id,
         None,
         Some("body from B"),
+        None,
         None,
         None,
         None,
@@ -238,6 +243,7 @@ fn expected_version_against_missing_row_returns_not_found_not_conflict() {
         "11111111-2222-3333-4444-555555555555",
         None,
         Some("body"),
+        None,
         None,
         None,
         None,
@@ -312,6 +318,7 @@ fn version_conflict_is_downcastable_from_anyhow_chain() {
         None,
         None,
         None,
+        None,
         Some(1),
     )
     .expect("first wins");
@@ -320,6 +327,7 @@ fn version_conflict_is_downcastable_from_anyhow_chain() {
         &id,
         None,
         Some("second"),
+        None,
         None,
         None,
         None,
@@ -370,6 +378,7 @@ fn legacy_update_helper_still_bumps_version_so_followup_gate_observes_it() {
         &id,
         None,
         Some("racing"),
+        None,
         None,
         None,
         None,

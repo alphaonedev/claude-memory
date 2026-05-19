@@ -154,6 +154,8 @@ pub async fn update_memory(
             priority: body.priority,
             confidence: body.confidence,
             metadata: body.metadata.clone(),
+            // v0.7.0 Provenance Gap 2 (#906) — thread source_uri patch.
+            source_uri: body.source_uri.clone(),
         };
         let ctx = crate::store::CallerContext::for_agent("ai:http");
         return match app.store.update(&ctx, &id, patch).await {
@@ -211,6 +213,7 @@ pub async fn update_memory(
         body.confidence,
         body.expires_at.as_deref(),
         preserved_metadata.as_ref(),
+        body.source_uri.as_deref(),
         if_match_version,
     ) {
         Ok((true, _)) => {

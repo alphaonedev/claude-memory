@@ -40,6 +40,10 @@ pub(super) fn handle_update(
         .map(|p| i32::try_from(p).unwrap_or(i32::MAX));
     let confidence = params["confidence"].as_f64();
     let expires_at = params["expires_at"].as_str();
+    // v0.7.0 Provenance Gap 2 (#906) — opt-in source_uri patch.
+    // Validated below before reaching the storage layer; storage path
+    // trusts the value as already-validated.
+    let source_uri = params["source_uri"].as_str();
     // v0.7.0 Provenance Gap 1 (#884) — optimistic-concurrency
     // `expected_version` param. When supplied + non-null, the
     // underlying storage::update_with_expected_version refuses the
@@ -78,6 +82,9 @@ pub(super) fn handle_update(
         // Allow past dates in update for programmatic TTL management and GC testing
         validate::validate_expires_at_format(ts).map_err(|e| e.to_string())?;
     }
+    if let Some(uri) = source_uri {
+        validate::validate_source_uri(uri).map_err(|e| e.to_string())?;
+    }
 
     let metadata = if params["metadata"].is_object() {
         let m = params["metadata"].clone();
@@ -110,6 +117,7 @@ pub(super) fn handle_update(
             confidence,
             expires_at,
             metadata.as_ref(),
+            source_uri,
             expected_version,
             edit_source,
         )
@@ -151,6 +159,7 @@ pub(super) fn handle_update(
         confidence,
         expires_at,
         metadata.as_ref(),
+        source_uri,
         expected_version,
     )
     .map_err(|e| conflict_or_string(&e))?;

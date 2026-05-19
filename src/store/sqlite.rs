@@ -102,7 +102,12 @@ impl MemoryStore for SqliteStore {
 
     async fn update(&self, _ctx: &CallerContext, id: &str, patch: UpdatePatch) -> StoreResult<()> {
         let conn = self.state.lock().await;
-        let (found, _content_changed) = db::update(
+        // v0.7.0 Provenance Gap 2 (#906) — thread the patch's
+        // `source_uri` slot into `update_with_expected_version` so the
+        // sqlite SAL adapter honors source_uri rewrites end-to-end.
+        // `expected_version=None` preserves the trait's existing
+        // last-write-wins contract.
+        let (found, _content_changed) = db::update_with_expected_version(
             &conn,
             id,
             patch.title.as_deref(),
@@ -114,6 +119,8 @@ impl MemoryStore for SqliteStore {
             patch.confidence,
             None,
             patch.metadata.as_ref(),
+            patch.source_uri.as_deref(),
+            None,
         )
         .map_err(box_err)?;
         if found {

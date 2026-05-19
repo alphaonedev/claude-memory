@@ -92,6 +92,7 @@ fn llm_edit_appends_new_row_and_archives_old() {
         None,
         None,
         None,
+        None,
         EditSource::Llm,
     )
     .expect("llm update");
@@ -171,6 +172,7 @@ fn hook_edit_uses_same_path_as_llm_and_archives_with_superseded_reason() {
         None,
         None,
         None,
+        None,
         EditSource::Hook,
     )
     .expect("hook update");
@@ -204,6 +206,7 @@ fn archive_list_returns_old_content_after_llm_supersede() {
         &id,
         None,
         Some("today's body — LLM rewrite"),
+        None,
         None,
         None,
         None,
@@ -286,6 +289,7 @@ fn llm_supersede_preserves_tier_namespace_and_tags_from_old_row() {
         None,       // confidence
         None,       // expires_at
         None,       // metadata
+        None,       // source_uri
         None,       // expected_version
         EditSource::Llm,
     )
@@ -309,6 +313,7 @@ fn llm_supersede_fails_clean_when_old_id_does_not_exist() {
         "11111111-2222-3333-4444-555555555555",
         None,
         Some("body"),
+        None,
         None,
         None,
         None,
@@ -342,6 +347,7 @@ fn supersede_result_carries_distinct_archived_and_new_ids() {
         &id,
         None,
         Some("patched"),
+        None,
         None,
         None,
         None,
@@ -444,6 +450,7 @@ fn llm_supersede_starts_new_row_at_version_one() {
         None,
         None,
         None,
+        None,
         EditSource::Llm,
     )
     .expect("supersede");
@@ -484,6 +491,7 @@ fn append_and_archive_honors_expected_version_gate() {
         &id,
         None,
         Some("LLM supersede with stale expected_version"),
+        None,
         None,
         None,
         None,

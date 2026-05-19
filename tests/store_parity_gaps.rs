@@ -151,6 +151,7 @@ fn verify_gap_1_version_sqlite() {
         None,
         None,
         None,
+        None,
         Some(1),
     )
     .expect("first update succeeds");
@@ -169,6 +170,7 @@ fn verify_gap_1_version_sqlite() {
         &conn,
         &id,
         Some("v3"),
+        None,
         None,
         None,
         None,
@@ -284,6 +286,7 @@ fn verify_gap_5_edit_source_sqlite() {
         &id,
         None,
         Some("new content"),
+        None,
         None,
         None,
         None,
