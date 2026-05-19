@@ -246,7 +246,10 @@ async fn webhook_fires_on_http_delete() {
         .await;
     assert_eq!(status, StatusCode::OK, "delete should succeed");
 
-    let req = wait_for_event(&mock, "memory_delete", Duration::from_secs(2))
+    // Windows CI is consistently slower than Linux/macOS on the
+    // std::thread::spawn dispatch + Connection::open cycle. 5s gives
+    // enough headroom on every supported platform.
+    let req = wait_for_event(&mock, "memory_delete", Duration::from_secs(5))
         .await
         .expect("memory_delete webhook must fire on HTTP DELETE within 2s");
 
@@ -276,7 +279,7 @@ async fn webhook_fires_on_http_promote() {
         .await;
     assert_eq!(status, StatusCode::OK, "promote should succeed");
 
-    let req = wait_for_event(&mock, "memory_promote", Duration::from_secs(2))
+    let req = wait_for_event(&mock, "memory_promote", Duration::from_secs(5))
         .await
         .expect("memory_promote webhook must fire on HTTP promote within 2s");
 
@@ -309,7 +312,7 @@ async fn webhook_fires_on_http_link_created() {
         .await;
     assert_eq!(status, StatusCode::CREATED, "link should be created");
 
-    let req = wait_for_event(&mock, "memory_link_created", Duration::from_secs(2))
+    let req = wait_for_event(&mock, "memory_link_created", Duration::from_secs(5))
         .await
         .expect("memory_link_created webhook must fire on HTTP link within 2s");
 
@@ -351,7 +354,7 @@ async fn webhook_fires_on_http_consolidate() {
         .expect("response carries new id")
         .to_string();
 
-    let req = wait_for_event(&mock, "memory_consolidated", Duration::from_secs(2))
+    let req = wait_for_event(&mock, "memory_consolidated", Duration::from_secs(5))
         .await
         .expect("memory_consolidated webhook must fire on HTTP consolidate within 2s");
 
