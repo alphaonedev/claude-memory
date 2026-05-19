@@ -33,6 +33,52 @@ for the RCA.
 
 Default namespace for this repo is `ai-memory-mcp`.
 
+### LSP setup (v0.7.0 — Claude Code rust-analyzer plugin)
+
+Per the v0.7.0 SHIP campaign retrospective (Anthropic's "How Claude Code
+works in large codebases" article, 2026-05-14): LSP is one of the
+highest-leverage Claude Code investments for multi-language codebases.
+It gives Claude symbol-precision navigation (`go-to-definition`,
+`find-all-references`, `incoming-calls`, `workspace-symbol`) rather
+than grep-and-read on ambiguous text matches.
+
+Configured in [`.claude/settings.json`](.claude/settings.json) at v0.7.0
+ship.
+
+**One-time per-developer setup:**
+
+```bash
+rustup component add rust-analyzer
+```
+
+**Verification:**
+
+Open this repo in Claude Code and ask: *"find all callers of
+`forensic_sink_test_lock` in src/governance/audit.rs"*. The LSP path
+returns the 4 indirect-caller test modules in milliseconds via
+`findReferences`; the grep-and-read fallback walks 200k+ LOC reading
+files until it finds them. Both work; the LSP path is ~50x faster and
+symbol-precise (no false hits on identically-named items in different
+crates).
+
+**Caveats:**
+
+- Initial workspace indexing on this 200k+ LOC + 600+ dep codebase
+  takes 2-5 min; subsequent same-day sessions are warm.
+- rust-analyzer can take 2-4 GB resident memory. On hosts with <16 GB
+  free, expect indexing to fail under concurrent `cargo` + `llvm-cov`
+  load (the v0.7.0 SHIP commit cycle exercised this — see #898 for the
+  parallel sal-postgres llvm-cov OOM that documented the same memory
+  ceiling).
+- LSP is *complementary* to the ai-memory substrate, not redundant.
+  LSP answers "where is this symbol used in the codebase as it exists
+  right now?" — ai-memory answers "what did the prior session learn
+  about this symbol's behavior?" Both are needed for engineering work
+  that crosses time + space.
+
+`rust-analyzer` is treated as a build-time tool, not a runtime
+dependency of ai-memory itself. CI doesn't require it.
+
 Every commit you author must end with a `Co-Authored-By:` trailer naming the model.
 Every PR you open must include the **AI involvement** section described in
 [`AI_DEVELOPER_WORKFLOW.md` §8.2](docs/AI_DEVELOPER_WORKFLOW.md).
