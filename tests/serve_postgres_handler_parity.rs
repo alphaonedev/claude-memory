@@ -405,9 +405,13 @@ async fn bucket_b_subscriptions_persist() {
         "subscribe must return 201 CREATED on postgres"
     );
 
+    // Per #874 (security-medium, 2026-05-18) the list_subscriptions
+    // handler requires `X-Agent-Id` matching the agent_id= query param;
+    // omit and it returns 403 before the SAL list projection runs.
     let resp = client
         .get(format!("{base}/api/v1/subscriptions"))
         .query(&[("agent_id", &bob)])
+        .header("x-agent-id", &bob)
         .send()
         .await
         .expect("list_subscriptions GET");
