@@ -503,6 +503,17 @@ mod tests {
 
     fn fresh_init(dir: &Path, key: Option<SigningKey>) {
         shutdown();
+        // Defensive cleanup: Windows-only test flake (#899) where
+        // `record_then_verify_signed_chain` counted 5 records instead
+        // of 3, suggesting cross-test forensic-file bleed into the
+        // tempdir. Clearing the dir before init guarantees the test
+        // body starts from a known-empty state regardless of which
+        // sibling test ran prior or what global-sink state lingered.
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
         init(dir, key).expect("forensic init");
     }
 

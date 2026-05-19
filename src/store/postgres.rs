@@ -10411,11 +10411,19 @@ mod tests {
         // Task 1/8 — recursive learning). v32 mirrors SQLite v33 — the
         // v0.7.1-fold (#687/#688) SQL-side CHECK constraint on
         // `memory_links.relation`. v33 mirrors SQLite v34 — V-4
-        // closeout (#698) signed_events cross-row hash chain. A
-        // future bump on either side without the corresponding port
+        // closeout (#698) signed_events cross-row hash chain.
+        //
+        // v42-v46 land via #894 (PG+AGE parity for provenance Gaps 1-7):
+        //   v42 = memories.version BIGINT (Gap 1 #884)
+        //   v43 = memories.source_uri upgrade-path + partial index (Gap 2 #885)
+        //   v44 = recall_observations table (Gap 3 #886)
+        //   v45 = edit_source archive metadata + lookup indexes (Gap 5 #888)
+        //   v46 = memory_links temporal columns (Gap 7 / #860)
+        //
+        // A future bump on either side without the corresponding port
         // re-trips this assertion before the migration runner gets a
         // chance to write a partial schema to disk.
-        assert_eq!(CURRENT_SCHEMA_VERSION, 41);
+        assert_eq!(CURRENT_SCHEMA_VERSION, 46);
     }
 
     #[tokio::test]

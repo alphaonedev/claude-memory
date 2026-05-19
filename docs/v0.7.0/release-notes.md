@@ -568,7 +568,7 @@ handler. ([commit `fbf093c`](https://github.com/alphaonedev/ai-memory-mcp/commit
   `CURRENT_SCHEMA_VERSION = 34`;
   [`src/store/postgres.rs`](../../src/store/postgres.rs)
   `CURRENT_SCHEMA_VERSION = 33`.)
-- **MCP tool count 60 → 71** (post-grand-slam at HEAD `c9472c1`;
+- **MCP tool count 60 → 73** (post-grand-slam + Gap 3 recall_observations + Gap 4 confidence_tier surface;
   authoritative count from `Profile::full().expected_tool_count()` in
   [`src/profile.rs`](../../src/profile.rs) and verified by
   `grep -oE '"memory_[a-z_]+"' src/mcp/registry.rs | sort -u | wc -l`).

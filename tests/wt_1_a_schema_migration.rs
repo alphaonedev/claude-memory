@@ -189,12 +189,13 @@ fn test_migration_v36_idempotent() {
         )
         .expect("read v2");
 
-    // The migration ladder reaches v43 (Persona Signing Pipeline #813
-    // atomicity triggers); pass-through v36 still exercises WT-1-A's
-    // atomisation migration. Tracks `CURRENT_SCHEMA_VERSION` in
-    // src/storage/migrations.rs.
-    assert_eq!(v1, 43);
-    assert_eq!(v1, v2, "v43: migrate is not idempotent — version drifted");
+    // The migration ladder reaches v47 (Gap 3 recall_observations tier
+    // #886); pass-through v36 still exercises WT-1-A's atomisation
+    // migration. Tracks `CURRENT_SCHEMA_VERSION` in
+    // src/storage/migrations.rs — bump this assertion when the const
+    // moves so schema bumps stay explicit.
+    assert_eq!(v1, 47);
+    assert_eq!(v1, v2, "v47: migrate is not idempotent — version drifted");
 
     // Columns + indexes still present after replay.
     assert!(column_exists(&conn2, "memories", "atomised_into"));
