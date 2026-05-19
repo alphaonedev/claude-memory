@@ -493,4 +493,159 @@ mod tests {
             handle_update(&conn, &json!({"id": &id, "priority": 8}), None, None).expect("ok 2");
         assert_eq!(one["updated"], two["updated"]);
     }
+
+    // v0.7.0 Provenance Gap 5 (#888) — edit_source=llm routes through the
+    // append-and-archive supersede write path: the OLD row lands in
+    // archived_memories with archive_reason='superseded', a fresh NEW row
+    // is minted carrying the patched content + metadata.superseded_id, and
+    // the response surfaces `superseded_id` + `new_id`. Covers the
+    // `if edit_source.appends_and_archives()` arm in handle_update
+    // (lines 107-148), including the embedder Some-path re-embed of the
+    // NEW row + vector-index insert.
+    #[test]
+    fn edit_source_llm_appends_and_archives_with_embedder() {
+        let conn = fresh_conn();
+        let mem = make_mem("pre-supersede");
+        let id = db::insert(&conn, &mem).expect("ins");
+        let mock = MockEmbedder::new_local().expect("mock");
+        let idx = VectorIndex::empty();
+        let out = handle_update(
+            &conn,
+            &json!({
+                "id": &id,
+                "content": "llm-rewritten content body",
+                "edit_source": "llm",
+            }),
+            Some(&mock as &dyn crate::embeddings::Embed),
+            Some(&idx),
+        )
+        .expect("supersede ok");
+        assert_eq!(out["updated"].as_bool(), Some(true));
+        assert_eq!(out["edit_source"].as_str(), Some("llm"));
+        // archived_id == original id; new_id is a freshly-minted uuid
+        assert_eq!(out["superseded_id"].as_str(), Some(id.as_str()));
+        let new_id = out["new_id"].as_str().expect("new_id present");
+        assert_ne!(new_id, id);
+        // NEW row carries the patched content + superseded_id pointer
+        let new_mem = &out["memory"];
+        assert_eq!(
+            new_mem["content"].as_str(),
+            Some("llm-rewritten content body")
+        );
+        assert_eq!(
+            new_mem["metadata"]["superseded_id"].as_str(),
+            Some(id.as_str())
+        );
+        // Embedding written for the NEW row, indexed by new_id
+        let emb = db::get_embedding(&conn, new_id)
+            .expect("emb ok")
+            .expect("some");
+        assert_eq!(emb.len(), 384);
+    }
+
+    // v0.7.0 Provenance Gap 5 (#888) — edit_source=hook variant of the
+    // append-and-archive path WITHOUT an embedder. Covers the Hook arm of
+    // `EditSource::appends_and_archives()`, plus the None-embedder branch
+    // inside the supersede block (lines 126 falsy path), AND the
+    // happy-path return for the supersede shape (lines 141-147).
+    #[test]
+    fn edit_source_hook_appends_and_archives_no_embedder() {
+        let conn = fresh_conn();
+        let mem = make_mem("pre-hook");
+        let id = db::insert(&conn, &mem).expect("ins");
+        let out = handle_update(
+            &conn,
+            &json!({
+                "id": &id,
+                "title": "hook-edited title",
+                "edit_source": "hook",
+            }),
+            None,
+            None,
+        )
+        .expect("hook supersede ok");
+        assert_eq!(out["edit_source"].as_str(), Some("hook"));
+        assert_eq!(out["superseded_id"].as_str(), Some(id.as_str()));
+        let new_id = out["new_id"].as_str().expect("new_id present");
+        assert_ne!(new_id, id);
+        assert_eq!(out["memory"]["title"].as_str(), Some("hook-edited title"));
+        // No embedder → no embedding row for the new id.
+        assert!(
+            db::get_embedding(&conn, new_id).expect("ok").is_none(),
+            "no embedder ⇒ no embedding persisted on the new row"
+        );
+    }
+
+    // v0.7.0 Provenance Gap 1 (#884) — when `expected_version` is supplied
+    // and drifts from the stored row's version, the storage layer returns
+    // a typed VersionConflict; handle_update funnels it through
+    // `conflict_or_string`, which emits a JSON CONFLICT envelope as the
+    // Err string. Covers lines 165 (map_err on the in-place path) +
+    // 199-208 (the VersionConflict downcast arm) end-to-end.
+    #[test]
+    fn expected_version_conflict_returns_json_envelope() {
+        let conn = fresh_conn();
+        let mem = make_mem("verconflict");
+        let id = db::insert(&conn, &mem).expect("ins");
+        // Bump version to 2 with a no-expectation update, so the next
+        // expected_version=1 call drifts.
+        let _ = handle_update(&conn, &json!({"id": &id, "priority": 6}), None, None).expect("bump");
+        let err = handle_update(
+            &conn,
+            &json!({
+                "id": &id,
+                "title": "stale write",
+                "expected_version": 1,
+            }),
+            None,
+            None,
+        )
+        .unwrap_err();
+        // Err is the JSON CONFLICT envelope minted by conflict_or_string.
+        let v: serde_json::Value = serde_json::from_str(&err).expect("json envelope");
+        assert_eq!(v["status"].as_str(), Some("conflict"));
+        assert_eq!(v["id"].as_str(), Some(id.as_str()));
+        assert_eq!(v["expected_version"].as_i64(), Some(1));
+        assert_eq!(v["current_version"].as_i64(), Some(2));
+    }
+
+    // v0.7.0 Provenance Gap 2 (#906) — source_uri opt-in patch is
+    // validated before the storage write. Covers the
+    // `if let Some(uri) = source_uri { validate::validate_source_uri(...) }`
+    // arm at lines 85-87 — both the happy validate-pass branch and the
+    // reject branch for a bare string without a recognised scheme.
+    #[test]
+    fn source_uri_valid_passes_through_and_invalid_rejects() {
+        let conn = fresh_conn();
+        let mem = make_mem("srcuri");
+        let id = db::insert(&conn, &mem).expect("ins");
+        // Happy: doc: scheme is accepted by validate_source_uri.
+        let ok = handle_update(
+            &conn,
+            &json!({"id": &id, "source_uri": "doc:internal-ref-42"}),
+            None,
+            None,
+        )
+        .expect("valid source_uri");
+        assert_eq!(ok["updated"].as_bool(), Some(true));
+        assert_eq!(
+            ok["memory"]["source_uri"].as_str(),
+            Some("doc:internal-ref-42")
+        );
+        // Reject: bare string without a recognised scheme.
+        let err = handle_update(
+            &conn,
+            &json!({"id": &id, "source_uri": "example.com/no-scheme"}),
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(!err.is_empty(), "source_uri must be rejected");
+        assert!(
+            err.to_lowercase().contains("source uri")
+                || err.to_lowercase().contains("source_uri")
+                || err.to_lowercase().contains("scheme"),
+            "error should reference source uri / scheme; got: {err}"
+        );
+    }
 }
