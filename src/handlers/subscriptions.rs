@@ -64,12 +64,26 @@ pub async fn notify(
         )
             .into_response();
     };
-    let sender = match resolve_caller_agent_id(body.agent_id.as_deref(), &headers, None) {
+    // #901 (security-high, 2026-05-19) — sibling of #874. Authenticate
+    // via X-Agent-Id header ONLY; the body-supplied `agent_id` is
+    // caller-controlled and was the cross-tenant spoof vector. The
+    // body value is now a refinement that must MATCH the authenticated
+    // caller, else 403.
+    let sender = match resolve_caller_agent_id(None, &headers, None) {
         Ok(id) => id,
         Err(e) => {
             return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
         }
     };
+    if let Some(claimed) = body.agent_id.as_deref()
+        && claimed != sender
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "agent_id body parameter does not match authenticated caller"})),
+        )
+            .into_response();
+    }
 
     // v0.7.0 fold-A2A1.1 (#700, F-A2A1.1) — postgres-backed daemons
     // route through the SAL `notify` trait method AND fan the resulting
@@ -229,12 +243,26 @@ pub async fn subscribe(
     headers: HeaderMap,
     Json(body): Json<SubscribeBody>,
 ) -> impl IntoResponse {
-    let caller = match resolve_caller_agent_id(body.agent_id.as_deref(), &headers, None) {
+    // #901 (security-high, 2026-05-19) — sibling of #874. The pre-#901
+    // path trusted body.agent_id as identity, allowing webhook-hijack
+    // by an attacker registering hooks under another agent's name.
+    // Header-only auth now; body.agent_id (if present) must match the
+    // authenticated caller.
+    let caller = match resolve_caller_agent_id(None, &headers, None) {
         Ok(id) => id,
         Err(e) => {
             return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
         }
     };
+    if let Some(claimed) = body.agent_id.as_deref()
+        && claimed != caller
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "agent_id body parameter does not match authenticated caller"})),
+        )
+            .into_response();
+    }
 
     // R3-S1.HMAC (v0.7.0 fix campaign 2026-05-13): refuse to register a
     // subscription when neither a per-subscription `secret` nor a

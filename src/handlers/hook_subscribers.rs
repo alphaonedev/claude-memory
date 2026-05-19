@@ -39,12 +39,26 @@ pub async fn get_inbox(
     headers: HeaderMap,
     Query(q): Query<InboxQuery>,
 ) -> impl IntoResponse {
-    let owner = match resolve_caller_agent_id(None, &headers, q.agent_id.as_deref()) {
+    // #901 (security-high, 2026-05-19) — sibling of #874. The pre-#901
+    // path TRUSTED `?agent_id=` query as identity, allowing any caller
+    // to read any agent's inbox by passing `?agent_id=victim`. Header
+    // is now the only trusted source; the query value (if present)
+    // must match the authenticated caller, else 403.
+    let owner = match resolve_caller_agent_id(None, &headers, None) {
         Ok(id) => id,
         Err(e) => {
             return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
         }
     };
+    if let Some(claimed) = q.agent_id.as_deref()
+        && claimed != owner
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "agent_id query parameter does not match authenticated caller"})),
+        )
+            .into_response();
+    }
 
     // v0.7.0 Wave-3 Continuation 4 (Bucket B / S32+S58) — postgres
     // inbox now reads from the `_inbox/<owner>` namespace via the SAL
