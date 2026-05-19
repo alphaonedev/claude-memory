@@ -777,8 +777,8 @@ pub fn tool_definitions() -> Value {
                         "allowed_agents": {"type": "array", "items": {"type": "string"}, "description": "Observed-by allowlist. Empty array = zero rows."},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 200, "description": "Cap across all depths [1,1000]."},
                         "include_invalidated": {"type": "boolean", "default": false, "description": "When true, traverse historically-invalidated edges."},
-                        "by_source_uri": {"type": "string", "description": "#889 reciprocal: traverse by source_uri instead of source_id."},
-                        "namespace": {"type": "string", "description": "Restrict traversal to this namespace."}
+                        "by_source_uri": {"type": "string", "description": "#889 traverse by source_uri."},
+                        "namespace": {"type": "string", "description": "Restrict to namespace."}
                     },
                     "required": ["source_id"]
                 }
@@ -813,7 +813,7 @@ pub fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_promote",
-                "description": "Promote a memory to long-term (or chosen intermediate tier), or clone to an ancestor namespace.",
+                "description": "Promote a memory to long (or chosen tier) / ancestor namespace.",
                 "docs": "Default: bump to long (clears expiry); short->long and mid->long are single-call. #831: target_tier ('mid'|'long') stops on intermediate. Task 1.7: to_namespace clones to an ancestor + derived_from link.",
                 "inputSchema": {
                     "type": "object",
@@ -864,7 +864,7 @@ pub fn tool_definitions() -> Value {
                         "metadata": {"type": "object", "description": "JSON metadata."},
                         "expected_version": {"type": "integer", "description": "#884 If-Match; mismatch → 409 envelope."},
                         "edit_source": {"type": "string", "enum": ["human", "llm", "hook"], "default": "human", "description": "#888 'human'=in-place; 'llm'/'hook'=archive+supersede."},
-                        "source_uri": {"type": "string", "description": "#885/#906 update source_uri (doc rename / URI scheme migration / bad-data correction)."}
+                        "source_uri": {"type": "string", "description": "#906 update source_uri."}
                     },
                     "required": ["id"]
                 }
@@ -984,7 +984,7 @@ pub fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_persona_generate",
-                "description": "Generate (or regenerate) a Persona artefact for an entity via the reflection-pass curator.",
+                "description": "Generate/regen a Persona artefact for an entity.",
                 "docs": "QW-2 / #848: synthesise MemoryKind::Persona from top-K Reflection memories. Omit namespace (or pass null) for cross-namespace aggregation (#848 — persona lands in 'global'); pass a namespace string for single-namespace scope. Response includes namespace_scope=single|cross_namespace.",
                 "inputSchema": {
                     "type": "object",
@@ -1030,14 +1030,14 @@ pub fn tool_definitions() -> Value {
                         "title": {"type": "string", "description": "Consolidated title."},
                         "summary": {"type": "string", "description": "Optional summary; LLM auto-generates at smart/autonomous tier."},
                         "namespace": {"type": "string", "default": "global"},
-                        "agent_id": {"type": "string", "description": "#908 agent identity for consolidator attribution."}
+                        "agent_id": {"type": "string", "description": "#908 consolidator agent_id."}
                     },
                     "required": ["ids", "title"]
                 }
             },
             {
                 "name": "memory_ingest_multistep",
-                "description": "Multi-step ingest orchestrator (Form 3): deterministic helpers then LLM stages with prompt-cache reuse.",
+                "description": "Form 3 multi-step ingest: deterministic helpers + LLM stages.",
                 "docs": "Form 3 (#756): two_phase (FTS + Jaccard -> synthesise) or four_step (load_context -> classify -> enrich -> emit). Helpers run first; LLM stages receive helper output under explicit-trust banner + SHARED PREFIX for cache-key reuse. Response carries trace + cache-key set + final output. Smart+ tier only.",
                 "inputSchema": {
                     "type": "object",
@@ -1338,7 +1338,7 @@ pub fn tool_definitions() -> Value {
                         // (alnum/_-.) up to 64 chars.
                         "agent_type": {
                             "type": "string",
-                            "description": "Curated: human, system, ai:claude-opus-4.6/4.7, ai:codex-5.4, ai:grok-4.2. Open-form: any ai:<name>."
+                            "description": "Curated: human, system, ai:<model>. Open-form: any ai:<name>."
                         },
                         "capabilities": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Capability tags."}
                     },
@@ -1458,7 +1458,7 @@ pub fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_check_agent_action",
-                "description": "Check a proposed agent action against governance_rules (#691). Returns Allow/Refuse/Warn.",
+                "description": "Check action vs governance_rules (#691); Allow/Refuse/Warn.",
                 "docs": "#691: read-only rule check. Harness PreToolUse hook calls on every Bash/Write/Edit. Rule MUTATION over MCP is disabled — use `ai-memory rules --sign` CLI or signed HTTP admin endpoints.",
                 "inputSchema": {
                     "type": "object",
@@ -1554,7 +1554,7 @@ pub fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_skill_promote_from_reflection",
-                "description": "Promote a Reflection memory into a reusable Agent Skill (closes recursive-learning loop).",
+                "description": "Promote a Reflection into a reusable Agent Skill.",
                 "docs": "L2-6 (#671): reflection (depth>=namespace.governance.skill_promotion_min_depth, default 1) -> SKILL.md. Each reflects_on source -> references/source_{i}.md. Frontmatter preserves derived_from_reflection_id + original_reflection_depth. Promote->export->register => identical SHA-256. Refuses depth-0.",
                 "inputSchema": {
                     "type": "object",
@@ -1569,7 +1569,7 @@ pub fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_skill_compositional_context",
-                "description": "Get skill body + reflections declared in composes_with_reflections, bounded by max_reflection_depth.",
+                "description": "Skill body + composes_with_reflections (bounded by max_reflection_depth).",
                 "docs": "L2-7 (#672): compose skill activation with reflections from SKILL.md composes_with_reflections list. Per-entry min_depth filter; per-namespace max_reflection_depth is the authoritative ceiling (CANNOT bypass bounded-recursion). Reflections ranked recency + recall_count; budget_tokens caps cumulative reflection content (default 4000, max 32000).",
                 "inputSchema": {
                     "type": "object",
