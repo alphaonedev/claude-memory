@@ -599,7 +599,12 @@ async fn postgres_reflect_roundtrips_memory_and_reflects_on_edge() {
     };
 
     let store = PostgresStore::connect(&url).await.expect("connect");
-    let ctx = CallerContext::for_agent("test-agent-task4-pg");
+    // Admin ctx: this test exercises the reflect machinery (memory + reflects_on
+    // edge), not the SAL-level scope=private visibility filter (#910). The
+    // source row, reflection row, and caller would otherwise need 3-way
+    // identity alignment — admin bypass is the right tool for primitive
+    // mechanics tests that span owners.
+    let ctx = CallerContext::for_admin("test-agent-task4-pg");
     let suffix = uuid::Uuid::new_v4();
     let ns = format!("task4-reflect-pg-{suffix}");
 
