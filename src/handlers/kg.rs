@@ -852,6 +852,47 @@ pub struct KgQueryBody {
     pub rel_types: Option<Vec<String>>,
 }
 
+/// #910 (security-medium, 2026-05-19) — apply the scope=private
+/// visibility filter on `POST /api/v1/kg/query` traversal results.
+/// Pre-#910 the handler returned every reachable target node from
+/// the recursive-CTE / AGE Cypher walk; a target whose
+/// `metadata.scope == "private"` was visible to any caller who could
+/// pass `kg_query` validation, including callers other than the
+/// target's `metadata.agent_id` owner. The fix mirrors the post-
+/// filter applied in `memories_query::list_memories` — a row is
+/// visible iff `metadata.scope != "private"` OR
+/// `metadata.agent_id == caller`. Rows we cannot fetch (deleted
+/// since the traversal, in another namespace the caller cannot
+/// read, etc.) fail-closed (excluded).
+#[cfg(feature = "sal-postgres")]
+async fn kg_query_filter_visible(
+    app: &AppState,
+    caller: &str,
+    target_ids: Vec<String>,
+) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+    let mut visible: HashSet<String> = HashSet::with_capacity(target_ids.len());
+    let ctx = crate::store::CallerContext::for_agent(caller);
+    for id in target_ids {
+        if let Ok(mem) = app.store.get(&ctx, &id).await {
+            let scope = mem
+                .metadata
+                .get("scope")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("private");
+            let owner = mem
+                .metadata
+                .get("agent_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if scope != "private" || owner == caller {
+                visible.insert(id);
+            }
+        }
+    }
+    visible
+}
+
 /// `POST /api/v1/kg/query` — REST mirror of the MCP `memory_kg_query`
 /// tool. Returns outbound multi-hop traversal from `source_id` (1..=5
 /// hops) filtered by the temporal/agent windows. 400 for invalid
@@ -860,8 +901,30 @@ pub struct KgQueryBody {
 /// internal error).
 pub async fn kg_query(
     State(app): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<KgQueryBody>,
 ) -> impl IntoResponse {
+    // #910 (security-medium, 2026-05-19) — resolve the caller via the
+    // `X-Agent-Id` header so the scope=private visibility filter
+    // below has a known principal to compare `metadata.agent_id`
+    // against. Pre-#910 `kg_query` returned every reachable target
+    // node regardless of the target memory's `metadata.scope` — a
+    // caller could enumerate scope=private targets owned by other
+    // agents by walking from a public source row. Anonymous callers
+    // get a per-request `anonymous:req-…` id and see only
+    // non-private targets.
+    let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
+    let caller = match crate::identity::resolve_http_agent_id(None, header_agent_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid agent_id: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
     // S82's wire shape sends `from` instead of `source_id`; resolve
     // the canonical id from either field with `source_id` taking
     // precedence when both are supplied.
@@ -931,6 +994,18 @@ pub async fn kg_query(
         .await
         {
             Ok(nodes) => {
+                // #910 — fetch each target's metadata, filter by the
+                // scope=private visibility rule (see
+                // `kg_query_filter_visible`). Pre-#910 every reachable
+                // target was returned verbatim regardless of the
+                // target's owner / scope.
+                let target_ids: Vec<String> = nodes.iter().map(|n| n.target_id.clone()).collect();
+                let visible = kg_query_filter_visible(&app, &caller, target_ids).await;
+                let nodes: Vec<_> = nodes
+                    .into_iter()
+                    .filter(|n| visible.contains(&n.target_id))
+                    .collect();
+
                 // S82's wire shape — when `to` is supplied, project a
                 // single-path `paths` array of node-id chains so the
                 // find-paths style consumer can read the result back
@@ -989,8 +1064,14 @@ pub async fn kg_query(
         };
     }
 
+    // #910 — apply scope=private visibility filter on the SQLite path
+    // too. The kg_query DB function returns the full reachable
+    // topology with target metadata absent from the row shape; we
+    // post-fetch each target's `metadata.scope` / `metadata.agent_id`
+    // inside the same lock window so the filter sees an atomic view
+    // of the traversal.
     let lock = app.db.lock().await;
-    match db::kg_query(
+    let kg_res = db::kg_query(
         &lock.0,
         &source_id,
         max_depth,
@@ -998,8 +1079,40 @@ pub async fn kg_query(
         allowed_agents.as_deref(),
         body.limit,
         body.include_invalidated,
-    ) {
+    );
+    let nodes_opt = match &kg_res {
         Ok(nodes) => {
+            let mut visible: std::collections::HashSet<String> =
+                std::collections::HashSet::with_capacity(nodes.len());
+            for n in nodes {
+                if let Ok(Some(mem)) = db::get(&lock.0, &n.target_id) {
+                    let scope = mem
+                        .metadata
+                        .get("scope")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("private");
+                    let owner = mem
+                        .metadata
+                        .get("agent_id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("");
+                    if scope != "private" || owner == caller {
+                        visible.insert(n.target_id.clone());
+                    }
+                }
+            }
+            Some(visible)
+        }
+        Err(_) => None,
+    };
+    drop(lock);
+    match kg_res {
+        Ok(nodes) => {
+            let visible = nodes_opt.unwrap_or_default();
+            let nodes: Vec<_> = nodes
+                .into_iter()
+                .filter(|n| visible.contains(&n.target_id))
+                .collect();
             let memories_json: Vec<serde_json::Value> = nodes
                 .iter()
                 .map(|n| {

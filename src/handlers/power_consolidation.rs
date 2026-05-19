@@ -225,18 +225,38 @@ pub async fn consolidate_memories(
         )
             .into_response();
     }
+    // #905 (security-high, 2026-05-19) — sibling of #874/#901. The
+    // pre-#905 path passed `body.agent_id` as the first arg to
+    // `resolve_http_agent_id` which gives caller-controlled body the
+    // PRECEDENCE over the authenticated `X-Agent-Id` header. An
+    // attacker authenticated as `bob` could call
+    // `POST /api/v1/consolidate` with `body.agent_id="alice"` and
+    // the new consolidated row would be stamped with
+    // `consolidator_agent_id="alice"` — a provenance lie that also
+    // breaks the cross-tenant tracking the K9 governance walk leans
+    // on. Header-only authentication now; body.agent_id (if present)
+    // must match the authenticated caller else 403.
     let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
-    let consolidator_agent_id =
-        match crate::identity::resolve_http_agent_id(body.agent_id.as_deref(), header_agent_id) {
-            Ok(id) => id,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": format!("invalid agent_id: {e}")})),
-                )
-                    .into_response();
-            }
-        };
+    let consolidator_agent_id = match crate::identity::resolve_http_agent_id(None, header_agent_id)
+    {
+        Ok(id) => id,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid agent_id: {e}")})),
+            )
+                .into_response();
+        }
+    };
+    if let Some(claimed) = body.agent_id.as_deref()
+        && claimed != consolidator_agent_id
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "agent_id body parameter does not match authenticated caller"})),
+        )
+            .into_response();
+    }
     let tier = body.tier.unwrap_or(Tier::Long);
     let source_ids = body.ids.clone();
 

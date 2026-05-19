@@ -196,6 +196,34 @@ pub fn resolve_agent_id(explicit: Option<&str>, mcp_client: Option<&str>) -> Res
 /// of the `X-Agent-Id` request header. If neither is present a per-request
 /// `anonymous:req-<uuid8>` id is synthesized and a `WARN` is logged so
 /// operators notice unauthenticated writes.
+///
+/// # SECURITY
+///
+/// The `body` parameter has historical PRECEDENCE over `header` — this
+/// is a LEGACY surface that pre-dates the v0.7.0 #874/#901/#905-#910
+/// agent_id-spoof cleanup. The body slot is caller-controlled and was
+/// the cross-tenant spoof vector closed by the issue series above
+/// (#874 unsubscribe + list_subscriptions, #901 notify + subscribe +
+/// get_inbox, #905 power_consolidation, #907 create_memory, #909
+/// quota_status, #910 list_memories + kg_query visibility filter).
+///
+/// **New callers MUST pass `body: None` and rely on header-only
+/// authentication.** If a handler accepts an optional body-side
+/// `agent_id` slot for refinement (e.g. it lets the caller stamp a
+/// sub-agent provenance), it MUST reject the request with 403
+/// FORBIDDEN when the body value disagrees with the header-resolved
+/// authenticated caller — see `src/handlers/subscriptions.rs::notify`
+/// for the canonical pattern. The body slot here is preserved for
+/// the existing federation receiver path (where the body carries an
+/// envelope-attributed identity, gated by `AI_MEMORY_FED_TRUST_BODY_AGENT_ID`).
+///
+/// This primitive's behavior is deliberately UNCHANGED in the
+/// v0.7.0 fix series so the existing federation receiver path keeps
+/// round-tripping cleanly; the cleanup landed at every CALLER
+/// (handler) instead. A future v0.8.0 wave may invert the
+/// precedence (header-first, body refinement) once the federation
+/// receiver is migrated to a dedicated `resolve_fed_agent_id`
+/// primitive — that migration is tracked separately.
 pub fn resolve_http_agent_id(body: Option<&str>, header: Option<&str>) -> Result<String> {
     if let Some(id) = body
         && !id.is_empty()

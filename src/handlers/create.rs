@@ -83,15 +83,44 @@ fn resolve_create_agent_id(
         .get("agent_id")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
-    let explicit_agent_id = body.agent_id.as_deref().or(metadata_agent_id.as_deref());
-    let agent_id = crate::identity::resolve_http_agent_id(explicit_agent_id, header_agent_id)
-        .map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": format!("invalid agent_id: {e}")})),
-            )
-                .into_response()
-        })?;
+    // #907 (security-high, 2026-05-19) — sibling of #874/#901/#905.
+    // The pre-#907 path preferred caller-supplied
+    // `body.agent_id` / `metadata.agent_id` over the authenticated
+    // `X-Agent-Id` header on the WRITE-path provenance stamp. An
+    // attacker authenticated as `bob` could call
+    // `POST /api/v1/memories` with `body.agent_id="alice"` (or
+    // `metadata.agent_id="alice"`) and the new row would land with
+    // `metadata.agent_id="alice"` — a provenance LIE that
+    // permanently fakes attribution (NHI design contract:
+    // `metadata.agent_id` is preserved across update/dedup/import).
+    // Header-only authentication now; caller-supplied claims (if
+    // present) must MATCH the authenticated caller else 403. The
+    // metadata stamp is forced to the resolved caller below.
+    let agent_id = crate::identity::resolve_http_agent_id(None, header_agent_id).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid agent_id: {e}")})),
+        )
+            .into_response()
+    })?;
+    if let Some(claimed) = body.agent_id.as_deref()
+        && claimed != agent_id
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "agent_id body parameter does not match authenticated caller"})),
+        )
+            .into_response());
+    }
+    if let Some(claimed) = metadata_agent_id.as_deref()
+        && claimed != agent_id
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "metadata.agent_id does not match authenticated caller"})),
+        )
+            .into_response());
+    }
     let mut metadata = body.metadata.clone();
     if let Some(obj) = metadata.as_object_mut() {
         obj.insert(
@@ -1020,23 +1049,53 @@ mod tests {
     // ----- stage 1: resolve_create_agent_id -------------------------------
 
     #[test]
-    fn stage1_agent_id_body_field_wins_over_header() {
+    fn stage1_agent_id_body_disagreeing_with_header_returns_403() {
+        // #907 (security-high, 2026-05-19) — pre-#907 the body field
+        // PREFERRED over the header which allowed a caller authenticated
+        // as `ai:from-header` to stamp the new row with
+        // `metadata.agent_id="ai:from-body"`. The fix forces the
+        // metadata stamp to the header-resolved caller and 403s when
+        // the body disagrees.
         let mut body = make_body("title-1");
         body.agent_id = Some("ai:from-body".to_string());
         let headers = header("x-agent-id", "ai:from-header");
-        let (aid, metadata) = resolve_create_agent_id(&headers, &body).expect("resolve ok");
-        assert_eq!(aid, "ai:from-body");
-        assert_eq!(metadata["agent_id"], json!("ai:from-body"));
+        let err = resolve_create_agent_id(&headers, &body)
+            .expect_err("body/header disagree must 403 post-#907");
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
     }
 
     #[test]
-    fn stage1_agent_id_metadata_field_used_when_body_absent() {
+    fn stage1_agent_id_body_matching_header_succeeds() {
+        // #907 — body refinement is allowed when it matches the header.
+        let mut body = make_body("title-1-match");
+        body.agent_id = Some("ai:same".to_string());
+        let headers = header("x-agent-id", "ai:same");
+        let (aid, metadata) = resolve_create_agent_id(&headers, &body).expect("resolve ok");
+        assert_eq!(aid, "ai:same");
+        assert_eq!(metadata["agent_id"], json!("ai:same"));
+    }
+
+    #[test]
+    fn stage1_agent_id_metadata_disagreeing_with_header_returns_403() {
+        // #907 — metadata.agent_id is also a caller-controlled slot;
+        // pre-#907 it was preferred over the header. Now refusal.
         let mut body = make_body("title-2");
         body.metadata = json!({"agent_id": "ai:from-metadata"});
-        let headers = HeaderMap::new();
+        let headers = header("x-agent-id", "ai:from-header");
+        let err = resolve_create_agent_id(&headers, &body)
+            .expect_err("metadata/header disagree must 403 post-#907");
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn stage1_agent_id_metadata_matching_header_succeeds() {
+        // #907 — metadata refinement is allowed when it matches the header.
+        let mut body = make_body("title-2-match");
+        body.metadata = json!({"agent_id": "ai:from-header"});
+        let headers = header("x-agent-id", "ai:from-header");
         let (aid, metadata) = resolve_create_agent_id(&headers, &body).expect("resolve ok");
-        assert_eq!(aid, "ai:from-metadata");
-        assert_eq!(metadata["agent_id"], json!("ai:from-metadata"));
+        assert_eq!(aid, "ai:from-header");
+        assert_eq!(metadata["agent_id"], json!("ai:from-header"));
     }
 
     #[test]

@@ -11,7 +11,12 @@
 
 #![allow(clippy::too_many_lines)]
 
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+};
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
@@ -269,13 +274,42 @@ pub struct QuotaStatusBody {
 /// scratch sqlite connection.
 pub async fn quota_status_handler(
     State(app): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<QuotaStatusBody>,
 ) -> impl IntoResponse {
+    // #909 (security-medium, 2026-05-19) — sibling of #874/#901/#905/#907.
+    // The pre-#909 path accepted `body.agent_id` with no authn binding —
+    // any caller could probe `POST /api/v1/quota/status {agent_id:"alice"}`
+    // and read alice's quota row (cross-tenant disclosure: count of
+    // memories stored, last-reset timestamp, namespace usage stats).
+    // Authenticate via `X-Agent-Id` header; when `body.agent_id` is
+    // supplied it must MATCH the authenticated caller else 403. The
+    // operator-facing list path (body.agent_id absent) is preserved.
+    let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
+    let caller = match crate::identity::resolve_http_agent_id(None, header_agent_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid agent_id: {e}")})),
+            )
+                .into_response();
+        }
+    };
     if let Some(agent_id) = body.agent_id.as_deref() {
         if let Err(e) = validate::validate_agent_id(agent_id) {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": format!("invalid agent_id: {e}")})),
+            )
+                .into_response();
+        }
+        if agent_id != caller {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(
+                    json!({"error": "agent_id body parameter does not match authenticated caller"}),
+                ),
             )
                 .into_response();
         }

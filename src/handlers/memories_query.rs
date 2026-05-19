@@ -15,7 +15,7 @@ use crate::models::ConfidenceSource;
 use axum::{
     Json,
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use chrono::{Duration, Utc};
@@ -34,8 +34,44 @@ use super::StorageBackend;
 use super::store_err_to_response;
 use super::{BULK_FANOUT_CONCURRENCY, MAX_BULK_SIZE};
 
+/// #910 (security-medium, 2026-05-19) — apply the scope=private
+/// visibility filter on `GET /api/v1/memories` and `POST /api/v1/kg/query`
+/// result sets. Pre-#910, both endpoints returned every row matching
+/// the requested namespace/tier/etc. shape regardless of
+/// `metadata.scope` — a caller authenticated as `bob` could
+/// enumerate `alice`'s scope=private rows by listing the namespace.
+///
+/// Visibility rule (mirrors `storage::is_visible_to_agent` + the
+/// generated `scope_idx` column's COALESCE-to-`private` default):
+/// row is returned iff
+///   `metadata.scope != "private"` (rows w/o the field are private
+///   by the CLAUDE.md NHI contract)
+///   OR `metadata.agent_id == caller`.
+///
+/// Operator-equivalent surfaces (CLI / MCP) already filter via
+/// `visibility_clause`; this helper is the missing HTTP-side mirror
+/// of that filter on the plain `list` + `kg_query` paths.
+#[must_use]
+fn is_visible_to_caller(mem: &Memory, caller: &str) -> bool {
+    let scope = mem
+        .metadata
+        .get("scope")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("private");
+    if scope != "private" {
+        return true;
+    }
+    let owner = mem
+        .metadata
+        .get("agent_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    owner == caller
+}
+
 pub async fn list_memories(
     State(app): State<AppState>,
+    headers: HeaderMap,
     Query(p): Query<ListQuery>,
 ) -> impl IntoResponse {
     // #197: validate agent_id filter values
@@ -48,6 +84,27 @@ pub async fn list_memories(
         )
             .into_response();
     }
+
+    // #910 (security-medium, 2026-05-19) — resolve the caller via the
+    // `X-Agent-Id` header so the scope=private visibility filter below
+    // has a known principal to compare `metadata.agent_id` against.
+    // Pre-#910 the handler skipped this step entirely and returned
+    // every row matching the requested namespace/tier/etc. shape — an
+    // attacker could enumerate scope=private rows authored by other
+    // agents by listing their namespace. Header-only authentication
+    // (no body field on this GET path); anonymous callers get a
+    // per-request `anonymous:req-…` id and see only non-private rows.
+    let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
+    let caller = match crate::identity::resolve_http_agent_id(None, header_agent_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid agent_id: {e}")})),
+            )
+                .into_response();
+        }
+    };
 
     // v0.7.0 Wave-3 — Postgres-backed daemons dispatch through the
     // SAL trait. The trait's `Filter` shape carries
@@ -98,9 +155,22 @@ pub async fn list_memories(
             until,
             limit,
         };
-        let ctx = crate::store::CallerContext::for_agent("ai:http");
+        let ctx = crate::store::CallerContext::for_agent(&caller);
         return match app.store.list(&ctx, &filter).await {
-            Ok(mems) => Json(json!({"memories": mems, "count": mems.len()})).into_response(),
+            Ok(mems) => {
+                // #910 — post-filter scope=private rows the caller does
+                // not own. Done in-process rather than via the SAL
+                // `Filter` because the trait's filter shape does not
+                // carry a scope axis yet (tracked for the next trait
+                // extension wave); the post-filter is correctness-
+                // equivalent to a WHERE clause at the SQL layer for
+                // the result-set sizes that fit the trait's `limit`.
+                let visible: Vec<Memory> = mems
+                    .into_iter()
+                    .filter(|m| is_visible_to_caller(m, &caller))
+                    .collect();
+                Json(json!({"memories": &visible, "count": visible.len()})).into_response()
+            }
             Err(e) => store_err_to_response(e),
         };
     }
@@ -125,7 +195,20 @@ pub async fn list_memories(
         p.tags.as_deref(),
         p.agent_id.as_deref(),
     ) {
-        Ok(mems) => Json(json!({"memories": mems, "count": mems.len()})).into_response(),
+        Ok(mems) => {
+            // #910 — see postgres branch comment above. `db::list` does
+            // NOT apply the visibility-prefix filter that `db::search`
+            // and `db::recall_hybrid` use; that gap is what closed the
+            // cross-tenant enumeration vector. Post-filter in-process
+            // until the next storage-layer wave threads a `caller`
+            // through `db::list` and rewrites the WHERE clause to use
+            // the same `visibility_clause` helper as the search path.
+            let visible: Vec<Memory> = mems
+                .into_iter()
+                .filter(|m| is_visible_to_caller(m, &caller))
+                .collect();
+            Json(json!({"memories": &visible, "count": visible.len()})).into_response()
+        }
         Err(e) => {
             tracing::error!("handler error: {e}");
             (

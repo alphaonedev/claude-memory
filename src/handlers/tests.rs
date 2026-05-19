@@ -3101,7 +3101,12 @@ async fn insert_test_memory(state: &Db, namespace: &str, title: &str) -> String 
         updated_at: now,
         last_accessed_at: None,
         expires_at: None,
-        metadata: serde_json::json!({}),
+        // #910 — stamp `scope=collective` on test fixtures so the
+        // post-#910 visibility filter on list_memories + kg_query
+        // does not silently drop them under an anonymous caller.
+        // Tests that need to exercise scope=private semantics set
+        // the field explicitly via `metadata` on the build path.
+        metadata: serde_json::json!({"scope": "collective"}),
         reflection_depth: 0,
         memory_kind: crate::models::MemoryKind::Observation,
         entity_id: None,
@@ -6873,12 +6878,14 @@ async fn h8b_subscribe_namespace_shape_synthesizes_url() {
         "namespace": "team/research",
         "secret": "h8b-test-secret",
     });
+    // #901: matching X-Agent-Id required for body.agent_id.
     let resp = app
         .oneshot(
             axum::http::Request::builder()
                 .uri("/api/v1/subscriptions")
                 .method("POST")
                 .header("content-type", "application/json")
+                .header("x-agent-id", "alice")
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
                 .unwrap(),
         )
@@ -7486,10 +7493,12 @@ async fn h8b_get_inbox_empty_returns_zero() {
         .route("/api/v1/inbox", axum::routing::get(get_inbox))
         .with_state(test_app_state(state));
 
+    // #901: matching X-Agent-Id required for ?agent_id= query.
     let resp = app
         .oneshot(
             axum::http::Request::builder()
                 .uri("/api/v1/inbox?agent_id=alice")
+                .header("x-agent-id", "alice")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7538,10 +7547,12 @@ async fn h8b_get_inbox_returns_pending_after_notify() {
     let inbox_app = Router::new()
         .route("/api/v1/inbox", axum::routing::get(get_inbox))
         .with_state(test_app_state(state));
+    // #901: matching X-Agent-Id required for ?agent_id= query.
     let resp = inbox_app
         .oneshot(
             axum::http::Request::builder()
                 .uri("/api/v1/inbox?agent_id=bob")
+                .header("x-agent-id", "bob")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7640,10 +7651,12 @@ async fn h8b_get_inbox_unread_only_filter_excludes_read() {
     let app = Router::new()
         .route("/api/v1/inbox", axum::routing::get(get_inbox))
         .with_state(test_app_state(state));
+    // #901: matching X-Agent-Id required for ?agent_id= query.
     let resp = app
         .oneshot(
             axum::http::Request::builder()
                 .uri("/api/v1/inbox?agent_id=alice&unread_only=true")
+                .header("x-agent-id", "alice")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7702,10 +7715,12 @@ async fn h8b_get_inbox_limit_clamps_returned_count() {
     let app = Router::new()
         .route("/api/v1/inbox", axum::routing::get(get_inbox))
         .with_state(test_app_state(state));
+    // #901: matching X-Agent-Id required for ?agent_id= query.
     let resp = app
         .oneshot(
             axum::http::Request::builder()
                 .uri("/api/v1/inbox?agent_id=alice&limit=2")
+                .header("x-agent-id", "alice")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7720,7 +7735,10 @@ async fn h8b_get_inbox_limit_clamps_returned_count() {
 }
 
 /// Invalid `agent_id` (illegal char) on the query string is rejected
-/// upstream by `resolve_caller_agent_id`.
+/// upstream by `resolve_caller_agent_id`. Post-#901 the handler
+/// authenticates the X-Agent-Id header FIRST; we send the same
+/// invalid id in both header + query so the resolver's
+/// `validate_agent_id` returns 400 before any match-check fires.
 #[tokio::test]
 async fn h8b_get_inbox_invalid_agent_id_rejected() {
     let state = test_state();
@@ -7732,6 +7750,7 @@ async fn h8b_get_inbox_invalid_agent_id_rejected() {
         .oneshot(
             axum::http::Request::builder()
                 .uri("/api/v1/inbox?agent_id=bad%20agent")
+                .header("x-agent-id", "bad agent")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -11869,6 +11888,7 @@ async fn http_subscribe_missing_url_and_namespace_returns_400() {
         .route("/api/v1/subscribe", axum_post(subscribe))
         .with_state(test_app_state(state));
     // Neither url nor namespace — handler rejects.
+    // #901: matching X-Agent-Id required for body.agent_id.
     let body = serde_json::json!({"agent_id": "ai:alice"});
     let resp = app
         .oneshot(
@@ -11876,6 +11896,7 @@ async fn http_subscribe_missing_url_and_namespace_returns_400() {
                 .uri("/api/v1/subscribe")
                 .method("POST")
                 .header("content-type", "application/json")
+                .header("x-agent-id", "ai:alice")
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
                 .unwrap(),
         )
@@ -11892,6 +11913,7 @@ async fn http_subscribe_with_namespace_synthesizes_loopback_url_and_returns_201(
     let app = Router::new()
         .route("/api/v1/subscribe", axum_post(subscribe))
         .with_state(test_app_state(state));
+    // #901: matching X-Agent-Id required for body.agent_id.
     let body = serde_json::json!({"agent_id": "ai:alice", "namespace": "team/alice", "secret": "ns-test-secret"});
     let resp = app
         .oneshot(
@@ -11899,6 +11921,7 @@ async fn http_subscribe_with_namespace_synthesizes_loopback_url_and_returns_201(
                 .uri("/api/v1/subscribe")
                 .method("POST")
                 .header("content-type", "application/json")
+                .header("x-agent-id", "ai:alice")
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
                 .unwrap(),
         )
@@ -11943,6 +11966,7 @@ async fn http_unsubscribe_by_agent_namespace_after_subscribe_returns_removed() {
     let sub_app = Router::new()
         .route("/api/v1/subscribe", axum_post(subscribe))
         .with_state(test_app_state(state.clone()));
+    // #901: matching X-Agent-Id required for body.agent_id.
     let body = serde_json::json!({"agent_id": "ai:alice", "namespace": "team/alice", "secret": "ns-test-secret"});
     let resp = sub_app
         .oneshot(
@@ -11950,6 +11974,7 @@ async fn http_unsubscribe_by_agent_namespace_after_subscribe_returns_removed() {
                 .uri("/api/v1/subscribe")
                 .method("POST")
                 .header("content-type", "application/json")
+                .header("x-agent-id", "ai:alice")
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
                 .unwrap(),
         )
@@ -11991,6 +12016,7 @@ async fn http_list_subscriptions_returns_subscription_rows() {
     let sub_app = Router::new()
         .route("/api/v1/subscribe", axum_post(subscribe))
         .with_state(test_app_state(state.clone()));
+    // #901: matching X-Agent-Id required for body.agent_id.
     let body = serde_json::json!({"agent_id": "ai:carol", "namespace": "team/carol", "secret": "ns-test-secret"});
     let resp = sub_app
         .oneshot(
@@ -11998,6 +12024,7 @@ async fn http_list_subscriptions_returns_subscription_rows() {
                 .uri("/api/v1/subscribe")
                 .method("POST")
                 .header("content-type", "application/json")
+                .header("x-agent-id", "ai:carol")
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
                 .unwrap(),
         )
@@ -12707,8 +12734,13 @@ async fn http_create_memory_invalid_x_agent_id_header_returns_400() {
 /// resolved to `anonymous:req-<uuid>` and silently overwrote alice's
 /// claim — breaking the immutable-provenance contract enforced at the
 /// SQL layer for already-persisted rows.
+/// Post-#907 (security-high, 2026-05-19): `metadata.agent_id` is no
+/// longer accepted as an AUTHENTICATION source on the HTTP write
+/// path — the `X-Agent-Id` header is authoritative. The caller-
+/// supplied `metadata.agent_id` is treated as a CLAIM that must
+/// MATCH the header-resolved caller (else 403).
 #[tokio::test]
-async fn l11_create_memory_honours_metadata_agent_id_when_top_level_absent() {
+async fn l11_create_memory_rejects_metadata_agent_id_mismatch_post_907() {
     let state = test_state();
     let app = Router::new()
         .route("/api/v1/memories", axum_post(create_memory))
@@ -12731,39 +12763,16 @@ async fn l11_create_memory_honours_metadata_agent_id_when_top_level_absent() {
                 .uri("/api/v1/memories")
                 .method("POST")
                 .header("content-type", "application/json")
-                // Deliberately no top-level `agent_id` field and no
-                // `X-Agent-Id` header. The HTTP resolver must pick the
-                // claim up from `metadata.agent_id`.
+                .header("x-agent-id", "ai:bob@plan-c")
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED);
-
-    let lock = state.lock().await;
-    let rows = db::list(
-        &lock.0,
-        Some("l11-agentid"),
-        None,
-        10,
-        0,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .unwrap();
-    assert_eq!(rows.len(), 1, "row must persist");
     assert_eq!(
-        rows[0]
-            .metadata
-            .get("agent_id")
-            .and_then(serde_json::Value::as_str),
-        Some("ai:alice@plan-c"),
-        "metadata.agent_id from request body must survive — pre-fix \
-         this was clobbered by the anonymous fallback"
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "post-#907: metadata.agent_id disagreeing with X-Agent-Id must 403"
     );
 }
 
@@ -13355,6 +13364,7 @@ async fn http_subscribe_with_explicit_url_succeeds() {
     let app = Router::new()
         .route("/api/v1/subscribe", axum_post(subscribe))
         .with_state(test_app_state(state));
+    // #901: matching X-Agent-Id required for body.agent_id.
     let body = serde_json::json!({
         "agent_id": "ai:webhook-user",
         "url": "http://localhost:9999/webhook",
@@ -13368,6 +13378,7 @@ async fn http_subscribe_with_explicit_url_succeeds() {
                 .uri("/api/v1/subscribe")
                 .method("POST")
                 .header("content-type", "application/json")
+                .header("x-agent-id", "ai:webhook-user")
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
                 .unwrap(),
         )
