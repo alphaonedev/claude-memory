@@ -283,6 +283,26 @@ pub fn handle_skill_register(
     // -----------------------------------------------------------------------
     let manifest = skill_md::parse(&skill_md_text)?;
 
+    // #913 (security-medium / SOC2, 2026-05-19) — admin/state-change
+    // audit. Skill registration mints an executable capability bundle
+    // in the substrate; emit the forensic-chain row BEFORE the storage
+    // write so the audit trail captures intent regardless of downstream
+    // signing / storage outcome.
+    let caller = crate::identity::resolve_agent_id(params["agent_id"].as_str(), None)
+        .unwrap_or_else(|_| "anonymous:invalid".to_string());
+    crate::governance::audit::record_decision(
+        &caller,
+        "allow",
+        "skill_register",
+        "",
+        json!({
+            "namespace": manifest.namespace,
+            "name": manifest.name,
+            "resource_count": resource_files.len(),
+            "signed": active_keypair.is_some(),
+        }),
+    );
+
     let body_bytes = manifest.body.as_bytes();
 
     // Compute resource digests for the signing surface.

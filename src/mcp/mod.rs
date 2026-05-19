@@ -454,6 +454,18 @@ pub use skill_promote::handle_skill_promote_from_reflection;
 pub use skill_register::handle_skill_register;
 pub use skill_resource::handle_skill_resource;
 
+/// #913 (security-medium / SOC2, 2026-05-19) — test-only dispatcher
+/// into `handle_archive_purge`. The handler is `pub(super)` in the
+/// archive module so external regression tests cannot reach it
+/// directly. Mirrors `dispatch_handle_link_for_test`'s rationale.
+#[doc(hidden)]
+pub fn handle_archive_purge_for_test(
+    conn: &rusqlite::Connection,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    archive::handle_archive_purge(conn, params)
+}
+
 /// v0.7.0 L2-3 (issue #668) — test-only dispatcher into
 /// `handle_link`. Re-exports the handler at a stable
 /// `ai_memory::mcp::dispatch_handle_link_for_test` path so the

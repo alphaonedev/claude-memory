@@ -105,6 +105,7 @@ pub async fn list_archive(
 
 pub async fn restore_archive(
     State(app): State<AppState>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     if let Err(e) = validate::validate_id(&id) {
@@ -114,6 +115,22 @@ pub async fn restore_archive(
         )
             .into_response();
     }
+
+    // #913 (security-medium / SOC2, 2026-05-19) — admin/destructive
+    // state-change audit. Restoring a row pulls it from the archived
+    // table back into the live working set; this is a privileged admin
+    // operation that must produce a forensic-chain entry BEFORE the
+    // storage write.
+    let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
+    let caller = crate::identity::resolve_http_agent_id(None, header_agent_id)
+        .unwrap_or_else(|_| "anonymous:invalid".to_string());
+    crate::governance::audit::record_decision(
+        &caller,
+        "allow",
+        "archive_restore",
+        "",
+        json!({ "id": &id }),
+    );
     // v0.7.0 Wave-3 Continuation 3 (Phase 19) — postgres-backed daemons
     // route through the SAL `archive_restore` trait method. Federation
     // fanout for restore stays sqlite-only (the `broadcast_restore_quorum`
@@ -289,6 +306,7 @@ pub struct ArchiveByIdsBody {
 #[allow(clippy::too_many_lines)]
 pub async fn archive_by_ids(
     State(app): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<ArchiveByIdsBody>,
 ) -> impl IntoResponse {
     // Bound the batch the same way bulk_create / sync_push do.
@@ -310,6 +328,25 @@ pub async fn archive_by_ids(
         }
     }
     let reason = body.reason.as_deref().unwrap_or("archive").to_string();
+
+    // #913 (security-medium / SOC2, 2026-05-19) — admin/destructive
+    // state-change audit. `archive_by_ids` performs a bulk soft-delete
+    // into the archived_memories table. Emit the forensic-chain entry
+    // BEFORE the storage writes so the audit trail captures the batch
+    // and the caller's identity regardless of partial-success behaviour.
+    let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
+    let caller = crate::identity::resolve_http_agent_id(None, header_agent_id)
+        .unwrap_or_else(|_| "anonymous:invalid".to_string());
+    crate::governance::audit::record_decision(
+        &caller,
+        "allow",
+        "archive_by_ids",
+        "",
+        json!({
+            "id_count": body.ids.len(),
+            "reason": &reason,
+        }),
+    );
     let mut archived: Vec<String> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
 

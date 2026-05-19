@@ -104,7 +104,10 @@ pub async fn register_agent(
     // fed-tracker state).
     #[cfg(feature = "sal")]
     if matches!(app.storage_backend, StorageBackend::Postgres) {
-        let ctx = crate::store::CallerContext::for_agent("daemon");
+        // #910 — admin surface (registration / list_agents / stats);
+        // bypass the SAL visibility filter so admin endpoints see the
+        // full row set regardless of metadata.scope.
+        let ctx = crate::store::CallerContext::for_admin("daemon");
         let now = Utc::now().to_rfc3339();
         let mut metadata = json!({
             "agent_id": &body.agent_id,
@@ -218,7 +221,10 @@ pub async fn list_agents(State(app): State<AppState>) -> impl IntoResponse {
     // how sqlite's `db::list_agents` reads from the same namespace.
     #[cfg(feature = "sal")]
     if matches!(app.storage_backend, StorageBackend::Postgres) {
-        let ctx = crate::store::CallerContext::for_agent("daemon");
+        // #910 — admin surface (registration / list_agents / stats);
+        // bypass the SAL visibility filter so admin endpoints see the
+        // full row set regardless of metadata.scope.
+        let ctx = crate::store::CallerContext::for_admin("daemon");
         let filter = crate::store::Filter {
             namespace: Some("_agents".to_string()),
             limit: 1000,
@@ -398,7 +404,10 @@ pub async fn get_stats(State(app): State<AppState>) -> impl IntoResponse {
     // top-level shape.
     #[cfg(feature = "sal")]
     if matches!(app.storage_backend, StorageBackend::Postgres) {
-        let ctx = crate::store::CallerContext::for_agent("daemon");
+        // #910 — admin surface (registration / list_agents / stats);
+        // bypass the SAL visibility filter so admin endpoints see the
+        // full row set regardless of metadata.scope.
+        let ctx = crate::store::CallerContext::for_admin("daemon");
         let filter = crate::store::Filter {
             limit: 1_000_000,
             ..Default::default()
@@ -449,7 +458,17 @@ pub async fn get_stats(State(app): State<AppState>) -> impl IntoResponse {
     }
 }
 
-pub async fn run_gc(State(app): State<AppState>) -> impl IntoResponse {
+pub async fn run_gc(State(app): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    // #913 (security-medium / SOC2, 2026-05-19) — admin/destructive
+    // state-change audit. GC permanently sweeps expired rows; the
+    // forensic-chain entry MUST land before the storage write so the
+    // audit trail captures the operator who triggered the sweep even
+    // when the downstream collector errors.
+    let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
+    let caller = crate::identity::resolve_http_agent_id(None, header_agent_id)
+        .unwrap_or_else(|_| "anonymous:invalid".to_string());
+    crate::governance::audit::record_decision(&caller, "allow", "run_gc", "", json!({}));
+
     // v0.7.0 Wave-3 Continuation 3 (Phase 17) — postgres-backed daemons
     // route through the SAL trait. Returns the same `{expired_deleted}`
     // envelope so wire shape is backend-blind.
@@ -525,6 +544,7 @@ pub async fn export_memories(State(app): State<AppState>) -> impl IntoResponse {
 
 pub async fn import_memories(
     State(app): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<ImportBody>,
 ) -> impl IntoResponse {
     if body.memories.len() > MAX_BULK_SIZE {
@@ -534,6 +554,25 @@ pub async fn import_memories(
         )
             .into_response();
     }
+
+    // #913 (security-medium / SOC2, 2026-05-19) — admin/bulk-write audit.
+    // Import landings can move thousands of memories in one call; emit a
+    // single forensic-chain entry BEFORE the storage writes so the audit
+    // trail captures the batch size + caller identity even on partial
+    // success.
+    let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
+    let caller = crate::identity::resolve_http_agent_id(None, header_agent_id)
+        .unwrap_or_else(|_| "anonymous:invalid".to_string());
+    crate::governance::audit::record_decision(
+        &caller,
+        "allow",
+        "import_memories",
+        "",
+        json!({
+            "memory_count": body.memories.len(),
+            "link_count": body.links.as_ref().map(Vec::len).unwrap_or(0),
+        }),
+    );
     // v0.7.0 Wave-3 Continuation 3 (Phase 18) — postgres-backed daemons
     // route through the SAL trait. We re-use `app.store.store(...)` per
     // memory (the upsert path that preserves agent_id immutability) and

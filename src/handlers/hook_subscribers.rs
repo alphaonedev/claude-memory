@@ -267,7 +267,30 @@ async fn set_namespace_standard_inner(
     app: &AppState,
     ns: &str,
     body: NamespaceStandardBody,
+    headers: Option<&HeaderMap>,
 ) -> axum::response::Response {
+    // #913 (security-medium / SOC2, 2026-05-19) — admin governance audit.
+    // `set_namespace_standard` mutates the governance policy that gates
+    // EVERY downstream write into the namespace; the chain entry must be
+    // emitted BEFORE the storage write so the audit trail survives a
+    // failed downstream write. Mirrors the #911 pattern in
+    // `register_agent` / `archive_purge`.
+    let header_agent_id = headers.and_then(|h| h.get("x-agent-id").and_then(|v| v.to_str().ok()));
+    let caller = crate::identity::resolve_http_agent_id(None, header_agent_id)
+        .unwrap_or_else(|_| "anonymous:invalid".to_string());
+    crate::governance::audit::record_decision(
+        &caller,
+        "allow",
+        "namespace_set_standard",
+        "",
+        json!({
+            "namespace": ns,
+            "standard_id": body.id.clone(),
+            "parent": body.parent.clone(),
+            "has_governance": body.governance.is_some(),
+        }),
+    );
+
     let body = flatten_standard_body(body);
 
     // v0.7.0 Wave-3 Continuation 2 (Phase 11) — postgres-backed
@@ -533,10 +556,11 @@ async fn set_namespace_standard_inner(
 
 pub async fn set_namespace_standard(
     State(app): State<AppState>,
+    headers: HeaderMap,
     Path(ns): Path<String>,
     Json(body): Json<NamespaceStandardBody>,
 ) -> impl IntoResponse {
-    set_namespace_standard_inner(&app, &ns, body).await
+    set_namespace_standard_inner(&app, &ns, body, Some(&headers)).await
 }
 
 #[derive(Deserialize)]
@@ -567,14 +591,16 @@ pub async fn get_namespace_standard(
 
 pub async fn clear_namespace_standard(
     State(app): State<AppState>,
+    headers: HeaderMap,
     Path(ns): Path<String>,
 ) -> impl IntoResponse {
-    clear_namespace_standard_inner(&app, &ns).await
+    clear_namespace_standard_inner(&app, &ns, Some(&headers)).await
 }
 
 // Query-string forms for the S34/S35 `/api/v1/namespaces?namespace=…` shape.
 pub async fn set_namespace_standard_qs(
     State(app): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<NamespaceStandardBody>,
 ) -> impl IntoResponse {
     let Some(ns) = body
@@ -588,7 +614,7 @@ pub async fn set_namespace_standard_qs(
         )
             .into_response();
     };
-    set_namespace_standard_inner(&app, &ns, body).await
+    set_namespace_standard_inner(&app, &ns, body, Some(&headers)).await
 }
 
 pub async fn get_namespace_standard_qs(
@@ -734,6 +760,7 @@ pub async fn get_namespace_standard_qs(
 
 pub async fn clear_namespace_standard_qs(
     State(app): State<AppState>,
+    headers: HeaderMap,
     Query(q): Query<NamespaceStandardQuery>,
 ) -> impl IntoResponse {
     let Some(ns) = q.namespace else {
@@ -743,7 +770,7 @@ pub async fn clear_namespace_standard_qs(
         )
             .into_response();
     };
-    clear_namespace_standard_inner(&app, &ns).await
+    clear_namespace_standard_inner(&app, &ns, Some(&headers)).await
 }
 
 /// v0.6.2 (S35 follow-up): shared implementation for path and query-string
@@ -752,7 +779,28 @@ pub async fn clear_namespace_standard_qs(
 /// Returns 503 `quorum_not_met` when federation is configured and the quorum
 /// contract fails — matching the pattern established by
 /// `set_namespace_standard_inner`.
-async fn clear_namespace_standard_inner(app: &AppState, ns: &str) -> axum::response::Response {
+async fn clear_namespace_standard_inner(
+    app: &AppState,
+    ns: &str,
+    headers: Option<&HeaderMap>,
+) -> axum::response::Response {
+    // #913 (security-medium / SOC2, 2026-05-19) — admin governance audit.
+    // Clearing a namespace standard removes the governance policy that
+    // gates downstream writes; the chain entry MUST land before the
+    // storage write so the audit trail captures intent.
+    let header_agent_id = headers.and_then(|h| h.get("x-agent-id").and_then(|v| v.to_str().ok()));
+    let caller = crate::identity::resolve_http_agent_id(None, header_agent_id)
+        .unwrap_or_else(|_| "anonymous:invalid".to_string());
+    crate::governance::audit::record_decision(
+        &caller,
+        "allow",
+        "namespace_clear_standard",
+        "",
+        json!({
+            "namespace": ns,
+        }),
+    );
+
     // v0.7.0 Wave-3 Continuation 2 (Phase 11) — postgres-backed clear.
     #[cfg(feature = "sal")]
     if matches!(app.storage_backend, StorageBackend::Postgres) {

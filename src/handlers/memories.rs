@@ -314,6 +314,24 @@ pub async fn delete_memory(
             .into_response();
     }
 
+    // #913 (security-medium / SOC2, 2026-05-19) — admin/destructive
+    // action audit. Memory delete is the canonical destructive operation;
+    // the forensic-chain entry MUST land before the storage write so the
+    // audit trail captures intent even when the downstream delete errors.
+    // The existing `audit::emit(AuditAction::Delete)` further down writes
+    // the SIEM-shaped enterprise audit row AFTER the delete commits;
+    // these two channels are intentionally complementary.
+    let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
+    let caller_for_forensic = crate::identity::resolve_http_agent_id(None, header_agent_id)
+        .unwrap_or_else(|_| "anonymous:invalid".to_string());
+    crate::governance::audit::record_decision(
+        &caller_for_forensic,
+        "allow",
+        "memory_delete",
+        "",
+        json!({ "id": &id }),
+    );
+
     // v0.7.0 Wave-3 — Postgres-backed daemons dispatch through the
     // SAL trait. The legacy delete path threads governance, audit,
     // and federation fanout through the SQLite mutex; those layers

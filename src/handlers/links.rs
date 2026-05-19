@@ -26,7 +26,7 @@
 use axum::{
     Json,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 #[cfg(feature = "sal")]
@@ -528,6 +528,7 @@ pub async fn create_link(
 /// create-link fanout is sufficient.
 pub async fn delete_link(
     State(app): State<AppState>,
+    headers: HeaderMap,
     Json(raw): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     // v0.7.0 G-PHASE-E-1 (#706) — mirror create_link: reject unknown
@@ -558,6 +559,26 @@ pub async fn delete_link(
         )
             .into_response();
     }
+
+    // #913 (security-medium / SOC2, 2026-05-19) — admin/destructive
+    // action audit. Link delete mutates the graph topology; emit the
+    // forensic-chain entry BEFORE the storage write so the audit trail
+    // captures intent regardless of downstream success.
+    let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
+    let caller = crate::identity::resolve_http_agent_id(None, header_agent_id)
+        .unwrap_or_else(|_| "anonymous:invalid".to_string());
+    crate::governance::audit::record_decision(
+        &caller,
+        "allow",
+        "link_delete",
+        "",
+        json!({
+            "source_id": source_id,
+            "target_id": target_id,
+            "relation": relation,
+        }),
+    );
+
     let lock = app.db.lock().await;
     let delete_result = db::delete_link(&lock.0, &source_id, &target_id);
     drop(lock);

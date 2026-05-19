@@ -141,6 +141,19 @@ pub async fn approve_pending(
         }
     };
 
+    // #913 (security-medium / SOC2, 2026-05-19) — admin governance audit.
+    // Approve is the canonical privileged gate operation; the forensic-
+    // chain row MUST land before the storage write so the audit trail
+    // captures the approver's identity + pending_id even when the
+    // downstream consensus / execution path errors.
+    crate::governance::audit::record_decision(
+        &agent_id,
+        "allow",
+        "pending_approve",
+        "",
+        json!({ "pending_id": &id }),
+    );
+
     // v0.7.0 Wave-3 Continuation 3 (Phase 20) — postgres-backed approve
     // routes through the FULL governance pipeline:
     // - inheritance-chain walk over `namespace_meta` (with explicit
@@ -351,6 +364,17 @@ pub async fn reject_pending(
                 .into_response();
         }
     };
+
+    // #913 (security-medium / SOC2, 2026-05-19) — admin governance audit.
+    // Reject is the privileged-gate denial path; mirror approve so both
+    // outcomes appear in the forensic chain BEFORE the storage write.
+    crate::governance::audit::record_decision(
+        &agent_id,
+        "refuse",
+        "pending_reject",
+        "",
+        json!({ "pending_id": &id }),
+    );
 
     // v0.7.0 Wave-3 Continuation 2 (Phase 11) — postgres-backed reject.
     #[cfg(feature = "sal")]

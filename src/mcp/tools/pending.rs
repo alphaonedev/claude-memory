@@ -127,6 +127,20 @@ pub fn handle_pending_approve(
     let agent_id = crate::identity::resolve_agent_id(params["agent_id"].as_str(), mcp_client)
         .map_err(|e| e.to_string())?;
     let remember = parse_remember_param(params);
+
+    // #913 (security-medium / SOC2, 2026-05-19) — admin governance audit.
+    // Approve is the privileged gate operation; emit the forensic-chain
+    // row BEFORE the storage write so the audit trail captures the
+    // approver's identity + pending_id even when the downstream
+    // consensus / execution path errors.
+    crate::governance::audit::record_decision(
+        &agent_id,
+        "allow",
+        "pending_approve",
+        "",
+        json!({ "pending_id": id }),
+    );
+
     match db::approve_with_approver_type(conn, id, &agent_id).map_err(|e| e.to_string())? {
         ApproveOutcome::Approved => {
             // Task 1.10: auto-execute the queued action on final approval.
@@ -395,6 +409,18 @@ pub fn handle_pending_reject(
     let agent_id = crate::identity::resolve_agent_id(params["agent_id"].as_str(), mcp_client)
         .map_err(|e| e.to_string())?;
     let remember = parse_remember_param(params);
+
+    // #913 (security-medium / SOC2, 2026-05-19) — admin governance audit.
+    // Reject is the privileged-gate denial; mirror approve so both
+    // outcomes appear in the forensic chain BEFORE the storage write.
+    crate::governance::audit::record_decision(
+        &agent_id,
+        "refuse",
+        "pending_reject",
+        "",
+        json!({ "pending_id": id }),
+    );
+
     let transitioned =
         db::decide_pending_action(conn, id, false, &agent_id).map_err(|e| e.to_string())?;
     if !transitioned {

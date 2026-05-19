@@ -248,6 +248,29 @@ pub async fn approval_decide(
                 .into_response();
         }
     };
+
+    // #913 (security-medium / SOC2, 2026-05-19) — admin governance audit.
+    // K10's HMAC-gated approval endpoint is the primary privileged
+    // decision surface; emit the forensic-chain entry BEFORE the storage
+    // write so the audit trail records the decider's identity, the
+    // outcome (approve / deny), and the pending id regardless of
+    // downstream consensus / execution behaviour.
+    let decision_kind = match body.decision {
+        crate::approvals::Decision::Approve => "approval_decide_approve",
+        crate::approvals::Decision::Deny => "approval_decide_deny",
+    };
+    let decision_outcome = match body.decision {
+        crate::approvals::Decision::Approve => "allow",
+        crate::approvals::Decision::Deny => "refuse",
+    };
+    crate::governance::audit::record_decision(
+        &agent_id,
+        decision_outcome,
+        decision_kind,
+        "",
+        json!({ "pending_id": &id }),
+    );
+
     let lock = app.db.lock().await;
     // Snapshot the pending row before deciding so we can synthesise a
     // permission rule even after the row transitions.

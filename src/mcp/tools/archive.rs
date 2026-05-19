@@ -36,6 +36,22 @@ pub(super) fn handle_archive_purge(
 ) -> Result<Value, String> {
     let older_than_days = params["older_than_days"].as_i64();
 
+    // #913 (security-medium / SOC2, 2026-05-19) — admin/destructive
+    // state-change audit. Archive purge permanently deletes archived
+    // memories; emit the forensic-chain row BEFORE the storage write
+    // so the audit trail captures intent regardless of downstream
+    // permission-gate / storage outcome. Mirrors the #911 HTTP
+    // `purge_archive` fix.
+    let caller = crate::identity::resolve_agent_id(params["agent_id"].as_str(), None)
+        .unwrap_or_else(|_| "anonymous:invalid".to_string());
+    crate::governance::audit::record_decision(
+        &caller,
+        "allow",
+        "archive_purge",
+        "",
+        json!({ "older_than_days": older_than_days }),
+    );
+
     // v0.7.0 K9 — unified permission pipeline (archive-side).
     // Archive purge is a destructive across-namespace operation; we
     // evaluate against the global namespace + caller's agent_id.

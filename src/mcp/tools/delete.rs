@@ -17,6 +17,24 @@ pub(super) fn handle_delete(
     let id = params["id"].as_str().ok_or("id is required")?;
     validate::validate_id(id).map_err(|e| e.to_string())?;
 
+    // #913 (security-medium / SOC2, 2026-05-19) — admin/destructive
+    // state-change audit. MCP `memory_delete` is the canonical
+    // destructive operation; emit the forensic-chain row BEFORE the
+    // permission gate + storage write so the audit trail captures the
+    // caller's intent regardless of downstream outcome. Complementary
+    // to `audit::emit(AuditAction::Delete)` further down which writes
+    // the SIEM-shaped enterprise row AFTER the delete commits.
+    let caller_for_forensic =
+        crate::identity::resolve_agent_id(params["agent_id"].as_str(), mcp_client)
+            .unwrap_or_else(|_| "anonymous:invalid".to_string());
+    crate::governance::audit::record_decision(
+        &caller_for_forensic,
+        "allow",
+        "memory_delete",
+        "",
+        json!({ "id": id }),
+    );
+
     // Resolve the memory first so governance has owner context.
     let target = if let Some(m) = db::get(conn, id).map_err(|e| e.to_string())? {
         Some(m)

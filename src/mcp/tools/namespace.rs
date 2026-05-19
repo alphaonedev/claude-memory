@@ -21,6 +21,26 @@ pub fn handle_namespace_set_standard(
         validate::validate_namespace(p).map_err(|e| e.to_string())?;
     }
 
+    // #913 (security-medium / SOC2, 2026-05-19) — admin governance
+    // audit. Namespace-standard mutations gate every downstream write;
+    // the forensic-chain row MUST land before the storage write so the
+    // audit trail captures intent even on validate/storage failure
+    // downstream. MCP callers resolve via `identity::resolve_agent_id`.
+    let caller = crate::identity::resolve_agent_id(params["agent_id"].as_str(), None)
+        .unwrap_or_else(|_| "anonymous:invalid".to_string());
+    crate::governance::audit::record_decision(
+        &caller,
+        "allow",
+        "namespace_set_standard",
+        "",
+        serde_json::json!({
+            "namespace": namespace,
+            "standard_id": id,
+            "parent": parent,
+            "has_governance": params.get("governance").is_some_and(|v| !v.is_null()),
+        }),
+    );
+
     // Task 1.8: optional governance policy merged into the standard memory's
     // metadata.governance. Policy is deserialized + validated before write.
     //
@@ -185,6 +205,18 @@ pub(crate) fn handle_namespace_clear_standard(
         .as_str()
         .ok_or("namespace is required")?;
     validate::validate_namespace(namespace).map_err(|e| e.to_string())?;
+
+    // #913 (security-medium / SOC2, 2026-05-19) — admin governance audit.
+    let caller = crate::identity::resolve_agent_id(params["agent_id"].as_str(), None)
+        .unwrap_or_else(|_| "anonymous:invalid".to_string());
+    crate::governance::audit::record_decision(
+        &caller,
+        "allow",
+        "namespace_clear_standard",
+        "",
+        serde_json::json!({ "namespace": namespace }),
+    );
+
     let cleared = db::clear_namespace_standard(conn, namespace).map_err(|e| e.to_string())?;
     Ok(json!({"cleared": cleared, "namespace": namespace}))
 }
