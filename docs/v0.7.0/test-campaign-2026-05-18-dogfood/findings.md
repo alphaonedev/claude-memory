@@ -11,7 +11,7 @@ Filed per the prime directive pm-v3 (memory `cd8ede94-3376-4837-b570-9d975290ae0
 | 1 | `memory_store` MCP wire schema omitted `source_uri` property AND `validation.rs:224` hard-coded `source_uri: None` — caller-supplied URI silently dropped. | Product defect (sqlite path) | CLOSED | [#892](https://github.com/alphaonedev/ai-memory-mcp/issues/892) | `39aa158f9` | https://github.com/alphaonedev/ai-memory-mcp/issues/892 |
 | 2 | `memory_update` MCP wire schema omitted `expected_version` (Gap 1 If-Match) and `edit_source` (Gap 5 supersede). Handler already read both — wire-schema only — but NHIs could not discover the parameters via `tools/list`. | Product defect (discoverability, sqlite + PG paths) | CLOSED | [#893](https://github.com/alphaonedev/ai-memory-mcp/issues/893) | `39aa158f9` | https://github.com/alphaonedev/ai-memory-mcp/issues/893 |
 | 3 | Gap 5 `SupersedeResult` docstring + sequence-step-4 comment in `src/storage/mod.rs` claimed a `memory_links` row with relation `supersedes` was written from NEW → archived OLD. Impl correctly skips it (FK `target_id REFERENCES memories(id)` would reject pointing at an archived id). Lineage IS preserved via `archived_memories.archive_reason='superseded'` and `new_memory.metadata.superseded_id`. | Documentation drift | CLOSED (doc-only fix) | [#895](https://github.com/alphaonedev/ai-memory-mcp/issues/895) | `19b08543c` | https://github.com/alphaonedev/ai-memory-mcp/issues/895 |
-| 4 | Postgres + Apache AGE store missing v44-v47 migrations (Gap 1 `version` column, Gap 2 `source_uri` upgrade path, Gap 3 `recall_observations` table, Gap 5 `edit_source` column) + 6 SAL methods + AGE Cypher snippets for the superseded edge. ~600 LOC across `src/store/postgres.rs` and `src/store/postgres_schema.sql`. Track C cross-store parity stays gapped until this lands. | Product defect (PG+AGE path parity) | FILED + OPEN — next dispatch | [#894](https://github.com/alphaonedev/ai-memory-mcp/issues/894) | (pending) | (pending close) |
+| 4 | Postgres + Apache AGE store missing v44-v47 migrations (Gap 1 `version` column, Gap 2 `source_uri` upgrade path, Gap 3 `recall_observations` table, Gap 5 `edit_source` column) + 6 SAL methods + AGE Cypher snippets for the superseded edge. ~600 LOC across `src/store/postgres.rs` and `src/store/postgres_schema.sql`. Track C cross-store parity stays gapped until this lands. | Product defect (PG+AGE path parity) | CLOSED | [#894](https://github.com/alphaonedev/ai-memory-mcp/issues/894) | `a69eed03b` (migrations v42-v46) + `e3ae0a555` (SAL methods, ~870 LOC) + `9bec43c7c` (cross-adapter parity harness) + `62cf9e49b` (build/clippy unblock); landing series closed by `62cf9e49b` | https://github.com/alphaonedev/ai-memory-mcp/issues/894 |
 
 ## Test-coverage scope statements
 
@@ -27,12 +27,14 @@ These are not defects; they are honest scope statements about what the dogfood d
 
 | Class | Count |
 |-------|-------|
-| Product defects (closed in v0.7.0) | 3 (#892, #893, #895) |
-| Product defects (filed and open for next dispatch) | 1 (#894) |
+| Product defects (closed in v0.7.0) | 4 (#892, #893, #894, #895) |
+| Documentation drift (closed in v0.7.0, doc-only fix) | 1 (#895 — counted in the 4 above; called out for framing precision because it was the only doc-only fix in the defect column) |
 | Test-coverage scope statements | 3 (live recall-observations, signed-link decoration, retest-script SQL typo) |
 | **Total findings** | **7** |
 
-Per pm-v3: no finding was deferred to a future release; no finding was framed as "non-blocking"; no finding was handed to the operator. The PG+AGE parity gap (#894) is the next agent dispatch, not an operator action. The three scope statements are queued for the next dogfood pass with concrete next-actions, not labelled "out of scope" in the dismissive sense.
+Of the **7 total findings**: **4 product defects** all closed in v0.7.0 (3 by code fix + 1 by doc-only fix); **3 test-coverage scope statements** queued with concrete next-actions for the next dogfood iteration. Counting the substrate gap (PG+AGE parity, #894) as a defect rather than a scope statement is deliberate — it was a parity drift between the two adapters, not a "we didn't test it" admission. Earlier framing as "5 findings" / "4 findings + #894 open" was imprecise. The 7-vs-5-vs-4 disagreement was a count framing drift surfaced by the 2026-05-19 truthfulness audit (#917) — the table above is the authoritative count.
+
+Per pm-v3: no finding was deferred to a future release; no finding was framed as "non-blocking"; no finding was handed to the operator. The PG+AGE parity gap (#894) closed in the same v0.7.0 cycle via the migration-v42-v46 + SAL-method + parity-harness series (commits `a69eed03b` → `62cf9e49b`). The three scope statements are queued for the next dogfood pass with concrete next-actions, not labelled "out of scope" in the dismissive sense.
 
 ---
 
