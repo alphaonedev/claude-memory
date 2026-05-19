@@ -84,32 +84,55 @@ pub(crate) async fn fanout_or_503(
     }
 }
 
-/// Helper — resolve the caller's `agent_id` using the HTTP precedence chain,
-/// accepting an optional body value, the `X-Agent-Id` header, and an optional
-/// `?agent_id=` query param. Returns a 400 on invalid input; synthesizes an
-/// anonymous id on miss.
+/// Helper — resolve the caller's `agent_id` using the HTTP precedence chain.
+///
+/// # SECURITY (v0.7.0 — header-first; body and query must match)
+///
+/// The `X-Agent-Id` request header is the AUTHORITATIVE identity slot.
+/// The optional `body` and `query` slots are caller-controlled and so
+/// cannot be trusted as precedence inputs; they are accepted as
+/// REFINEMENTS that MUST agree with the header-resolved id. A mismatch
+/// returns a `agent_id_body_header_mismatch` / `agent_id_query_header_mismatch`
+/// error so handlers can map it to `403 Forbidden`.
+///
+/// Pre-v0.7.0 precedence was `body → query → header` (body wins),
+/// which was the #874-class spoof vector that the v0.7.0 fix series
+/// closed at every CALLER. The structural fix lives in
+/// [`crate::identity::resolve_http_agent_id`]; this wrapper mirrors
+/// the same posture for the additional `query` slot some handlers
+/// accept (e.g. `GET /inbox?agent_id=...`).
+///
+/// Returns a 400-mapped string error on invalid input; a 403-mapped
+/// string error tagged `agent_id_*_header_mismatch` on body/query
+/// disagreement; synthesizes an anonymous `anonymous:req-…` id on
+/// total miss (no body, no query, no header) so the upstream handler
+/// can decide whether anonymous writes are allowed.
 pub(crate) fn resolve_caller_agent_id(
     body: Option<&str>,
     headers: &HeaderMap,
     query: Option<&str>,
 ) -> Result<String, String> {
-    // Body → query → header (body wins, query next, header last). Matches the
-    // precedence already used by `register_agent` / `create_memory` with
-    // query inserted at the same tier as body for handlers that read from
-    // the querystring (e.g. GET /inbox?agent_id=...).
-    if let Some(id) = body
-        && !id.is_empty()
-    {
-        validate::validate_agent_id(id).map_err(|e| format!("invalid agent_id: {e}"))?;
-        return Ok(id.to_string());
-    }
-    if let Some(id) = query
-        && !id.is_empty()
-    {
-        validate::validate_agent_id(id).map_err(|e| format!("invalid agent_id: {e}"))?;
-        return Ok(id.to_string());
-    }
+    // 1. Header (or anonymous fallback) is authoritative. Delegate to
+    //    the identity primitive so the body-match check there runs once.
     let header_val = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
-    crate::identity::resolve_http_agent_id(None, header_val)
-        .map_err(|e| format!("invalid agent_id: {e}"))
+    let resolved = crate::identity::resolve_http_agent_id(body, header_val)
+        .map_err(|e| format!("invalid agent_id: {e}"))?;
+
+    // 2. Query refinement — same posture as body: when non-empty it
+    //    MUST match the authoritative resolved id. Validate first so a
+    //    malformed query surfaces as the more informative validation
+    //    error rather than as a mismatch.
+    if let Some(claim) = query
+        && !claim.is_empty()
+    {
+        validate::validate_agent_id(claim).map_err(|e| format!("invalid agent_id: {e}"))?;
+        if claim != resolved {
+            return Err(format!(
+                "agent_id_query_header_mismatch: query-supplied agent_id {claim:?} disagrees \
+                 with authenticated header-resolved id {resolved:?}"
+            ));
+        }
+    }
+
+    Ok(resolved)
 }
