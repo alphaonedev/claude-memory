@@ -1264,8 +1264,14 @@ pub fn update_with_expected_version(
 /// * `archived_id` is the OLD memory's id (now in
 ///   `archived_memories` with `archive_reason='superseded'`).
 /// * `new_id` is the freshly-minted row carrying the patched
-///   content. A `supersedes` link from the new row to the archived
-///   id is also created so KG traversals reach the prior version.
+///   content. The supersede lineage is encoded via TWO mechanisms
+///   (NOT three): (1) `archived_memories.archive_reason='superseded'`
+///   on the OLD row, (2) `new_memory.metadata.superseded_id` forward
+///   pointer on the NEW row. A `memory_links` `supersedes` edge is
+///   NOT written because the FK `target_id REFERENCES memories(id)`
+///   would reject it (the archived row no longer lives in the live
+///   `memories` table). See #895 for the future archive-cross-ref
+///   path that would unblock a uniform link surface.
 #[derive(Debug, Clone)]
 pub struct SupersedeResult {
     pub archived_id: String,
@@ -1290,8 +1296,11 @@ pub struct SupersedeResult {
 ///    row's `(title, namespace)` may collide with the archived
 ///    row's (since the archive is in a separate table); the new
 ///    row's `id` is fresh.
-/// 4. Write a `supersedes` link from new→archived so KG traversals
-///    preserve the lineage.
+/// 4. Stamp the supersede pointer in the new row's
+///    `metadata.superseded_id`. A `memory_links` `supersedes` row
+///    is intentionally NOT written — the FK target would point at
+///    the archived id which has left the live `memories` table.
+///    See impl comment + #895 for the archive-cross-ref follow-on.
 ///
 /// # Errors
 ///
