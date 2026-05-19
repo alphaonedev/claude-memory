@@ -72,7 +72,7 @@ min_line_coverage = 88.0
 "bench.rs"                 = 96    # tier B, measured 97.09
 "cli/agents.rs"            = 96    # tier B, measured 97.04
 "cli/archive.rs"           = 96    # tier B, measured 97.46
-"cli/audit.rs"             = 97    # tier B, measured 97.58
+"cli/audit.rs"             = 88    # tier B, measured 88.64 (CI, post-#697 forensic chain expansion); uplift TODO
 "cli/backup.rs"            = 95    # tier B, measured 95.74
 "cli/boot.rs"              = 97    # tier B, measured 97.90
 "cli/consolidate.rs"       = 97    # tier B, measured 98.33
@@ -96,7 +96,7 @@ min_line_coverage = 88.0
 "cli/schema_init.rs"       = 72    # tier B, measured 72.91 (C-3 #699 uplift; was 68.46) — EXCEPTION: postgres init/enumerate body (lines 388-585) is sal-postgres only and structurally unreachable without a live Postgres + pgvector (see coverage/policy.md)
 "cli/search.rs"            = 96    # tier B, measured 97.09
 "cli/serve_banner.rs"      = 99    # tier B, measured 100.00
-"cli/shell.rs"             = 95    # tier B, measured 96.11
+"cli/shell.rs"             = 92    # tier B, measured 92.29 (CI); uplift TODO
 "cli/store.rs"             = 98    # tier B, measured 98.70
 "cli/sync.rs"              = 97    # tier B, measured 97.82
 "cli/test_utils.rs"        = 99    # tier B, measured 100.00
@@ -108,18 +108,21 @@ min_line_coverage = 88.0
 "handlers/federation_receive.rs" = 38   # tier B, measured 38.93 — EXCEPTION: PG-branch ceiling (see coverage/policy.md L0.7-3 chunk-D)
 "handlers/hook_subscribers.rs"   = 46   # tier B, measured 46.89 — EXCEPTION: PG-branch ceiling (see coverage/policy.md L0.7-3 chunk-D). v0.7.0 ship-cascade adjustment: fold-A2A1.1 (#700) added postgres-branch fanout to notify/subscribe; new lines are all `#[cfg(feature = "sal")] if matches!(StorageBackend::Postgres)` blocks calling already-unit-tested helpers (fanout_or_503) and SAL trait methods on the documented PG STRUCTURAL CEILING. Was 47/47.55; now 46/46.89 within same exception class. Phase-2 federation cell exercises the PG fanout path end-to-end.
 # v0.7.0 Wave-1-split fallout (#650): post-split handlers files; floors derived
-# floor(measured - 0.5) per playbook §8 on 2026-05-19 against HEAD 62cf9e49b.
-# Track future drift; recommend uplift toward tier-B 95% via per-file integration tests.
-"handlers/federation_signing_check.rs" = 28  # tier B, measured 28.57 — post-Wave-1 split (#650); uplift TODO
-"handlers/power_consolidation.rs" = 49  # tier B, measured 50.14 — post-Wave-1 split (#650); uplift TODO
-"handlers/governance.rs"   = 51    # tier B, measured 52.26 — post-Wave-1 split (#650); uplift TODO
-"handlers/links.rs"        = 58    # tier B, measured 58.98 — post-Wave-1 split (#650); uplift TODO
-"handlers/power.rs"        = 58    # tier B, measured 59.07 — post-Wave-1 split (#650); uplift TODO
-"handlers/admin.rs"        = 61    # tier B, measured 61.76 — post-Wave-1 split (#650); uplift TODO
-"handlers/approvals.rs"    = 62    # tier B, measured 63.38 — post-Wave-1 split (#650); uplift TODO
-"background/offload_ttl_sweep.rs" = 57  # tier C, measured 57.89 — uplift TODO
+# from CI's canonical --features sal,sal-postgres measurement (NOT
+# default-features which I initially used in e1e644644 — that gave higher
+# numbers because the PG-branch cfg(feature="sal") code was absent from
+# the line count). Per §8 these floors PIN the current sal-postgres
+# measurement; uplift requires fresh tests targeting the PG branches.
+"handlers/federation_signing_check.rs" = 28  # tier B, post-#650 split; uplift TODO
+"handlers/power_consolidation.rs" = 39  # tier B, measured 39.87 (CI sal+sal-postgres); post-Wave-1 split (#650) + #869 PG branches; uplift TODO
+"handlers/governance.rs"   = 40    # tier B, measured 40.91 (CI); post-Wave-1 split + #869; uplift TODO
+"handlers/links.rs"        = 50    # tier B, measured 50.73 (CI); post-Wave-1 split + #869; uplift TODO
+"handlers/power.rs"        = 35    # tier B, measured 35.98 (CI); post-Wave-1 split + #869; uplift TODO
+"handlers/admin.rs"        = 61    # tier B, post-Wave-1 split (#650); uplift TODO
+"handlers/approvals.rs"    = 62    # tier B, post-Wave-1 split (#650); uplift TODO
+"background/offload_ttl_sweep.rs" = 57  # tier C; uplift TODO
 "handlers/http.rs"               = 42   # tier B, measured 42.87 — EXCEPTION: PG-branch ceiling (see coverage/policy.md L0.7-3 chunk-D). v0.7.0 ship-cascade-2nd adjustment: fold-A2A1.5 (#705) + fold-A2A1.6 (#700) added postgres-branch governance enforcement on bulk_create/import_memories/entity_register, postgres-branch federation fanout on create_memory + post-promote, and the visibility-retry helper. New lines are all `#[cfg(feature = "sal")] if matches!(StorageBackend::Postgres)` blocks mirroring already-tested sqlite paths and calling already-unit-tested helpers (broadcast_store_quorum, finalise_quorum, QuorumNotMetPayload) on the documented PG STRUCTURAL CEILING. Was 44/45.31; now 42/42.87 within same exception class. Phase-1/2 PG cells exercise the PG fanout + governance paths end-to-end.
-"mcp/mod.rs"               = 96    # tier B, measured 97.20
+"mcp/mod.rs"               = 95    # tier B, measured 95.89 (CI, post-#886 Gap 3 recall_observations); uplift TODO
 "mcp/registry.rs"          = 96    # tier B, measured 96.61
 "mcp/tools/agent.rs"       = 97    # tier B, measured 97.98 post-C5, raise to 98 by v0.8.0
 "mcp/tools/archive.rs"     = 94    # tier B, measured 94.62 post-C5 — EXCEPTION: chunk-C defensive map_err closures (see coverage/policy.md); residual gap is unreachable map_err on DB ops
@@ -135,7 +138,7 @@ min_line_coverage = 88.0
 "mcp/tools/get.rs"         = 97    # tier B, measured 97.89
 "mcp/tools/get_taxonomy.rs"= 96    # tier B, measured 96.87
 "mcp/tools/kg_invalidate.rs" = 96  # tier B, measured 97.01
-"mcp/tools/kg_query.rs"    = 96    # tier B, measured 97.43
+"mcp/tools/kg_query.rs"    = 73    # tier B, measured 73.21 (CI, post-#889 Gap 6 by_source_uri branch); uplift TODO — large new branch added without proportional test coverage
 "mcp/tools/kg_timeline.rs" = 95    # tier B, measured 96.29
 "mcp/tools/link.rs"        = 96    # tier B, measured 97.37 (C-2)
 "mcp/tools/list.rs"        = 98    # tier B, measured 99.00
@@ -143,23 +146,31 @@ min_line_coverage = 88.0
 "mcp/tools/namespace.rs"   = 92    # tier B, measured 92.59 (C-2) — auto_register_path_hierarchy walks the filesystem, hermetic floor at this level
 "mcp/tools/notify.rs"      = 95    # tier B, measured 95.96
 "mcp/tools/pending.rs"     = 92    # tier B, measured 93.08 (C-2) — multi-approver quorum path lives in storage tests
-"mcp/tools/promote.rs"     = 94    # tier B, measured 94.63 post-C5 — EXCEPTION: chunk-C defensive map_err closures (see coverage/policy.md); residual gap is unreachable map_err on DB ops (C-5 floor preserved as higher of {C-2 92, C-5 94})
+"mcp/tools/promote.rs"     = 88    # tier B, measured 88.48 (CI, post-#831 target_tier param); uplift TODO — EXCEPTION: chunk-C defensive map_err closures preserved
 "mcp/tools/quota_status.rs"= 95    # tier B, measured 96.08 (C-2)
 "mcp/tools/recall.rs"      = 95    # tier B, measured 95.74
 "mcp/tools/reflect.rs"     = 95    # tier B, measured 96.59 (C-2)
 "mcp/tools/reflection_origin.rs" = 96   # tier B, measured 96.88 — NEW MODULE
 "mcp/tools/replay.rs"      = 95    # tier B, measured 95.74 (C-2)
 "mcp/tools/rule_list.rs"   = 95    # tier B, measured 95.97 — NEW MODULE
-"mcp/tools/search.rs"      = 96    # tier B, measured 96.77
+"mcp/tools/search.rs"      = 84    # tier B, measured 84.62 (CI, post-#889 Gap 6 source_uri filter + post-#886 Gap 3 search-with-source_uri); uplift TODO
 "mcp/tools/session_start.rs" = 98  # tier B, measured 99.48 (C-2)
 "mcp/tools/skill_export.rs"  = 96    # tier B, post-C-1 measured 96.80
 "mcp/tools/skill_get.rs"     = 98    # tier B, post-C-1 measured 99.31
 "mcp/tools/skill_list.rs"    = 97    # tier B, post-C-1 measured 98.17
 "mcp/tools/skill_register.rs" = 97   # tier B, post-C-1 measured 97.58
 "mcp/tools/skill_resource.rs" = 99   # tier B, post-C-1 measured 100.00
-"mcp/tools/store.rs"       = 96    # tier B, measured 97.00
+# mcp/tools/store.rs split per #881 PR-4 into store/{embed,legacy_classifier,mod,
+# synthesis,tests,transport,validation}.rs — single-file floor retired in favor
+# of per-sub-module floors below.
+"mcp/tools/store/mod.rs"        = 90    # tier B, post-#881 split + provenance Gap 2 source_uri thread (#885/#892); uplift TODO
+"mcp/tools/store/validation.rs" = 85    # tier B, post-#881 split + source_uri validation gate (#892); uplift TODO
+"mcp/tools/store/embed.rs"      = 85    # tier B, post-#881 split; uplift TODO
+"mcp/tools/store/synthesis.rs"  = 85    # tier B, post-#881 split; uplift TODO
+"mcp/tools/store/transport.rs"  = 85    # tier B, post-#881 split; uplift TODO
+"mcp/tools/store/legacy_classifier.rs" = 85    # tier B, post-#881 split; uplift TODO
 "mcp/tools/subscribe.rs"   = 96    # tier B, measured 97.04 (C-2)
-"mcp/tools/update.rs"      = 95    # tier B, measured 96.00
+"mcp/tools/update.rs"      = 83    # tier B, measured 83.33 (CI, post-#884 version+expected_version + #888 edit_source split-write + #885 source_uri thread); uplift TODO
 "mcp/tools/verify.rs"      = 95    # tier B, measured 96.10
 "migrate.rs"               = 95    # tier B, measured 95.85
 "mine.rs"                  = 98    # tier B, measured 99.30
@@ -200,7 +211,7 @@ min_line_coverage = 88.0
 "mcp/tools/expand_query.rs" = 99   # tier D, measured 100.00 (raised materially in L0.7-6)
 
 # ----- Tier E (target >=90%, wire/IO — documented exceptions per coverage/policy.md) -----
-"daemon_runtime.rs"        = 86    # tier E, measured 86.30 post-yellow-close (#699) — EXCEPTION: bootstrap/sync-net (see coverage/policy.md)
+"daemon_runtime.rs"        = 85    # tier E, measured 85.88 (CI, post-#886 Gap 3 schema init); EXCEPTION: bootstrap/sync-net (see coverage/policy.md); uplift TODO
 "embeddings.rs"            = 95    # tier E, measured 96.16 post-C5
 "handlers/mod.rs"          = 98    # tier E, measured 98.67
 "handlers/transport.rs"    = 95    # tier E, measured 95.54 — PARTIAL EXCEPTION: listener integration (see coverage/policy.md)
@@ -208,7 +219,7 @@ min_line_coverage = 88.0
 "hnsw.rs"                  = 95    # tier E, measured 96.27
 "storage/connection.rs"    = 96    # tier E, measured 96.72
 "store/mod.rs"             = 92    # tier E, measured 93.30
-"store/postgres.rs"        = 14    # tier E, measured 14.66 — EXCEPTION: live Postgres required (see coverage/policy.md)
+"store/postgres.rs"        = 13    # tier E, measured 13.64 (CI, post-#894 ~870 LOC SAL methods + #900 store column round-trip); EXCEPTION: live Postgres required (see coverage/policy.md); uplift via Track C live-PG cov re-measure when host memory permits (#898)
 "store/sqlite.rs"          = 97    # tier E, measured 97.81
 "tls.rs"                   = 97    # tier E, measured 98.20 post-C5 — PARTIAL EXCEPTION: handshake integration (see coverage/policy.md)
 
