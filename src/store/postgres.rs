@@ -10513,7 +10513,7 @@ mod tests {
         // #295), not visibility scoping. With `for_agent("ai:sal-test")`
         // the .get() post-filter returns NotFound against an
         // "ai:alice"-owned row.
-        let ctx = CallerContext::for_admin();
+        let ctx = CallerContext::for_admin("ai:sal-test");
         let ns = format!("sal-agent-{}", uuid::Uuid::new_v4());
 
         let mut first = sample_memory("agent-1", &ns, "owned-by-alice", "original");
