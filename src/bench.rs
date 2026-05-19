@@ -461,6 +461,7 @@ fn synth_memory(namespace: &str, i: usize, prefix: &str) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 

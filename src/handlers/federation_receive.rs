@@ -3,7 +3,8 @@
 
 use axum::{
     Json,
-    extract::{Query, State},
+    body::Bytes,
+    extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -22,13 +23,14 @@ use super::MAX_BULK_SIZE;
 #[cfg(feature = "sal")]
 use super::StorageBackend;
 #[cfg(feature = "sal")]
-use super::store_err_to_response;
+use super::federation_signing_check::sync_push_via_store;
+use super::federation_signing_check::verify_signature_or_reject;
 
 /// v0.7.0 federation security — extract the peer's self-claimed
 /// `x-peer-id` header. Lowercase form per HTTP/2 wire convention;
 /// axum's `HeaderMap` lookup is case-insensitive so callers can send
 /// the canonical `X-Peer-Id`.
-fn extract_peer_id(headers: &HeaderMap) -> Option<&str> {
+pub(super) fn extract_peer_id(headers: &HeaderMap) -> Option<&str> {
     headers.get(PEER_ID_HEADER).and_then(|v| v.to_str().ok())
 }
 
@@ -80,7 +82,7 @@ const CLOCK_SKEW_WARN_THRESHOLD_SECS: i64 = 60;
 /// `tracing::warn!` so operators can spot a misconfigured peer. NEVER
 /// rejects the push — federation must be tolerant of clock drift; the
 /// log is the entire enforcement surface.
-fn check_sender_clock_skew(sender_agent_id: &str, body: &SyncPushBody) {
+pub(super) fn check_sender_clock_skew(sender_agent_id: &str, body: &SyncPushBody) {
     let sender_ts_str: Option<&str> = body
         .sender_wall_clock
         .as_deref()
@@ -135,7 +137,7 @@ fn check_sender_clock_skew(sender_agent_id: &str, body: &SyncPushBody) {
 /// Returns `Ok(())` on a clean check + record (counters incremented),
 /// `Err(QuotaError)` on a refusal. The caller renders the refusal as
 /// `429 Too Many Requests` with an `X-Quota-Reset-At` header.
-fn attribute_agent_for_quota(sender_agent_id: &str, mem: &Memory) -> String {
+pub(super) fn attribute_agent_for_quota(sender_agent_id: &str, mem: &Memory) -> String {
     mem.metadata
         .get("agent_id")
         .and_then(serde_json::Value::as_str)
@@ -149,7 +151,7 @@ fn attribute_agent_for_quota(sender_agent_id: &str, mem: &Memory) -> String {
 /// caps reset on midnight UTC via `quotas::reset_daily`. The header
 /// matches the HTTP POST refusal surface so clients have one timer
 /// to consult regardless of which entry point hit the cap.
-fn next_utc_midnight() -> String {
+pub(super) fn next_utc_midnight() -> String {
     use chrono::{Duration, Timelike};
     let now = chrono::Utc::now();
     let next = now
@@ -278,359 +280,37 @@ pub struct SyncSinceQuery {
 /// postgres receiver via the trait calls. Audit emission for every
 /// accepted federation push fires through `audit::emit` regardless
 /// of backend (Phase 9).
-#[cfg(feature = "sal")]
-#[allow(clippy::too_many_lines)]
-async fn sync_push_via_store(app: AppState, _headers: HeaderMap, body: SyncPushBody) -> Response {
-    if let Err(e) = validate::validate_agent_id(&body.sender_agent_id) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("invalid sender_agent_id: {e}")})),
-        )
-            .into_response();
-    }
-    if body.memories.len() > MAX_BULK_SIZE
-        || body.deletions.len() > MAX_BULK_SIZE
-        || body.archives.len() > MAX_BULK_SIZE
-        || body.restores.len() > MAX_BULK_SIZE
-        || body.pendings.len() > MAX_BULK_SIZE
-        || body.pending_decisions.len() > MAX_BULK_SIZE
-        || body.namespace_meta.len() > MAX_BULK_SIZE
-        || body.namespace_meta_clears.len() > MAX_BULK_SIZE
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": format!("sync_push limited to {} entries per subcollection", MAX_BULK_SIZE)
-            })),
-        )
-            .into_response();
-    }
-
-    let ctx = crate::store::CallerContext::for_agent(body.sender_agent_id.clone());
-    let mut applied = 0usize;
-    let mut noop = 0usize;
-    let mut skipped = 0usize;
-    let mut deleted = 0usize;
-    let mut links_applied = 0usize;
-    let mut latest_seen: Option<String> = None;
-    let mut unsupported_on_postgres = 0usize;
-    let mut quota_refused = 0usize;
-    let mut first_quota_refusal: Option<crate::quotas::QuotaError> = None;
-
-    // v0.7.0 S6-LOW2 — observability-only sender_clock skew detection
-    // (parity with the sqlite path).
-    check_sender_clock_skew(&body.sender_agent_id, &body);
-
-    // ---- memories ----------------------------------------------------
-    for mem in &body.memories {
-        if let Err(e) = validate::validate_memory(mem) {
-            tracing::warn!("sync_push: skipping memory {} ({}): {e}", mem.id, mem.title);
-            skipped += 1;
-            continue;
-        }
-        if latest_seen
-            .as_deref()
-            .is_none_or(|current| mem.updated_at.as_str() > current)
-        {
-            latest_seen = Some(mem.updated_at.clone());
-        }
-        if body.dry_run {
-            noop += 1;
-            continue;
-        }
-        // v0.7.0 S6-M2 — per-agent quota gate. `agent_quotas` lives on
-        // the SQLite metadata DB even on postgres-backed daemons
-        // (Wave-3 hasn't migrated the row to the SAL trait yet), so
-        // the postgres path consults the same `app.db` connection the
-        // sqlite path uses. F7 closure (#639) — federation receive
-        // never bypasses the cap that the equivalent HTTP POST sees.
-        let attribute_agent = attribute_agent_for_quota(&body.sender_agent_id, mem);
-        let bytes_estimate =
-            i64::try_from(mem.title.len() + mem.content.len() + mem.metadata.to_string().len())
-                .unwrap_or(i64::MAX);
-        {
-            let conn = app.db.lock().await;
-            match crate::quotas::check_and_record(
-                &conn.0,
-                &attribute_agent,
-                crate::quotas::QuotaOp::Memory {
-                    bytes: bytes_estimate,
-                },
-            ) {
-                Ok(()) => {}
-                Err(crate::quotas::QuotaCheckError::Quota(q)) => {
-                    tracing::warn!(
-                        target: "federation::quota",
-                        peer = %body.sender_agent_id,
-                        attribute_agent = %attribute_agent,
-                        limit = q.limit.as_str(),
-                        current = q.current,
-                        max = q.max,
-                        "sync_push (postgres): per-agent quota exceeded"
-                    );
-                    let _ = crate::signed_events::append_signed_event(
-                        &conn.0,
-                        &crate::signed_events::SignedEvent {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            agent_id: attribute_agent.clone(),
-                            event_type: "federation.quota_refused".to_string(),
-                            payload_hash: crate::signed_events::payload_hash(
-                                format!(
-                                    "peer={} agent={} limit={} current={} max={}",
-                                    body.sender_agent_id,
-                                    attribute_agent,
-                                    q.limit.as_str(),
-                                    q.current,
-                                    q.max,
-                                )
-                                .as_bytes(),
-                            ),
-                            signature: None,
-                            attest_level: "unsigned".to_string(),
-                            timestamp: chrono::Utc::now().to_rfc3339(),
-                            ..crate::signed_events::SignedEvent::default()
-                        },
-                    );
-                    quota_refused += 1;
-                    if first_quota_refusal.is_none() {
-                        first_quota_refusal = Some(q);
-                    }
-                    drop(conn);
-                    break;
-                }
-                Err(crate::quotas::QuotaCheckError::Sql(e)) => {
-                    tracing::warn!(
-                        "sync_push (postgres): quota substrate read failed for {}: {e}",
-                        attribute_agent
-                    );
-                    skipped += 1;
-                    continue;
-                }
-            }
-        }
-        // v0.7.0 L2-2 — reflection origin stamping (postgres parity).
-        // Use the compiled-default cap on postgres because
-        // `resolve_governance_policy` is sqlite-only today; the stamp
-        // still carries `peer_origin` + `original_depth` which is the
-        // load-bearing provenance.
-        let local_cap = crate::models::GovernancePolicy::default().effective_max_reflection_depth();
-        let to_insert = crate::federation::reflection_bookkeeping::stamp_reflection_origin(
-            mem,
-            &body.sender_agent_id,
-            local_cap,
-        );
-        match app.store.apply_remote_memory(&ctx, &to_insert).await {
-            Ok(applied_id) => {
-                applied += 1;
-                // v0.7.0 Wave-3 Continuation 5 (S18+S79 federation
-                // semantic recall) — re-embed the incoming memory on
-                // the receiver so the postgres `embedding` column
-                // lands populated. Federation wire shape doesn't
-                // carry the vector; without this step semantic recall
-                // queries against a peer that received the memory
-                // through sync_push would surface empty.
-                if let Some(emb) = app.embedder.as_ref().as_ref() {
-                    let embedding_text = format!("{} {}", mem.title, mem.content);
-                    if let Ok(vector) = emb.embed(&embedding_text) {
-                        let _ = app
-                            .store
-                            .update_embedding(&ctx, &applied_id, Some(&vector))
-                            .await;
-                    }
-                }
-                // F2 audit-chain emit: every accepted federation push
-                // chains through the same audit log as a local Store.
-                // Phase-9 wiring — file-based audit module is backend-
-                // blind so this works for postgres-backed daemons.
-                if crate::audit::is_enabled() {
-                    let owner = mem
-                        .metadata
-                        .get("agent_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(&body.sender_agent_id);
-                    crate::audit::emit(
-                        crate::audit::EventBuilder::new(
-                            crate::audit::AuditAction::Store,
-                            crate::audit::actor(owner, "federation_push", None),
-                            crate::audit::target_memory(
-                                mem.id.clone(),
-                                mem.namespace.clone(),
-                                Some(mem.title.clone()),
-                                Some(mem.tier.as_str().to_string()),
-                                None,
-                            ),
-                        )
-                        .outcome(crate::audit::AuditOutcome::Allow),
-                    );
-                }
-            }
-            Err(e) => {
-                // Refund the quota we charged so a downstream write
-                // failure doesn't leak counters (saturating; safe).
-                {
-                    let conn = app.db.lock().await;
-                    let _ = crate::quotas::refund_op(
-                        &conn.0,
-                        &attribute_agent,
-                        crate::quotas::QuotaOp::Memory {
-                            bytes: bytes_estimate,
-                        },
-                    );
-                }
-                tracing::warn!("sync_push: apply_remote_memory failed for {}: {e}", mem.id);
-                skipped += 1;
-            }
-        }
-    }
-
-    // v0.7.0 S6-M2 — quota refusal short-circuit (postgres path).
-    if let Some(q) = first_quota_refusal.take() {
-        let reset_at = next_utc_midnight();
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            [
-                ("x-quota-reset-at", reset_at.as_str()),
-                ("x-quota-limit", q.limit.as_str()),
-            ],
-            Json(json!({
-                "error": "QUOTA_EXCEEDED",
-                "limit": q.limit.as_str(),
-                "current": q.current,
-                "max": q.max,
-                "agent_id": q.agent_id,
-                "applied_before_refusal": applied,
-                "quota_refused": quota_refused,
-                "reset_at": reset_at,
-                "storage_backend": "postgres",
-            })),
-        )
-            .into_response();
-    }
-
-    // ---- deletions ---------------------------------------------------
-    for del_id in &body.deletions {
-        if validate::validate_id(del_id).is_err() {
-            skipped += 1;
-            continue;
-        }
-        if body.dry_run {
-            noop += 1;
-            continue;
-        }
-        match app.store.apply_remote_deletion(&ctx, del_id).await {
-            Ok(true) => deleted += 1,
-            Ok(false) => noop += 1,
-            Err(e) => {
-                tracing::warn!("sync_push: apply_remote_deletion failed for {del_id}: {e}");
-                skipped += 1;
-            }
-        }
-    }
-
-    // ---- links -------------------------------------------------------
-    //
-    // H3 verify path: when a link arrives with a signature + observed_by,
-    // verify against the locally enrolled public key. Tampered = skip.
-    // Unknown observed_by = accept-and-flag as unsigned. Successful =
-    // peer_attested. Mirrors the sqlite-backed handler's H3 contract.
-    for link in &body.links {
-        if validate::validate_link(&link.source_id, &link.target_id, link.relation.as_str())
-            .is_err()
-        {
-            skipped += 1;
-            continue;
-        }
-        if body.dry_run {
-            noop += 1;
-            continue;
-        }
-        let attest_level = match (link.signature.as_deref(), link.observed_by.as_deref()) {
-            (Some(sig_bytes), Some(observed_by)) => {
-                match crate::identity::verify::lookup_peer_public_key(observed_by) {
-                    Some(pubkey) => {
-                        let signable = crate::identity::sign::SignableLink {
-                            src_id: &link.source_id,
-                            dst_id: &link.target_id,
-                            relation: link.relation.as_str(),
-                            observed_by: Some(observed_by),
-                            valid_from: link.valid_from.as_deref(),
-                            valid_until: link.valid_until.as_deref(),
-                        };
-                        match crate::identity::verify::verify(&pubkey, &signable, sig_bytes) {
-                            Ok(()) => "peer_attested",
-                            Err(e) => {
-                                tracing::warn!(
-                                    "sync_push: signature rejected for link \
-                                     ({} -> {} / {}) from observed_by={}: {e}",
-                                    link.source_id,
-                                    link.target_id,
-                                    link.relation,
-                                    observed_by
-                                );
-                                skipped += 1;
-                                continue;
-                            }
-                        }
-                    }
-                    None => "unsigned",
-                }
-            }
-            _ => "unsigned",
-        };
-        match app.store.apply_remote_link(&ctx, link, attest_level).await {
-            Ok(()) => links_applied += 1,
-            Err(e) => {
-                tracing::warn!(
-                    "sync_push: apply_remote_link failed ({} -> {} / {}): {e}",
-                    link.source_id,
-                    link.target_id,
-                    link.relation
-                );
-                skipped += 1;
-            }
-        }
-    }
-
-    // ---- archives / restores / pendings / pending_decisions /
-    //      namespace_meta / namespace_meta_clears -----------------------
-    //
-    // These subcollections write into tables (archived_memories,
-    // pending_actions, namespace_meta) not yet trait-covered. Surface
-    // them with the same noop posture sqlite uses on missing rows so
-    // a heterogeneous federation reports an honest count.
-    unsupported_on_postgres += body.archives.len()
-        + body.restores.len()
-        + body.pendings.len()
-        + body.pending_decisions.len()
-        + body.namespace_meta.len()
-        + body.namespace_meta_clears.len();
-
-    (
-        StatusCode::OK,
-        Json(json!({
-            "applied": applied,
-            "deleted": deleted,
-            "links_applied": links_applied,
-            "noop": noop,
-            "skipped": skipped,
-            "quota_refused": quota_refused,
-            "unsupported_on_postgres": unsupported_on_postgres,
-            "dry_run": body.dry_run,
-            "receiver_agent_id": body.sender_agent_id,
-            "storage_backend": "postgres",
-            "note": "pendings / archives / restores / namespace_meta are sqlite-only \
-                     in v0.7.0; memories / deletions / links round-trip via the SAL trait",
-        })),
-    )
-        .into_response()
-}
-
-#[allow(clippy::too_many_lines)]
 pub async fn sync_push(
     State(app): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<SyncPushBody>,
+    body_bytes: Bytes,
 ) -> impl IntoResponse {
+    // v0.7.0 #791 — verify the per-message signature BEFORE
+    // deserialising the body. Keeps the verifier's input identical
+    // to the wire bytes (signer + verifier MUST agree byte-for-byte).
+    let peer_header_owned = extract_peer_id(&headers).map(str::to_string);
+    // v0.7.0 #922 — chained nonce-freshness check after signature verifies.
+    if let Some(rejection) = verify_signature_or_reject(
+        &headers,
+        &body_bytes,
+        peer_header_owned.as_deref(),
+        &app.federation_nonce_cache,
+    ) {
+        return rejection;
+    }
+
+    // Deserialise the body now that the signature has been verified.
+    let body: SyncPushBody = match serde_json::from_slice(&body_bytes) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("malformed sync_push body: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
     let state = app.db.clone();
 
     // v0.7.0 #238 — body-claimed sender_agent_id MUST attest against
@@ -639,7 +319,7 @@ pub async fn sync_push(
     // `AI_MEMORY_FED_TRUST_BODY_AGENT_ID=1`. Runs BEFORE the
     // postgres-dispatch branch so both backends share the same
     // refusal posture. See `src/federation/peer_attestation.rs`.
-    let peer_header_owned = extract_peer_id(&headers).map(str::to_string);
+    // (peer_header_owned already extracted above for signature check)
     let attest_cfg = PeerAttestationConfig::from_env();
     if !peer_attestation::trust_body_agent_id_bypass() {
         if let Err(e) = peer_attestation::attest_sender(
@@ -1345,185 +1025,6 @@ pub async fn sync_push(
             "dry_run": body.dry_run,
             "receiver_agent_id": local_agent_id,
             "receiver_clock": receiver_clock,
-        })),
-    )
-        .into_response()
-}
-
-pub async fn sync_since(
-    State(app): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<SyncSinceQuery>,
-) -> impl IntoResponse {
-    let state = app.db.clone();
-    // Validate `since` parses as RFC 3339 BEFORE hitting the DB so a
-    // garbage timestamp returns a clear 400 instead of a 200 with the
-    // entire database (red-team #247).
-    if let Some(ref s) = q.since
-        && !s.is_empty()
-        && chrono::DateTime::parse_from_rfc3339(s).is_err()
-    {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "invalid `since` parameter — expected RFC 3339 timestamp"
-            })),
-        )
-            .into_response();
-    }
-    let limit = q.limit.unwrap_or(500).min(10_000);
-
-    // v0.7.0 #239 — per-peer namespace allowlist. Read the
-    // `x-peer-id` header + the operator-configured attestation map
-    // BEFORE the DB hit so the projection size cap (`limit`) is
-    // applied against the post-filter row set. Default-deny on
-    // missing peer-id / missing scope row unless the operator opts
-    // in via `AI_MEMORY_FED_SYNC_TRUST_PEER=1` (legacy compat).
-    let peer_header = extract_peer_id(&headers).map(str::to_string);
-    let attest_cfg = PeerAttestationConfig::from_env();
-    let trust_bypass = peer_attestation::sync_trust_peer_bypass();
-
-    // Pre-resolved scope row: `Some(&PeerScope)` means filter by its
-    // namespace allowlist; `None` + bypass means "legacy full dump";
-    // `None` + no bypass means "default-deny → empty page".
-    let scope = peer_header.as_deref().and_then(|p| attest_cfg.scope_for(p));
-    let allow_all_legacy = scope.is_none() && trust_bypass;
-    if scope.is_none() && !trust_bypass {
-        // Default-deny: short-circuit to an empty envelope with WARN
-        // so an unauthorised peer cannot exfiltrate the DB. The
-        // `excluded_for_scope` field is honest about the partial view.
-        tracing::warn!(
-            target: "federation::scope",
-            peer = %peer_header.as_deref().unwrap_or(""),
-            "sync_since: no scope allowlist for peer; refusing to return rows. \
-             Set AI_MEMORY_FED_SYNC_TRUST_PEER=1 to opt out (legacy peers)."
-        );
-        return (
-            StatusCode::OK,
-            Json(json!({
-                "count": 0,
-                "limit": limit,
-                "updated_since": q.since,
-                "earliest_updated_at": serde_json::Value::Null,
-                "latest_updated_at": serde_json::Value::Null,
-                "memories": Vec::<Memory>::new(),
-                "excluded_for_scope": 0,
-                "scope_status": "no_allowlist_default_deny",
-            })),
-        )
-            .into_response();
-    }
-
-    // Helper closure: namespace test for the resolved scope.
-    let allowed = |ns: &str| -> bool {
-        if allow_all_legacy {
-            return true;
-        }
-        match scope {
-            Some(s) => s
-                .allowed_namespaces
-                .iter()
-                .any(|p| crate::federation::peer_attestation::namespace_allowed_test_glob(p, ns)),
-            None => false,
-        }
-    };
-
-    // v0.7.0 Wave-3 Continuation 2 — dispatch through the SAL trait
-    // when postgres-backed. Heterogeneous federation (sqlite ↔ postgres)
-    // rides on this single code path so the wire shape is byte-blind
-    // to the underlying store.
-    #[cfg(feature = "sal")]
-    if matches!(app.storage_backend, StorageBackend::Postgres) {
-        let mems = match app
-            .store
-            .list_memories_updated_since(q.since.as_deref(), limit)
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => return store_err_to_response(e),
-        };
-        let total = mems.len();
-        let filtered: Vec<Memory> = mems.into_iter().filter(|m| allowed(&m.namespace)).collect();
-        let excluded = total.saturating_sub(filtered.len());
-        let earliest_updated_at = filtered.first().map(|m| m.updated_at.clone());
-        let latest_updated_at = filtered.last().map(|m| m.updated_at.clone());
-        return (
-            StatusCode::OK,
-            Json(json!({
-                "count": filtered.len(),
-                "limit": limit,
-                "updated_since": q.since,
-                "earliest_updated_at": earliest_updated_at,
-                "latest_updated_at": latest_updated_at,
-                "memories": filtered,
-                "storage_backend": "postgres",
-                "excluded_for_scope": excluded,
-                "scope_status": if allow_all_legacy { "legacy_bypass" } else { "scoped" },
-            })),
-        )
-            .into_response();
-    }
-
-    let lock = state.lock().await;
-    let mems = match db::memories_updated_since(&lock.0, q.since.as_deref(), limit) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!("sync_since: {e}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "internal server error"})),
-            )
-                .into_response();
-        }
-    };
-
-    // v0.7.0 #239 — apply per-peer namespace scope filter. Rows
-    // outside the operator-configured allowlist are EXCLUDED from
-    // the response (callers see a partial view + an honest
-    // `excluded_for_scope` count).
-    let total = mems.len();
-    let mems: Vec<Memory> = mems.into_iter().filter(|m| allowed(&m.namespace)).collect();
-    let excluded = total.saturating_sub(mems.len());
-
-    // Record the puller as a peer so subsequent incremental push/pull
-    // pairs have a durable clock entry. Best-effort; don't fail the
-    // response if the side-effect write fails.
-    let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
-    if let (Some(peer), Ok(local_agent_id)) = (
-        q.peer.as_deref(),
-        crate::identity::resolve_http_agent_id(None, header_agent_id),
-    ) && validate::validate_agent_id(peer).is_ok()
-        && let Some(last) = mems.last()
-        && let Err(e) = db::sync_state_observe(&lock.0, &local_agent_id, peer, &last.updated_at)
-    {
-        tracing::debug!("sync_since: sync_state_observe failed: {e}");
-    }
-
-    // S39 diagnostic echo (v0.6.2). The testbook scenario writes 6 rows
-    // while peer-3 is suspended then queries `/sync/since?since=<ckpt>`
-    // and expects the 6 back. When the count comes back 0, the scenario
-    // can't tell whether:
-    //   a) the server parsed `since` differently than expected,
-    //   b) `limit` silently truncated, or
-    //   c) the returned timestamps don't actually cover the expected range.
-    // Echoing `updated_since` (what the server parsed, verbatim) plus
-    // earliest / latest `updated_at` from the result set lets the
-    // scenario pin the failure mode without changing any behavior. Fields
-    // are additive — no existing caller assertion regresses.
-    let earliest_updated_at = mems.first().map(|m| m.updated_at.clone());
-    let latest_updated_at = mems.last().map(|m| m.updated_at.clone());
-
-    (
-        StatusCode::OK,
-        Json(json!({
-            "count": mems.len(),
-            "limit": limit,
-            "updated_since": q.since,
-            "earliest_updated_at": earliest_updated_at,
-            "latest_updated_at": latest_updated_at,
-            "memories": mems,
-            "excluded_for_scope": excluded,
-            "scope_status": if allow_all_legacy { "legacy_bypass" } else { "scoped" },
         })),
     )
         .into_response()

@@ -21,14 +21,9 @@
 use ai_memory::profile::{Family, Profile};
 use ai_memory::subscriptions::{self, NewSubscription};
 use rusqlite::Connection;
-use tempfile::NamedTempFile;
 
-fn fresh_db() -> (NamedTempFile, std::path::PathBuf) {
-    let f = NamedTempFile::new().expect("tempfile");
-    let p = f.path().to_path_buf();
-    let _ = ai_memory::db::open(&p).expect("db::open");
-    (f, p)
-}
+mod common;
+use common::fresh_db_tempfile_path as fresh_db;
 
 fn subscribe(db_path: &std::path::Path, url: &str) -> String {
     let conn = Connection::open(db_path).unwrap();

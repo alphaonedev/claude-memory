@@ -472,11 +472,123 @@ fn disk_free_gib_at_path(_path: &std::path::Path) -> Option<u64> {
 }
 
 // ---------------------------------------------------------------------------
+// RuleEngine — unified rule-load + decision-routing core (issue #850)
+// ---------------------------------------------------------------------------
+
+/// Refactor Wave-2 Tier-A2 (issue #850) — unified rule engine consumed
+/// by every governance entry point.
+///
+/// Before this refactor each of the three callsites that consult
+/// `governance_rules` (the substrate `GOVERNANCE_PRE_WRITE` hook, the
+/// `wire_check` agent-external hook, and the audited `check_agent_action`
+/// MCP / CLI surface) duplicated the rule-load + first-refusal-wins
+/// loop in its own function (`check_agent_action`,
+/// `check_agent_action_no_audit`, `check_agent_action_deferred`).
+/// Adding a new severity variant or matcher field meant touching three
+/// near-identical loops. The `RuleEngine` collapses the load + routing
+/// logic into one place; the three legacy free functions remain as
+/// thin wrappers so the public API is wire-stable.
+///
+/// `rules` holds the snapshot of enabled rules of the *target kind*
+/// (the engine is constructed per-action, not per-table — kind-scoped
+/// loading matches the existing `list_enabled_by_kind` shape and
+/// preserves the signature-verification side effects in
+/// [`crate::governance::rules_store::list_enabled_by_kind`]).
+///
+/// The combinator is **first-refusal-wins** with `warn` falling
+/// through and `log` being silent — identical semantics to the
+/// pre-refactor inline loops.
+pub struct RuleEngine {
+    rules: Vec<Rule>,
+}
+
+impl RuleEngine {
+    /// Construct an engine scoped to a single `AgentAction`'s kind.
+    ///
+    /// Reads the enabled rule rows of matching `kind` from
+    /// `governance_rules` via
+    /// [`crate::governance::rules_store::list_enabled_by_kind`]; the
+    /// signature-verification gate (L1-6 bypass-impossibility
+    /// invariant) runs inside that helper and is preserved verbatim.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any SQLite error from `list_enabled_by_kind`.
+    pub fn load_for_action(conn: &Connection, action: &AgentAction) -> Result<Self> {
+        let kind = action.kind();
+        let rules = crate::governance::rules_store::list_enabled_by_kind(conn, kind).with_context(
+            || format!("RuleEngine::load_for_action: list_enabled_by_kind({kind})"),
+        )?;
+        Ok(Self { rules })
+    }
+
+    /// Construct an engine directly from a pre-loaded rules slice.
+    /// Useful for tests that want to skip the SQLite round-trip or
+    /// for future callsites that already hold a cached rule list.
+    #[must_use]
+    pub fn from_rules(rules: Vec<Rule>) -> Self {
+        Self { rules }
+    }
+
+    /// Evaluate `action` against the loaded rules. Returns the
+    /// first-refusal-wins [`Decision`].
+    ///
+    /// `agent_id` is unused by the matcher today but threaded through
+    /// so future agent-scoped matchers (operator allow-lists, agent
+    /// quotas) can consult it without an API break.
+    #[must_use]
+    pub fn evaluate(&self, _agent_id: &str, action: &AgentAction) -> Decision {
+        let mut first_warn: Option<(String, String)> = None;
+        for rule in &self.rules {
+            if !matcher_applies(rule, action) {
+                continue;
+            }
+            let severity = Severity::from_str(&rule.severity).unwrap_or(Severity::Log);
+            match severity {
+                Severity::Refuse => {
+                    return Decision::Refuse {
+                        rule_id: rule.id.clone(),
+                        reason: rule.reason.clone(),
+                    };
+                }
+                Severity::Warn => {
+                    if first_warn.is_none() {
+                        first_warn = Some((rule.id.clone(), rule.reason.clone()));
+                    }
+                }
+                Severity::Log => {
+                    // Log-only: silent in the engine. Audited entry
+                    // points still emit the final decision's signed
+                    // event below; per-log emission would amplify.
+                }
+            }
+        }
+        match first_warn {
+            Some((rule_id, reason)) => Decision::Warn { rule_id, reason },
+            None => Decision::Allow,
+        }
+    }
+
+    /// Borrow the loaded rule slice. Used by [`count_matching_rules`]
+    /// and by tests that want to assert load-side behaviour without
+    /// running the matcher.
+    #[must_use]
+    pub fn rules(&self) -> &[Rule] {
+        &self.rules
+    }
+}
+
+// ---------------------------------------------------------------------------
 // check_agent_action — the public entry point
 // ---------------------------------------------------------------------------
 
 /// Evaluate `action` against every enabled rule of matching kind in
 /// the `governance_rules` table and return a [`Decision`].
+///
+/// Thin wrapper over [`RuleEngine::load_for_action`] +
+/// [`RuleEngine::evaluate`]; the audit-emit side effect is the only
+/// reason this entry point exists distinct from the `_no_audit`
+/// variant.
 ///
 /// The combinator is **first-refusal wins**: as soon as a `refuse`
 /// rule matches, the engine returns `Refuse` and stops scanning
@@ -519,46 +631,40 @@ pub fn check_agent_action(
     agent_id: &str,
     action: &AgentAction,
 ) -> Result<Decision> {
-    let kind = action.kind();
-    let rules = crate::governance::rules_store::list_enabled_by_kind(conn, kind)
-        .with_context(|| format!("check_agent_action: list_enabled_by_kind({kind})"))?;
-
-    let mut first_warn: Option<(String, String)> = None;
-
-    for rule in &rules {
-        if !matcher_applies(rule, action) {
-            continue;
-        }
-        let severity = Severity::from_str(&rule.severity).unwrap_or(Severity::Log);
-        match severity {
-            Severity::Refuse => {
-                let decision = Decision::Refuse {
-                    rule_id: rule.id.clone(),
-                    reason: rule.reason.clone(),
-                };
-                emit_check_event(conn, agent_id, action, &decision)?;
-                return Ok(decision);
-            }
-            Severity::Warn => {
-                if first_warn.is_none() {
-                    first_warn = Some((rule.id.clone(), rule.reason.clone()));
-                }
-            }
-            Severity::Log => {
-                // Log-only: write the audit row at the end with the
-                // final decision (which may still be Allow if no
-                // higher-severity rule fires); the per-log row is
-                // not emitted separately to avoid amplification.
-            }
-        }
-    }
-
-    let decision = match first_warn {
-        Some((rule_id, reason)) => Decision::Warn { rule_id, reason },
-        None => Decision::Allow,
-    };
+    let engine = RuleEngine::load_for_action(conn, action)
+        .with_context(|| format!("check_agent_action: load engine for {}", action.kind()))?;
+    let decision = engine.evaluate(agent_id, action);
     emit_check_event(conn, agent_id, action, &decision)?;
+    // v0.7.0 #697 — fire-and-forget forensic emit. The forensic sink
+    // is process-wide, independent of the in-flight Connection (it
+    // appends to its own file with no SQLite involvement), so there's
+    // no deadlock risk from inside the storage hook either.
+    emit_forensic_decision(agent_id, action, &decision);
     Ok(decision)
+}
+
+/// v0.7.0 #697 — translate a `(action, decision)` into the forensic
+/// log shape and emit. No-op when the forensic sink is uninitialised.
+fn emit_forensic_decision(agent_id: &str, action: &AgentAction, decision: &Decision) {
+    let (decision_str, rule_id) = match decision {
+        Decision::Allow => ("allow", String::new()),
+        Decision::Refuse { rule_id, .. } => ("refuse", rule_id.clone()),
+        Decision::Warn { rule_id, .. } => ("warn", rule_id.clone()),
+    };
+    // payload is `{action, decision_detail}` — keeps the forensic row
+    // self-describing without depending on cross-table joins for a
+    // SIEM walking the chain.
+    let payload = serde_json::json!({
+        "action": action,
+        "decision_detail": decision,
+    });
+    crate::governance::audit::record_decision(
+        agent_id,
+        decision_str,
+        action.kind(),
+        &rule_id,
+        payload,
+    );
 }
 
 /// Append a `governance.check` row to `signed_events`. Helper so
@@ -622,41 +728,22 @@ fn emit_check_event(
 ///
 /// Returns an error if the SQLite query for enabled rules fails.
 pub fn check_agent_action_no_audit(conn: &Connection, action: &AgentAction) -> Result<Decision> {
-    let kind = action.kind();
-    let rules = crate::governance::rules_store::list_enabled_by_kind(conn, kind)
-        .with_context(|| format!("check_agent_action_no_audit: list_enabled_by_kind({kind})"))?;
-
-    let mut first_warn: Option<(String, String)> = None;
-
-    for rule in &rules {
-        if !matcher_applies(rule, action) {
-            continue;
-        }
-        let severity = Severity::from_str(&rule.severity).unwrap_or(Severity::Log);
-        match severity {
-            Severity::Refuse => {
-                return Ok(Decision::Refuse {
-                    rule_id: rule.id.clone(),
-                    reason: rule.reason.clone(),
-                });
-            }
-            Severity::Warn => {
-                if first_warn.is_none() {
-                    first_warn = Some((rule.id.clone(), rule.reason.clone()));
-                }
-            }
-            Severity::Log => {
-                // Log-only — pre-write hook is silent; the post-write
-                // audit chain captures the successful insert via the
-                // handler's `AuditAction::Store` emit. No-op here.
-            }
-        }
-    }
-
-    Ok(match first_warn {
-        Some((rule_id, reason)) => Decision::Warn { rule_id, reason },
-        None => Decision::Allow,
-    })
+    let engine = RuleEngine::load_for_action(conn, action).with_context(|| {
+        format!(
+            "check_agent_action_no_audit: load engine for {}",
+            action.kind()
+        )
+    })?;
+    // No agent_id is available on the read-only pre-write hook path.
+    // Pass the empty string — the engine treats agent_id as opaque
+    // until a future agent-scoped matcher consults it.
+    let decision = engine.evaluate("", action);
+    // v0.7.0 #697 — forensic emit even on the no-audit path. The
+    // forensic sink is process-wide and writes to its own file (not
+    // SQLite), so the deadlock concern that motivated `_no_audit`
+    // doesn't apply.
+    emit_forensic_decision("", action, &decision);
+    Ok(decision)
 }
 
 /// v0.7.0 Policy-Engine Item 3 — deferred-audit variant of
@@ -715,10 +802,13 @@ pub fn check_agent_action_deferred(
 ///
 /// Returns an error if the SQLite query fails.
 pub fn count_matching_rules(conn: &Connection, action: &AgentAction) -> Result<usize> {
-    let kind = action.kind();
-    let rules = crate::governance::rules_store::list_enabled_by_kind(conn, kind)
-        .with_context(|| format!("count_matching_rules: list_enabled_by_kind({kind})"))?;
-    Ok(rules.iter().filter(|r| matcher_applies(r, action)).count())
+    let engine = RuleEngine::load_for_action(conn, action)
+        .with_context(|| format!("count_matching_rules: load engine for {}", action.kind()))?;
+    Ok(engine
+        .rules()
+        .iter()
+        .filter(|r| matcher_applies(r, action))
+        .count())
 }
 
 /// Read-side helper: return the most-recent `governance.check`
@@ -796,6 +886,49 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    /// Issue #819 — short alias for the test-only thread-local guard
+    /// that forces [`rules_store::resolve_operator_pubkey`] to return
+    /// `None`. Tests that insert unsigned rules and expect
+    /// `check_agent_action` to honor them must hold this guard for
+    /// their full body, otherwise on dev hosts with a real
+    /// `operator.key.pub` staged at the platform config path the
+    /// L1-6 signature gate will skip the unsigned fixtures and the
+    /// assertions will fail (test failures don't reproduce on
+    /// clean-HOME CI; the guard makes the local dev loop match CI).
+    #[must_use = "the guard must be held for the scope of the test"]
+    fn no_operator_pubkey() -> rules_store::ForceNoOperatorPubkeyGuard {
+        rules_store::force_no_operator_pubkey_for_test()
+    }
+
+    /// Issue #899 — guard against cross-test forensic-sink bleed.
+    ///
+    /// Every test that calls [`check_agent_action`] (or
+    /// [`check_agent_action_no_audit`]) indirectly fires
+    /// [`crate::governance::audit::record_decision`] via
+    /// [`emit_forensic_decision`]. If a sibling test in
+    /// `governance::audit::tests` has just initialised the
+    /// process-wide forensic sink at its tempdir, this thread's
+    /// `record_decision` would land a row in that sibling's
+    /// tempdir — bleeding the sibling's row count.
+    ///
+    /// Tests that exercise `check_agent_action*` MUST hold this
+    /// lock for the duration of the call. The lock is the same
+    /// `OnceLock<Mutex<()>>` `audit::tests` uses, so the two
+    /// modules now serialise their access to the shared sink.
+    /// Acquire pattern mirrors `no_operator_pubkey`:
+    ///
+    /// ```ignore
+    /// let _forensic = forensic_lock();
+    /// let _no_pubkey = no_operator_pubkey();
+    /// let decision = check_agent_action(&conn, "agent:t", &action).unwrap();
+    /// ```
+    #[must_use = "the guard must be held for the scope of the test"]
+    fn forensic_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::governance::audit::forensic_sink_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     fn add_rule(
@@ -879,6 +1012,7 @@ mod tests {
 
     #[test]
     fn allow_when_no_rule_matches() {
+        let _forensic = forensic_lock();
         let conn = fresh_conn();
         let action = AgentAction::Bash {
             command: "ls -la".into(),
@@ -891,6 +1025,8 @@ mod tests {
 
     #[test]
     fn refuse_filesystem_write_glob_match() {
+        let _forensic = forensic_lock();
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -914,6 +1050,7 @@ mod tests {
 
     #[test]
     fn allow_filesystem_write_outside_glob() {
+        let _forensic = forensic_lock();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -933,6 +1070,7 @@ mod tests {
 
     #[test]
     fn disabled_rule_does_not_match() {
+        let _forensic = forensic_lock();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -952,6 +1090,8 @@ mod tests {
 
     #[test]
     fn warn_rule_returns_warn_not_refuse() {
+        let _forensic = forensic_lock();
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -974,6 +1114,8 @@ mod tests {
 
     #[test]
     fn refuse_wins_over_warn_when_both_match() {
+        let _forensic = forensic_lock();
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1001,6 +1143,8 @@ mod tests {
 
     #[test]
     fn process_spawn_binary_match() {
+        let _forensic = forensic_lock();
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1020,6 +1164,7 @@ mod tests {
 
     #[test]
     fn process_spawn_binary_mismatch_allows() {
+        let _forensic = forensic_lock();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1039,6 +1184,8 @@ mod tests {
 
     #[test]
     fn network_request_exact_host_match() {
+        let _forensic = forensic_lock();
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1065,6 +1212,8 @@ mod tests {
 
     #[test]
     fn custom_action_matches_on_kind() {
+        let _forensic = forensic_lock();
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1084,6 +1233,7 @@ mod tests {
 
     #[test]
     fn check_emits_signed_event() {
+        let _forensic = forensic_lock();
         let conn = fresh_conn();
         let action = AgentAction::Bash {
             command: "ls".into(),
@@ -1102,6 +1252,7 @@ mod tests {
 
     #[test]
     fn refuse_short_circuit_still_emits_event() {
+        let _forensic = forensic_lock();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1128,6 +1279,7 @@ mod tests {
 
     #[test]
     fn count_matching_rules_skips_audit() {
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1151,6 +1303,7 @@ mod tests {
 
     #[test]
     fn malformed_matcher_does_not_panic() {
+        let _forensic = forensic_lock();
         let conn = fresh_conn();
         add_rule(&conn, "R-bad", "bash", "not json", "refuse", true);
         let action = AgentAction::Bash {
@@ -1204,6 +1357,7 @@ mod tests {
 
     #[test]
     fn most_recent_check_returns_latest() {
+        let _forensic = forensic_lock();
         let conn = fresh_conn();
         let action = AgentAction::Bash {
             command: "x".into(),
@@ -1223,6 +1377,7 @@ mod tests {
 
     #[test]
     fn no_audit_allow_when_no_rule_matches() {
+        let _forensic = forensic_lock();
         let conn = fresh_conn();
         let action = AgentAction::Bash {
             command: "ls".into(),
@@ -1238,6 +1393,8 @@ mod tests {
 
     #[test]
     fn no_audit_refuses_with_same_shape_as_audited_path() {
+        let _forensic = forensic_lock();
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1267,6 +1424,7 @@ mod tests {
 
     #[test]
     fn no_audit_disabled_rule_yields_allow() {
+        let _forensic = forensic_lock();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1286,6 +1444,8 @@ mod tests {
 
     #[test]
     fn no_audit_warn_returned_when_no_refuse_matches() {
+        let _forensic = forensic_lock();
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1508,6 +1668,7 @@ mod tests {
 
     #[test]
     fn count_matching_rules_returns_count() {
+        let _no_pubkey = no_operator_pubkey();
         let conn = fresh_conn();
         add_rule(
             &conn,
@@ -1608,6 +1769,161 @@ mod tests {
             assert!(
                 json["type"].is_string() || json["kind"].is_string() || json.get("type").is_some()
             );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Refactor Wave-2 Tier-A2 (issue #850) — RuleEngine unit coverage.
+    // The three entry-point wrappers (check_agent_action,
+    // check_agent_action_no_audit, check_agent_action_deferred) all
+    // route through RuleEngine now; the tests above already exercise
+    // them at the wrapper boundary. The cases below pin the engine's
+    // direct semantics so a future regression in the wrapper layer
+    // shows up at the engine level too.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn rule_engine_from_rules_evaluate_allow_when_no_match() {
+        let engine = RuleEngine::from_rules(vec![]);
+        let decision = engine.evaluate(
+            "agent:t",
+            &AgentAction::Bash {
+                command: "ls".into(),
+                cwd: None,
+            },
+        );
+        assert_eq!(decision, Decision::Allow);
+        assert!(engine.rules().is_empty());
+    }
+
+    #[test]
+    fn rule_engine_first_refusal_wins_over_warn() {
+        let warn_rule = Rule {
+            id: "W1".into(),
+            kind: "bash".into(),
+            matcher: r#"{"command_substring":"rm"}"#.into(),
+            severity: "warn".into(),
+            reason: "warn-rm".into(),
+            namespace: "_global".into(),
+            created_by: "test".into(),
+            created_at: 0,
+            enabled: true,
+            signature: None,
+            attest_level: "unsigned".into(),
+        };
+        let refuse_rule = Rule {
+            id: "R1".into(),
+            kind: "bash".into(),
+            matcher: r#"{"command_substring":"rm -rf"}"#.into(),
+            severity: "refuse".into(),
+            reason: "refuse-rm-rf".into(),
+            namespace: "_global".into(),
+            created_by: "test".into(),
+            created_at: 0,
+            enabled: true,
+            signature: None,
+            attest_level: "unsigned".into(),
+        };
+        // Order rules so warn comes first — first-refusal-wins must
+        // still return refuse regardless of slice order.
+        let engine = RuleEngine::from_rules(vec![warn_rule, refuse_rule]);
+        let decision = engine.evaluate(
+            "agent:t",
+            &AgentAction::Bash {
+                command: "rm -rf /tmp/x".into(),
+                cwd: None,
+            },
+        );
+        match decision {
+            Decision::Refuse { rule_id, .. } => assert_eq!(rule_id, "R1"),
+            other => panic!("expected Refuse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rule_engine_warn_when_only_warn_matches() {
+        let rule = Rule {
+            id: "W1".into(),
+            kind: "bash".into(),
+            matcher: r#"{"command_substring":"rm"}"#.into(),
+            severity: "warn".into(),
+            reason: "warn-rm".into(),
+            namespace: "_global".into(),
+            created_by: "test".into(),
+            created_at: 0,
+            enabled: true,
+            signature: None,
+            attest_level: "unsigned".into(),
+        };
+        let engine = RuleEngine::from_rules(vec![rule]);
+        let decision = engine.evaluate(
+            "agent:t",
+            &AgentAction::Bash {
+                command: "rm /tmp/x".into(),
+                cwd: None,
+            },
+        );
+        match decision {
+            Decision::Warn { rule_id, reason } => {
+                assert_eq!(rule_id, "W1");
+                assert_eq!(reason, "warn-rm");
+            }
+            other => panic!("expected Warn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rule_engine_log_severity_is_silent() {
+        let rule = Rule {
+            id: "L1".into(),
+            kind: "bash".into(),
+            matcher: r#"{"command_substring":"ls"}"#.into(),
+            severity: "log".into(),
+            reason: "log-ls".into(),
+            namespace: "_global".into(),
+            created_by: "test".into(),
+            created_at: 0,
+            enabled: true,
+            signature: None,
+            attest_level: "unsigned".into(),
+        };
+        let engine = RuleEngine::from_rules(vec![rule]);
+        let decision = engine.evaluate(
+            "agent:t",
+            &AgentAction::Bash {
+                command: "ls -la".into(),
+                cwd: None,
+            },
+        );
+        // Log-only rules do not produce Warn or Refuse — engine
+        // collapses to Allow.
+        assert_eq!(decision, Decision::Allow);
+    }
+
+    #[test]
+    fn rule_engine_load_for_action_round_trips_through_sqlite() {
+        let _no_pubkey = no_operator_pubkey();
+        let conn = fresh_conn();
+        add_rule(
+            &conn,
+            "R-engine",
+            "filesystem_write",
+            r#"{"glob":"/tmp/**"}"#,
+            "refuse",
+            true,
+        );
+        let action = AgentAction::FilesystemWrite {
+            path: "/tmp/engine.txt".into(),
+            byte_estimate: None,
+        };
+        let engine = RuleEngine::load_for_action(&conn, &action).unwrap();
+        // Engine carries exactly the kind-scoped rule we inserted.
+        assert_eq!(engine.rules().len(), 1);
+        assert_eq!(engine.rules()[0].id, "R-engine");
+        let decision = engine.evaluate("agent:t", &action);
+        match decision {
+            Decision::Refuse { rule_id, .. } => assert_eq!(rule_id, "R-engine"),
+            other => panic!("expected Refuse, got {other:?}"),
         }
     }
 }

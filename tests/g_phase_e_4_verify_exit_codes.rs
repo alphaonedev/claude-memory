@@ -82,6 +82,7 @@ fn insert_mem(conn: &rusqlite::Connection, ns: &str, depth: i32, kind: MemoryKin
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(conn, &mem).expect("insert");
     id
@@ -128,21 +129,10 @@ fn insert_signed_reflects_on(
 fn set_cap(conn: &rusqlite::Connection, ns: &str, cap: u32) {
     let now = Utc::now().to_rfc3339();
     let policy = ai_memory::models::GovernancePolicy {
-        max_reflection_depth: Some(cap),
-        auto_export_reflections_to_filesystem: None,
-        auto_atomise: None,
-        auto_atomise_threshold_cl100k: None,
-        auto_atomise_max_atom_tokens: None,
-        auto_atomise_max_retries: None,
-        auto_persona_trigger_every_n_memories: None,
-        auto_export_personas_to_filesystem: None,
-        auto_atomise_mode: None,
-        legacy_per_pair_classifier: None,
-        auto_classify_kind: None,
-        synthesis_failure_mode: None,
-        synthesis_max_deletes_per_call: None,
-        synthesis_max_candidate_chars: None,
-        multistep_max_content_chars: None,
+        core: ai_memory::models::CorePolicy {
+            max_reflection_depth: Some(cap),
+            ..ai_memory::models::CorePolicy::default()
+        },
         ..ai_memory::models::GovernancePolicy::default()
     };
     let metadata = serde_json::json!({
@@ -174,6 +164,7 @@ fn set_cap(conn: &rusqlite::Connection, ns: &str, cap: u32) {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let id = db::insert(conn, &std_mem).expect("insert std");
     db::set_namespace_standard(conn, ns, &id, None).expect("set std");

@@ -188,4 +188,160 @@ mod tests {
         let body = String::from_utf8(buf_out2).unwrap();
         assert_eq!(body, "cli-test-body");
     }
+
+    // ------------------------------------------------------------------
+    // Coverage-uplift block (2026-05-19): exercise the non-JSON human-
+    // render path, the --out path, the --json variant of deref, the
+    // read_input file-error path, and the resolve_agent_id default
+    // chain.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn run_offload_human_render_emits_summary_line() {
+        let (db_path, tmp) = fresh_db_path();
+        let payload_path = tmp.path().join("human.txt");
+        std::fs::write(&payload_path, "human-render-body").unwrap();
+        let args = OffloadArgs {
+            file: payload_path.display().to_string(),
+            namespace: Some("cli/human".to_string()),
+            ttl_seconds: None,
+            agent_id: Some("ai:human-test".to_string()),
+            json: false,
+        };
+        let mut buf_out = Vec::new();
+        let mut buf_err = Vec::new();
+        {
+            let mut cli_out = CliOutput::from_std(&mut buf_out, &mut buf_err);
+            run_offload(&db_path, &args, &mut cli_out).expect("offload");
+        }
+        let text = String::from_utf8(buf_out).unwrap();
+        assert!(text.starts_with("offloaded "), "got: {text}");
+        assert!(text.contains("bytes -> "));
+        assert!(text.contains("sha256 "));
+    }
+
+    #[test]
+    fn run_deref_writes_to_out_path_and_json_envelope_suppresses_content() {
+        let (db_path, tmp) = fresh_db_path();
+        // First offload a payload to get a ref_id.
+        let payload_path = tmp.path().join("orig.txt");
+        std::fs::write(&payload_path, "deref-out-body").unwrap();
+        let off_args = OffloadArgs {
+            file: payload_path.display().to_string(),
+            namespace: Some("cli/deref-out".to_string()),
+            ttl_seconds: None,
+            agent_id: Some("ai:deref-out".to_string()),
+            json: true,
+        };
+        let mut bo = Vec::new();
+        let mut be = Vec::new();
+        {
+            let mut co = CliOutput::from_std(&mut bo, &mut be);
+            run_offload(&db_path, &off_args, &mut co).expect("offload");
+        }
+        let parsed: serde_json::Value = serde_json::from_slice(&bo).unwrap();
+        let ref_id = parsed["ref_id"].as_str().unwrap().to_string();
+
+        // Now deref with --out and --json.
+        let out_path = tmp.path().join("deref-out.bin");
+        let args = DerefArgs {
+            ref_id: ref_id.clone(),
+            out: Some(out_path.clone()),
+            json: true,
+        };
+        let mut bo2 = Vec::new();
+        let mut be2 = Vec::new();
+        {
+            let mut co = CliOutput::from_std(&mut bo2, &mut be2);
+            run_deref(&db_path, &args, &mut co).expect("deref");
+        }
+        // File written.
+        let written = std::fs::read_to_string(&out_path).unwrap();
+        assert_eq!(written, "deref-out-body");
+        // JSON envelope present; `content` is `null` (suppressed).
+        let envelope: serde_json::Value = serde_json::from_slice(&bo2).unwrap();
+        assert_eq!(envelope["ref_id"], ref_id);
+        assert!(envelope["content"].is_null());
+        assert_eq!(envelope["bytes"].as_u64().unwrap(), 0);
+    }
+
+    #[test]
+    fn run_deref_json_without_out_returns_content_inline() {
+        let (db_path, tmp) = fresh_db_path();
+        let payload_path = tmp.path().join("inline.txt");
+        std::fs::write(&payload_path, "inline-json-body").unwrap();
+        let off_args = OffloadArgs {
+            file: payload_path.display().to_string(),
+            namespace: Some("cli/inline".to_string()),
+            ttl_seconds: None,
+            agent_id: Some("ai:inline".to_string()),
+            json: true,
+        };
+        let mut bo = Vec::new();
+        let mut be = Vec::new();
+        {
+            let mut co = CliOutput::from_std(&mut bo, &mut be);
+            run_offload(&db_path, &off_args, &mut co).expect("offload");
+        }
+        let parsed: serde_json::Value = serde_json::from_slice(&bo).unwrap();
+        let ref_id = parsed["ref_id"].as_str().unwrap().to_string();
+
+        let args = DerefArgs {
+            ref_id: ref_id.clone(),
+            out: None,
+            json: true,
+        };
+        let mut bo2 = Vec::new();
+        let mut be2 = Vec::new();
+        {
+            let mut co = CliOutput::from_std(&mut bo2, &mut be2);
+            run_deref(&db_path, &args, &mut co).expect("deref");
+        }
+        let envelope: serde_json::Value = serde_json::from_slice(&bo2).unwrap();
+        assert_eq!(envelope["content"].as_str().unwrap(), "inline-json-body");
+        assert_eq!(
+            envelope["bytes"].as_u64().unwrap(),
+            "inline-json-body".len() as u64
+        );
+    }
+
+    #[test]
+    fn read_input_returns_error_for_missing_file() {
+        let err = read_input("/nonexistent/path/never-exists.txt").unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(chain.contains("read "), "got: {chain}");
+    }
+
+    #[test]
+    fn resolve_agent_id_uses_override_when_present() {
+        let v = resolve_agent_id(Some("ai:explicit-override")).unwrap();
+        assert_eq!(v, "ai:explicit-override");
+    }
+
+    #[test]
+    fn resolve_agent_id_falls_back_to_default_chain_when_none() {
+        // Default chain returns a non-empty stable id (host:... or
+        // ai:... or anonymous:...). Pin only the non-empty property
+        // so the test is hostname/env-agnostic.
+        let v = resolve_agent_id(None).unwrap();
+        assert!(!v.is_empty());
+    }
+
+    #[test]
+    fn run_offload_propagates_read_error_for_missing_file() {
+        let (db_path, _tmp) = fresh_db_path();
+        let args = OffloadArgs {
+            file: "/nonexistent/never-exists/file.txt".to_string(),
+            namespace: None,
+            ttl_seconds: None,
+            agent_id: Some("ai:test".to_string()),
+            json: true,
+        };
+        let mut bo = Vec::new();
+        let mut be = Vec::new();
+        let mut co = CliOutput::from_std(&mut bo, &mut be);
+        let err = run_offload(&db_path, &args, &mut co).expect_err("must fail");
+        let chain = format!("{err:#}");
+        assert!(chain.contains("read "));
+    }
 }

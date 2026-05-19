@@ -68,6 +68,9 @@ fn build_router_with_db() -> (axum::Router, ai_memory::handlers::Db) {
         replay_cache: std::sync::Arc::new(ai_memory::identity::replay::ReplayCache::default()),
 
         verify_require_nonce: false,
+        federation_nonce_cache: std::sync::Arc::new(
+            ai_memory::identity::replay::FederationNonceCache::default(),
+        ),
         autonomous_hooks: false,
         recall_scope: std::sync::Arc::new(None),
         deferred_audit_queue: std::sync::Arc::new(None),
@@ -111,6 +114,7 @@ async fn seed_two_memories(db: &ai_memory::handlers::Db) -> (String, String) {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let tgt = ai_memory::models::Memory {
         id: uuid::Uuid::new_v4().to_string(),
@@ -138,6 +142,7 @@ async fn seed_two_memories(db: &ai_memory::handlers::Db) -> (String, String) {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let src_id = ai_memory::db::insert(&lock.0, &src).expect("insert src");
     let tgt_id = ai_memory::db::insert(&lock.0, &tgt).expect("insert tgt");

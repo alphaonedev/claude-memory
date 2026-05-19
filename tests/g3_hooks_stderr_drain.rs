@@ -228,11 +228,14 @@ printf '%s\n' '{"action":"allow"}'
 "#,
     );
 
-    // 30s budget (was 5s) — macOS CI runners measured at 5-8s subprocess
-    // startup for a fresh `/bin/sh` exec under load. Local runs finish
-    // in ~130ms; the budget here is for CI-flake resilience, not real
-    // workload. Real-deployment hook timeouts are operator-configured.
-    let executor = ExecExecutor::new(cfg_for(script, HookMode::Exec, 30_000));
+    // 60s budget (was 30s, originally 5s) — issue #824: macOS-latest CI
+    // runners have grown slower since 0536e96 bumped 5→30s; runs in
+    // 2026-05-17 timed out at the 30s mark. Local runs finish in ~130ms.
+    // Budget is for CI-flake resilience, not real workload. Real-deployment
+    // hook timeouts are operator-configured. If this bump is also
+    // insufficient, switch to #[cfg_attr(target_os = "macos", ignore)]
+    // and file a runner-investigation follow-up.
+    let executor = ExecExecutor::new(cfg_for(script, HookMode::Exec, 60_000));
     let r = executor
         .fire(HookEvent::PostStore, json!({}))
         .await

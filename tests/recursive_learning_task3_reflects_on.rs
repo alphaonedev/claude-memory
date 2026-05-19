@@ -46,6 +46,10 @@ use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, MemoryLink, Tier};
 use chrono::Utc;
 
+mod common;
+#[cfg(feature = "sal-postgres")]
+use common::postgres_url;
+
 /// Fixture builder — returns a fully-populated `Memory` so individual
 /// tests don't repeat the 16-field literal. `reflection_depth` is
 /// surfaced so callers writing reflection-memory rows can pin the
@@ -78,6 +82,7 @@ fn make_memory(namespace: &str, title: &str, reflection_depth: i32) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 
@@ -140,6 +145,7 @@ fn memorylink_serde_roundtrip_preserves_reflects_on() {
         observed_by: None,
         valid_from: None,
         valid_until: None,
+        attest_level: None,
     };
     let wire = serde_json::to_string(&link).expect("serialize MemoryLink");
     let back: MemoryLink = serde_json::from_str(&wire).expect("deserialize MemoryLink");
@@ -242,11 +248,6 @@ fn sqlite_find_paths_walks_reflects_on_edges() {
 // ─────────────────────────────────────────────────────────────────────
 
 #[cfg(feature = "sal-postgres")]
-fn postgres_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-}
-
-#[cfg(feature = "sal-postgres")]
 #[tokio::test]
 async fn postgres_link_listlinks_roundtrips_reflects_on() {
     use ai_memory::store::CallerContext;
@@ -283,6 +284,7 @@ async fn postgres_link_listlinks_roundtrips_reflects_on() {
         observed_by: None,
         valid_from: None,
         valid_until: None,
+        attest_level: None,
     };
     store
         .link(&ctx, &link)

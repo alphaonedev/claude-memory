@@ -257,6 +257,13 @@ pub struct CallerContext {
     /// Optional request correlator for audit trails. Opaque string;
     /// adapters may persist as metadata.
     pub request_id: Option<String>,
+    /// #910 (SAL-level enforcement, 2026-05-19) — when true, the
+    /// SAL-layer scope=private visibility filter is BYPASSED for this
+    /// context. Reserved for operator-/admin-only call paths
+    /// (migrate, full export, federation catchup, GC sweeps); MUST
+    /// NOT be set by any tenant-facing handler. Default `false` — the
+    /// safe-by-default posture per the CLAUDE.md NHI contract.
+    pub bypass_visibility: bool,
 }
 
 impl CallerContext {
@@ -268,8 +275,86 @@ impl CallerContext {
             agent_id: agent_id.into(),
             as_agent: None,
             request_id: None,
+            bypass_visibility: false,
         }
     }
+
+    /// Construct an operator-/admin-only context that BYPASSES the
+    /// SAL-level scope=private visibility filter. Reserved for
+    /// migrate, full export, federation catchup, GC sweeps —
+    /// operator surfaces that must round-trip every row regardless
+    /// of `metadata.scope`. Never call this from a tenant-facing
+    /// handler.
+    #[must_use]
+    pub fn for_admin(agent_id: impl Into<String>) -> Self {
+        Self {
+            agent_id: agent_id.into(),
+            as_agent: None,
+            request_id: None,
+            bypass_visibility: true,
+        }
+    }
+
+    /// The effective principal used by SAL-layer visibility filtering.
+    /// Returns `as_agent` when set (Task 1.5 — operator-impersonates-
+    /// agent), else `agent_id`. See [`is_visible_to_caller`].
+    #[must_use]
+    pub fn effective_principal(&self) -> &str {
+        self.as_agent.as_deref().unwrap_or(&self.agent_id)
+    }
+}
+
+/// #910 (security-medium, 2026-05-19 — SAL-level enforcement) — the
+/// canonical scope=private visibility predicate. Every SAL adapter
+/// query method that returns [`Memory`] rows runs the result set
+/// through this filter so a caller authenticated as `bob` cannot
+/// enumerate `alice`'s scope=private rows by any path (list, search,
+/// recall_hybrid, get, find_paths, export, etc.). Per the operator
+/// directive (pm-v3, memory `cd8ede94`), the SAL layer is the
+/// load-bearing enforcement surface; the handler-level filters in
+/// `src/handlers/memories_query.rs` + `src/handlers/kg.rs` are
+/// kept as belt-and-suspenders defense-in-depth.
+///
+/// Visibility rule (mirrors `storage::is_visible_to_agent` + the
+/// generated `scope_idx` column's COALESCE-to-`private` default):
+/// a row is visible iff
+///   `metadata.scope != "private"` (rows w/o the field are private
+///   by the CLAUDE.md NHI contract) OR
+///   `metadata.agent_id == caller`.
+///
+/// The `caller` argument is typically [`CallerContext::effective_principal`]
+/// so the `as_agent` override (operator-impersonates-agent) flows
+/// through correctly.
+#[must_use]
+pub fn is_visible_to_caller(mem: &Memory, caller: &str) -> bool {
+    let scope = mem
+        .metadata
+        .get("scope")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("private");
+    if scope != "private" {
+        return true;
+    }
+    let owner = mem
+        .metadata
+        .get("agent_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if owner == caller {
+        return true;
+    }
+    // Inbox-row carve-out — notify writes a private-by-default memory
+    // in `_inbox/<target>` with `metadata.target_agent_id` set. The
+    // target is the legitimate reader of their own inbox; without
+    // this clause the SAL filter would drop every inbox message
+    // because the sender's agent_id stamps the row. The sender keeps
+    // visibility via the owner check above.
+    let target = mem
+        .metadata
+        .get("target_agent_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    target == caller
 }
 
 bitflags! {
@@ -333,6 +418,29 @@ pub struct Filter {
 
 /// The core trait. Every backend implements this; ai-memory's HTTP /
 /// MCP / CLI handlers depend only on `dyn MemoryStore`.
+///
+/// ## SAL-level scope=private visibility (issue #910, 2026-05-19)
+///
+/// Every query method that returns [`Memory`] rows MUST drop rows the
+/// caller cannot see per the scope=private rule. The canonical
+/// predicate is [`is_visible_to_caller`]; the resolved principal is
+/// [`CallerContext::effective_principal`]. Adapter implementations
+/// apply this filter post-fetch (correctness-equivalent to a SQL
+/// WHERE clause for limit-bounded result sets) so a caller
+/// authenticated as `bob` cannot enumerate `alice`'s scope=private
+/// rows by ANY query path — list, search, recall_hybrid, get,
+/// find_paths, list_memories_updated_since, export_memories, etc.
+///
+/// This is the load-bearing enforcement surface (per pm-v3,
+/// memory `cd8ede94`); the handler-level filters in
+/// `src/handlers/memories_query.rs` + `src/handlers/kg.rs` are
+/// kept as belt-and-suspenders defense-in-depth.
+///
+/// Future trait additions: any new query method that returns
+/// `Memory` (or memory ids that resolve to memories) MUST inherit
+/// this filter — either by accepting a `&CallerContext` and routing
+/// through `is_visible_to_caller`, or by documenting an
+/// admin-/operator-only contract that bypasses the filter.
 #[async_trait::async_trait]
 pub trait MemoryStore: Send + Sync {
     /// Capability bits advertised by this adapter. Stable across the
@@ -1092,9 +1200,18 @@ pub trait MemoryStore: Send + Sync {
     /// adapter-specific `find_paths` call but lifted to the trait
     /// surface so handlers can stay backend-blind.
     ///
+    /// #910 (SAL-level enforcement, 2026-05-19): the `ctx` argument
+    /// supplies the calling principal so adapters can drop any path
+    /// whose node set traverses a scope=private memory the caller
+    /// does not own. The fail-closed posture matches the canonical
+    /// [`is_visible_to_caller`] contract — if the predicate cannot
+    /// resolve a node, that path is dropped (defense in depth against
+    /// race conditions between traversal and fetch).
+    ///
     /// Default returns `UnsupportedCapability`.
     async fn find_paths(
         &self,
+        _ctx: &CallerContext,
         _source_id: &str,
         _target_id: &str,
         _max_depth: Option<usize>,
@@ -1172,6 +1289,14 @@ pub struct UpdatePatch {
     pub priority: Option<i32>,
     pub confidence: Option<f64>,
     pub metadata: Option<serde_json::Value>,
+    /// v0.7.0 Provenance Gap 2 (#906) — opt-in source_uri patch.
+    /// `None` leaves the stored value untouched (COALESCE semantics
+    /// on the SQL layer). `Some("scheme:payload")` rewrites the row's
+    /// `source_uri` verbatim (rename / scheme migration / bad-data
+    /// correction). Validated via `crate::validate::validate_source_uri`
+    /// before reaching the storage layer; the storage layer trusts the
+    /// patch as already-validated.
+    pub source_uri: Option<String>,
 }
 
 /// Report produced by `verify`.
@@ -1383,6 +1508,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 
@@ -1509,6 +1635,7 @@ mod tests {
             valid_until: None,
             observed_by: None,
             signature: None,
+            attest_level: None,
         };
         let level = s
             .link_signed(&ctx, &link, None)
@@ -1548,6 +1675,7 @@ mod tests {
             valid_until: None,
             observed_by: None,
             signature: None,
+            attest_level: None,
         };
         // Default forwards to link(); MinimalStore::link returns Ok.
         s.apply_remote_link(&ctx, &link, "unsigned")
@@ -1777,8 +1905,9 @@ mod tests {
             s.verify_link(VerifyFilter::default()).await.unwrap_err(),
             StoreError::UnsupportedCapability { .. }
         ));
+        let ctx = CallerContext::for_agent("alice");
         assert!(matches!(
-            s.find_paths("a", "b", None, None).await.unwrap_err(),
+            s.find_paths(&ctx, "a", "b", None, None).await.unwrap_err(),
             StoreError::UnsupportedCapability { .. }
         ));
     }

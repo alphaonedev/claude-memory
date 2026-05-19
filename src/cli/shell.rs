@@ -39,6 +39,11 @@ pub fn handle_command(parts: &[&str], conn: &Connection, out: &mut CliOutput<'_>
             let _ = writeln!(out.stdout, "  search <query>      — keyword search");
             let _ = writeln!(out.stdout, "  list [namespace]    — list memories");
             let _ = writeln!(out.stdout, "  get <id>            — show memory details");
+            let _ = writeln!(out.stdout, "  update <id> <field>=<value> [field=value]…");
+            let _ = writeln!(
+                out.stdout,
+                "                       — mutate one or more fields (issue #653: full-profile parity)"
+            );
             let _ = writeln!(out.stdout, "  stats               — show statistics");
             let _ = writeln!(out.stdout, "  namespaces          — list namespaces");
             let _ = writeln!(out.stdout, "  delete <id>         — delete a memory");
@@ -153,6 +158,174 @@ pub fn handle_command(parts: &[&str], conn: &Connection, out: &mut CliOutput<'_>
                 }
                 Ok(None) => {
                     let _ = writeln!(out.stderr, "not found");
+                }
+                Err(e) => {
+                    let _ = writeln!(out.stderr, "error: {e}");
+                }
+            }
+        }
+        "update" | "u" => {
+            // Issue #653 — REPL parity with the `--profile full` MCP
+            // `memory_update` surface. Parses `update <id> field=value
+            // [field=value]…` where field ∈ {title, content, tier,
+            // namespace, tags, priority, confidence, expires_at}.
+            // Honors the same validators the CLI `update` subcommand
+            // uses (`crate::validate::*`). Empty `expires_at=` clears
+            // the expiry; comma-separated `tags=` splits + trims.
+            if parts.len() < 3 {
+                let _ = writeln!(
+                    out.stderr,
+                    "usage: update <id> field=value [field=value]…  (fields: title, content, tier, namespace, tags, priority, confidence, expires_at)"
+                );
+                return ShellAction::Continue;
+            }
+            let raw_id = parts[1];
+            if let Err(e) = validate::validate_id(raw_id) {
+                let _ = writeln!(out.stderr, "invalid id: {e}");
+                return ShellAction::Continue;
+            }
+            let resolved_id = match db::get(conn, raw_id) {
+                Ok(Some(_)) => raw_id.to_string(),
+                Ok(None) => match db::get_by_prefix(conn, raw_id) {
+                    Ok(Some(mem)) => mem.id,
+                    Ok(None) => {
+                        let _ = writeln!(out.stderr, "not found: {raw_id}");
+                        return ShellAction::Continue;
+                    }
+                    Err(e) => {
+                        let _ = writeln!(out.stderr, "error: {e}");
+                        return ShellAction::Continue;
+                    }
+                },
+                Err(e) => {
+                    let _ = writeln!(out.stderr, "error: {e}");
+                    return ShellAction::Continue;
+                }
+            };
+            let mut title: Option<String> = None;
+            let mut content: Option<String> = None;
+            let mut tier: Option<models::Tier> = None;
+            let mut namespace: Option<String> = None;
+            let mut tags: Option<Vec<String>> = None;
+            let mut priority: Option<i32> = None;
+            let mut confidence: Option<f64> = None;
+            let mut expires_at: Option<String> = None;
+            let mut parse_err: Option<String> = None;
+            for kv in &parts[2..] {
+                let Some((k, v)) = kv.split_once('=') else {
+                    parse_err = Some(format!(
+                        "expected key=value, got '{kv}' (e.g. namespace=work)"
+                    ));
+                    break;
+                };
+                match k {
+                    "title" => title = Some(v.to_string()),
+                    "content" => content = Some(v.to_string()),
+                    "tier" => match models::Tier::from_str(v) {
+                        Some(t) => tier = Some(t),
+                        None => {
+                            parse_err =
+                                Some(format!("invalid tier '{v}' (expected short/mid/long)"));
+                            break;
+                        }
+                    },
+                    "namespace" | "ns" => namespace = Some(v.to_string()),
+                    "tags" => {
+                        tags = Some(
+                            v.split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect(),
+                        );
+                    }
+                    "priority" => match v.parse::<i32>() {
+                        Ok(p) => priority = Some(p),
+                        Err(_) => {
+                            parse_err = Some(format!("invalid priority '{v}' (i32 expected)"));
+                            break;
+                        }
+                    },
+                    "confidence" => match v.parse::<f64>() {
+                        Ok(c) => confidence = Some(c),
+                        Err(_) => {
+                            parse_err = Some(format!("invalid confidence '{v}' (0.0..=1.0)"));
+                            break;
+                        }
+                    },
+                    "expires_at" => expires_at = Some(v.to_string()),
+                    unknown => {
+                        parse_err = Some(format!(
+                            "unknown field '{unknown}' (one of: title, content, tier, namespace, tags, priority, confidence, expires_at)"
+                        ));
+                        break;
+                    }
+                }
+            }
+            if let Some(e) = parse_err {
+                let _ = writeln!(out.stderr, "{e}");
+                return ShellAction::Continue;
+            }
+            if let Some(ref t) = title
+                && let Err(e) = validate::validate_title(t)
+            {
+                let _ = writeln!(out.stderr, "invalid title: {e}");
+                return ShellAction::Continue;
+            }
+            if let Some(ref c) = content
+                && let Err(e) = validate::validate_content(c)
+            {
+                let _ = writeln!(out.stderr, "invalid content: {e}");
+                return ShellAction::Continue;
+            }
+            if let Some(ref ns) = namespace
+                && let Err(e) = validate::validate_namespace(ns)
+            {
+                let _ = writeln!(out.stderr, "invalid namespace: {e}");
+                return ShellAction::Continue;
+            }
+            if let Some(ref tg) = tags
+                && let Err(e) = validate::validate_tags(tg)
+            {
+                let _ = writeln!(out.stderr, "invalid tags: {e}");
+                return ShellAction::Continue;
+            }
+            if let Some(p) = priority
+                && let Err(e) = validate::validate_priority(p)
+            {
+                let _ = writeln!(out.stderr, "invalid priority: {e}");
+                return ShellAction::Continue;
+            }
+            if let Some(c) = confidence
+                && let Err(e) = validate::validate_confidence(c)
+            {
+                let _ = writeln!(out.stderr, "invalid confidence: {e}");
+                return ShellAction::Continue;
+            }
+            if let Some(ref ts) = expires_at
+                && !ts.is_empty()
+                && let Err(e) = validate::validate_expires_at_format(ts)
+            {
+                let _ = writeln!(out.stderr, "invalid expires_at: {e}");
+                return ShellAction::Continue;
+            }
+            match db::update(
+                conn,
+                &resolved_id,
+                title.as_deref(),
+                content.as_deref(),
+                tier.as_ref(),
+                namespace.as_deref(),
+                tags.as_ref(),
+                priority,
+                confidence,
+                expires_at.as_deref(),
+                None,
+            ) {
+                Ok((true, _)) => {
+                    let _ = writeln!(out.stdout, "  updated: {}", color::cyan(&resolved_id));
+                }
+                Ok((false, _)) => {
+                    let _ = writeln!(out.stderr, "  not found");
                 }
                 Err(e) => {
                     let _ = writeln!(out.stderr, "error: {e}");
@@ -771,5 +944,179 @@ mod tests {
         let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
         handle_command(&["rm", &id2], &conn2, &mut out);
         assert!(String::from_utf8(stdout).unwrap().contains("deleted"));
+    }
+
+    // ----------------------------------------------------------------
+    // Issue #653 — REPL `update` parity with `--profile full`
+    // `memory_update`. The CLI subcommand always existed; the REPL
+    // didn't, forcing operators into raw MCP JSON-RPC. These tests
+    // pin the parsing surface + the dispatch path against db::update.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn shell_update_changes_namespace() {
+        // Headline use case from the issue: "switch a memory's
+        // namespace … via the REPL or the CLI".
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let id = lookup_seeded_id(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let action = handle_command(&["update", &id, "namespace=migrated"], &conn, &mut out);
+        assert_eq!(action, ShellAction::Continue);
+        let stdout_str = String::from_utf8(stdout).unwrap();
+        assert!(stdout_str.contains("updated:"), "stdout: {stdout_str}");
+        let mem = db::get(&conn, &id).unwrap().unwrap();
+        assert_eq!(mem.namespace, "migrated");
+    }
+
+    #[test]
+    fn shell_update_multiple_fields_one_call() {
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let id = lookup_seeded_id(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let action = handle_command(
+            &[
+                "update",
+                &id,
+                "title=renamed",
+                "priority=9",
+                "confidence=0.9",
+            ],
+            &conn,
+            &mut out,
+        );
+        assert_eq!(action, ShellAction::Continue);
+        let stdout_str = String::from_utf8(stdout).unwrap();
+        assert!(stdout_str.contains("updated:"), "stdout: {stdout_str}");
+        let mem = db::get(&conn, &id).unwrap().unwrap();
+        assert_eq!(mem.title, "renamed");
+        assert_eq!(mem.priority, 9);
+        assert!((mem.confidence - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn shell_update_short_alias_u_works() {
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let id = lookup_seeded_id(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        handle_command(&["u", &id, "namespace=via-alias"], &conn, &mut out);
+        let mem = db::get(&conn, &id).unwrap().unwrap();
+        assert_eq!(mem.namespace, "via-alias");
+    }
+
+    #[test]
+    fn shell_update_missing_args_writes_usage() {
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        handle_command(&["update"], &conn, &mut out);
+        let stderr_str = String::from_utf8(stderr).unwrap();
+        assert!(stderr_str.contains("usage: update"));
+    }
+
+    #[test]
+    fn shell_update_missing_kv_writes_usage() {
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let id = lookup_seeded_id(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        handle_command(&["update", &id], &conn, &mut out);
+        let stderr_str = String::from_utf8(stderr).unwrap();
+        assert!(stderr_str.contains("usage: update"));
+    }
+
+    #[test]
+    fn shell_update_unknown_field_errors() {
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let id = lookup_seeded_id(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        handle_command(&["update", &id, "frobnitz=value"], &conn, &mut out);
+        let stderr_str = String::from_utf8(stderr).unwrap();
+        assert!(stderr_str.contains("unknown field"), "stderr: {stderr_str}");
+    }
+
+    #[test]
+    fn shell_update_malformed_kv_errors() {
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let id = lookup_seeded_id(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        handle_command(&["update", &id, "no-equals-sign"], &conn, &mut out);
+        let stderr_str = String::from_utf8(stderr).unwrap();
+        assert!(
+            stderr_str.contains("expected key=value"),
+            "stderr: {stderr_str}"
+        );
+    }
+
+    #[test]
+    fn shell_update_invalid_tier_errors() {
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let id = lookup_seeded_id(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        handle_command(&["update", &id, "tier=archived"], &conn, &mut out);
+        let stderr_str = String::from_utf8(stderr).unwrap();
+        assert!(stderr_str.contains("invalid tier"), "stderr: {stderr_str}");
+    }
+
+    #[test]
+    fn shell_update_invalid_id_errors() {
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        handle_command(&["update", "bad\x07id", "namespace=foo"], &conn, &mut out);
+        let stderr_str = String::from_utf8(stderr).unwrap();
+        assert!(stderr_str.contains("invalid id"), "stderr: {stderr_str}");
+    }
+
+    #[test]
+    fn shell_update_nonexistent_id_writes_not_found() {
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        // Plausible UUID format that won't resolve.
+        let fake = "deadbeef-dead-beef-dead-beefdeadbeef";
+        handle_command(&["update", fake, "namespace=foo"], &conn, &mut out);
+        let stderr_str = String::from_utf8(stderr).unwrap();
+        assert!(stderr_str.contains("not found"), "stderr: {stderr_str}");
+    }
+
+    #[test]
+    fn shell_help_lists_update_command() {
+        // Pin the help text for issue #653 so future help-text edits
+        // don't silently drop the update entry.
+        let env = TestEnv::fresh();
+        let conn = fresh_conn(&env);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        handle_command(&["help"], &conn, &mut out);
+        let stdout_str = String::from_utf8(stdout).unwrap();
+        assert!(stdout_str.contains("update <id>"), "help: {stdout_str}");
+        assert!(stdout_str.contains("#653"), "help: {stdout_str}");
     }
 }

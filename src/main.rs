@@ -63,8 +63,39 @@ async fn main() -> Result<()> {
         eprintln!("ai-memory: audit init failed (continuing without): {e}");
     }
 
+    // v0.7.0 #697 — bootstrap the Ed25519-signed forensic governance
+    // log alongside the flat audit chain. Same resolved directory as
+    // the flat audit log; daily-rotated `forensic-<YYYY-MM-DD>.jsonl`
+    // files chained + signed by the daemon's Ed25519 key (when one is
+    // enrolled). The sink is process-wide; failures here are logged
+    // and swallowed so a missing key never blocks daemon startup.
+    init_forensic_audit(&app_config);
+
     let cli = Cli::parse();
     daemon_runtime::run(cli, &app_config).await
+}
+
+/// v0.7.0 #697 — best-effort init for the forensic governance log.
+/// Resolves the directory parallel to the flat audit log, loads the
+/// daemon's signing key (when present), and brings up the sink. A
+/// missing key results in unsigned rows — never a fatal error.
+fn init_forensic_audit(app_config: &config::AppConfig) {
+    let audit_cfg = app_config.effective_audit();
+    // Reuse the flat audit log path resolver — same directory pattern.
+    let log_path = ai_memory::audit::resolve_audit_path(&audit_cfg);
+    let Some(dir) = log_path.parent() else {
+        eprintln!("ai-memory: forensic init skipped (could not resolve audit dir)");
+        return;
+    };
+    // Resolve the daemon's agent_id with the standard precedence
+    // chain and try to load its keypair. Unsigned rows are accepted.
+    let agent_id = ai_memory::identity::resolve_agent_id(None, None)
+        .unwrap_or_else(|_| "ai-memory".to_string());
+    let signing_key =
+        ai_memory::governance::audit::load_daemon_signing_key(&agent_id).unwrap_or(None);
+    if let Err(e) = ai_memory::governance::audit::init(dir, signing_key) {
+        eprintln!("ai-memory: forensic audit init failed (continuing unsigned): {e}");
+    }
 }
 
 #[cfg(test)]

@@ -80,11 +80,17 @@ pub(super) fn handle_persona(conn: &rusqlite::Connection, params: &Value) -> Res
 /// * `no reflections found for entity ...` — refuses to mint a persona
 ///   without source reflections (audit-trail invariant).
 /// * `curator synthesis failed: ...` — LLM returned an error.
-pub(super) fn handle_persona_generate(
+// Issue #809 — promoted from pub(super) to pub so the
+// model-agnostic NHI-self-persona regression test
+// (tests/issue_809_nhi_self_persona_any_agent.rs) can drive this
+// handler directly without spawning the full MCP-stdio JSON-RPC
+// envelope.
+pub fn handle_persona_generate(
     conn: &rusqlite::Connection,
     params: &Value,
     llm: Option<&dyn AutonomyLlm>,
     tier: FeatureTier,
+    active_keypair: Option<&crate::identity::keypair::AgentKeypair>,
 ) -> Result<Value, String> {
     // Tier gate — refuse below smart so we never blow the budget by
     // accidentally firing curator synthesis on a keyword-only daemon.
@@ -103,16 +109,58 @@ pub(super) fn handle_persona_generate(
     if entity_id.is_empty() {
         return Err("entity_id cannot be empty".to_string());
     }
-    let namespace = params["namespace"].as_str().unwrap_or("global");
+    // v0.7.0 issue #848 — namespace handling.
+    //
+    // Pre-#848 contract: `namespace` omitted → silently defaulted to
+    // `"global"`. That was the surprise that bit the pm-v29 NHI
+    // session (an agent with reflections in `global/policies` AND
+    // `ai-memory/v0.7.0-nhi-testing` got "no reflections found for
+    // ... namespace 'global'" because neither stash lived in bare
+    // `global`).
+    //
+    // New contract:
+    // - `namespace` present and a non-empty string → single-namespace
+    //   scope (back-compat for callers that opt in explicitly).
+    // - `namespace` missing OR JSON null OR explicit empty string →
+    //   cross-namespace scope. The substrate aggregates reflections
+    //   across every namespace the entity has touched, and the new
+    //   persona row lands in `"global"` so subsequent
+    //   `memory_persona(entity_id)` calls have a deterministic find.
+    let scoped_single: Option<&str> = match params.get("namespace") {
+        None => None,
+        Some(v) if v.is_null() => None,
+        Some(v) => match v.as_str() {
+            Some(s) if s.is_empty() => None,
+            Some(s) => Some(s),
+            None => {
+                return Err("namespace must be a string or null".to_string());
+            }
+        },
+    };
 
-    let generator = PersonaGenerator::new(conn, llm, None, PersonaConfig::default());
-    let persona = generator
-        .generate(entity_id, namespace)
-        .map_err(persona_error_to_string)?;
+    // v0.7.0 issue #811 / #813 — forward `active_keypair` through
+    // `PersonaGenerator::new` so the link path AND the persona-body
+    // signing path see the same identity.
+    let generator = PersonaGenerator::new(conn, llm, active_keypair, PersonaConfig::default());
+    let (persona, scope_label) = match scoped_single {
+        Some(ns) => (
+            generator
+                .generate(entity_id, ns)
+                .map_err(persona_error_to_string)?,
+            "single".to_string(),
+        ),
+        None => (
+            generator
+                .generate_cross_namespace(entity_id, "global")
+                .map_err(persona_error_to_string)?,
+            "cross_namespace".to_string(),
+        ),
+    };
 
     Ok(json!({
         "persona": persona,
         "regenerated": true,
+        "namespace_scope": scope_label,
     }))
 }
 
@@ -189,6 +237,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(conn, &mem).unwrap()
     }
@@ -220,6 +269,7 @@ mod tests {
             &json!({"entity_id": "alice"}),
             Some(&llm),
             FeatureTier::Keyword,
+            None,
         )
         .unwrap_err();
         assert!(err.contains("requires smart tier"));
@@ -240,9 +290,14 @@ mod tests {
             &json!({"entity_id": "alice", "namespace": "team/alpha"}),
             Some(&llm),
             FeatureTier::Smart,
+            None,
         )
         .unwrap();
         assert_eq!(gen_res["regenerated"], true);
+        assert_eq!(
+            gen_res["namespace_scope"], "single",
+            "explicit namespace must report single-namespace scope per #848"
+        );
         let p = &gen_res["persona"];
         assert_eq!(p["entity_id"], "alice");
         assert_eq!(p["version"], 1);
@@ -254,5 +309,116 @@ mod tests {
         .unwrap();
         assert_eq!(got["persona"]["entity_id"], "alice");
         assert_eq!(got["persona"]["version"], 1);
+    }
+
+    /// v0.7.0 issue #848 — cross-namespace aggregation regression.
+    ///
+    /// Reproduces the pm-v29 NHI session failure: an entity has
+    /// reflections in `global/policies` AND
+    /// `ai-memory/v0.7.0-nhi-testing` but none in bare `global`.
+    /// Pre-#848 the MCP handler silently defaulted `namespace` to
+    /// `"global"` and returned "no reflections found ... namespace
+    /// 'global'". The fix: omitting `namespace` triggers cross-
+    /// namespace aggregation; persona lands in `"global"` with both
+    /// source reflections as `derives_from` parents.
+    #[test]
+    fn issue_848_handle_persona_generate_omitted_namespace_aggregates_cross_namespace() {
+        let (conn, _dir) = fresh_db();
+        let id_a = seed_reflection(
+            &conn,
+            "global/policies",
+            "discipline reflection",
+            "alice keeps the tree clean across rounds",
+        );
+        let id_b = seed_reflection(
+            &conn,
+            "ai-memory/v0.7.0-nhi-testing",
+            "campaign reflection",
+            "alice closed the L1-6 governance gap end-to-end",
+        );
+        let llm = StubLlm;
+
+        let gen_res = handle_persona_generate(
+            &conn,
+            &json!({"entity_id": "alice"}),
+            Some(&llm),
+            FeatureTier::Smart,
+            None,
+        )
+        .expect("cross-namespace generate must succeed when sources exist in any namespace");
+
+        assert_eq!(gen_res["regenerated"], true);
+        assert_eq!(
+            gen_res["namespace_scope"], "cross_namespace",
+            "namespace omitted → handler must report cross_namespace scope"
+        );
+
+        let p = &gen_res["persona"];
+        assert_eq!(p["entity_id"], "alice");
+        assert_eq!(
+            p["namespace"], "global",
+            "cross-namespace persona must land in 'global' per #848 default"
+        );
+
+        let sources = p["sources"]
+            .as_array()
+            .expect("sources must serialise as an array");
+        let source_set: std::collections::HashSet<String> = sources
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        assert!(
+            source_set.contains(&id_a),
+            "cross-namespace aggregation must include global/policies reflection {id_a}; got {sources:?}"
+        );
+        assert!(
+            source_set.contains(&id_b),
+            "cross-namespace aggregation must include ai-memory reflection {id_b}; got {sources:?}"
+        );
+    }
+
+    /// v0.7.0 issue #848 — explicit JSON null on `namespace` must
+    /// also route to the cross-namespace path.
+    #[test]
+    fn issue_848_handle_persona_generate_null_namespace_routes_to_cross_namespace() {
+        let (conn, _dir) = fresh_db();
+        seed_reflection(
+            &conn,
+            "scoped/ns",
+            "single source",
+            "alice closes loops with audit-honest discipline",
+        );
+        let llm = StubLlm;
+
+        let gen_res = handle_persona_generate(
+            &conn,
+            &json!({"entity_id": "alice", "namespace": null}),
+            Some(&llm),
+            FeatureTier::Smart,
+            None,
+        )
+        .expect("null namespace must aggregate cross-namespace");
+        assert_eq!(gen_res["namespace_scope"], "cross_namespace");
+        assert_eq!(gen_res["persona"]["namespace"], "global");
+    }
+
+    /// v0.7.0 issue #848 — cross-namespace path with zero matching
+    /// reflections surfaces the broadened sentinel error message.
+    #[test]
+    fn issue_848_cross_namespace_with_no_reflections_reports_any_namespace_sentinel() {
+        let (conn, _dir) = fresh_db();
+        let llm = StubLlm;
+        let err = handle_persona_generate(
+            &conn,
+            &json!({"entity_id": "alice"}),
+            Some(&llm),
+            FeatureTier::Smart,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("<any namespace>"),
+            "#848 — empty cross-namespace scan must reference the cross-namespace sentinel; got: {err}"
+        );
     }
 }

@@ -7,5 +7,8 @@
 //! the `mod` declarations pull in the per-aspect acceptance tests
 //! under `tests/atomisation/`.
 
+#[path = "common/mod.rs"]
+mod common;
+
 #[path = "atomisation/core.rs"]
 mod core;

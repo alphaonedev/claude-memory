@@ -147,7 +147,7 @@ pub async fn run(
 
     if args.once {
         let conn = db::open(db_path)?;
-        let report = curator::run_once(&conn, llm.as_ref(), &cfg)?;
+        let report = curator::run_once(&conn, llm.as_ref(), &cfg, None)?;
         if args.json {
             writeln!(out.stdout, "{}", serde_json::to_string_pretty(&report)?)?;
         } else {
@@ -637,6 +637,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&conn, &mem).expect("db::insert")
     }
@@ -685,6 +686,7 @@ mod tests {
                 confidence_source: crate::models::ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             db::insert(&conn, &mem).unwrap()
         };
@@ -760,6 +762,7 @@ mod tests {
                 confidence_source: crate::models::ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             let m2 = crate::models::Memory {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -787,6 +790,7 @@ mod tests {
                 confidence_source: crate::models::ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             t1 = db::insert(&conn, &m1).unwrap();
             t2 = db::insert(&conn, &m2).unwrap();
@@ -860,6 +864,7 @@ mod tests {
                 confidence_source: crate::models::ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             target = db::insert(&conn, &mem).unwrap();
         }
@@ -903,6 +908,7 @@ mod tests {
                 confidence_source: crate::models::ConfidenceSource::CallerProvided,
                 confidence_signals: None,
                 confidence_decayed_at: None,
+                version: 1,
             };
             entry_id = db::insert(&conn, &mem).unwrap();
         }

@@ -1,7 +1,7 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
-#![recursion_limit = "256"]
+#![recursion_limit = "512"]
 // The library target was added by the proptest infra (Agent G) to expose
 // production modules to the integration test crate. The bin target's
 // clippy run already gates CI — re-running pedantic against the same
@@ -51,6 +51,11 @@ pub mod storage;
 #[allow(dead_code)]
 pub use storage as db;
 pub mod embeddings;
+// v0.7.0 (issue #228) — E2E memory content encryption at rest.
+// Per-agent X25519 keypair + ChaCha20-Poly1305 AEAD. Gated behind
+// `[encryption].at_rest = true` in config OR
+// `AI_MEMORY_ENCRYPT_AT_REST=1`. See `src/encryption/mod.rs`.
+pub mod encryption;
 pub mod errors;
 pub mod federation;
 // v0.7.0 L2-5 (issue #670) — forensic evidence bundle assembly +
@@ -72,6 +77,12 @@ pub mod hooks;
 pub mod identity;
 // v0.7.0 L1-2 — knowledge-graph substrate helpers (anti-cycle check).
 pub mod kg;
+// v0.7.0 (issue #651) — pluggable inference backend trait pulled
+// forward from v0.8 RFC per operator directive
+// `28860423-d12c-4959-bc8b-8fa9a94a33d9`. Unifies the
+// `embeddings::Embed` + `llm::OllamaClient` surface behind one trait
+// so a future GPU/MTP backend (v0.8 Phase 1) drops in transparently.
+pub mod inference;
 pub mod llm;
 pub mod log_paths;
 pub mod logging;
@@ -90,6 +101,11 @@ pub mod multistep_ingest;
 // edge lands: walks `reflects_on` edges from dependents and writes
 // notification memories into `<namespace>/_invalidations`.
 pub mod notification;
+// v0.7.0 Gap 3 (#886) — recall-consumption observation tier. Writes
+// one row per returned candidate at recall time and flips the
+// `consumed` flag when a subsequent store/link request cites the
+// candidate. Backed by the `recall_observations` table (schema v47).
+pub mod observations;
 // v0.7.0 QW-3 — context-offload substrate primitive. Offload+deref
 // store with Ed25519-signed audit events; v0.8.0 short-term-context-
 // compression (Mermaid canvas + auto-cadence + node_id integration)

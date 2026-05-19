@@ -37,14 +37,8 @@ use ai_memory::store::postgres::PostgresStore;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, RwLock};
 
-fn postgres_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-}
-
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    listener.local_addr().expect("local_addr").port()
-}
+mod common;
+use common::{free_port, postgres_url};
 
 async fn build_postgres_app_state(url: &str) -> AppState {
     let conn = ai_memory::db::open(std::path::Path::new(":memory:")).expect("scratch sqlite");
@@ -74,6 +68,9 @@ async fn build_postgres_app_state(url: &str) -> AppState {
         replay_cache: std::sync::Arc::new(ai_memory::identity::replay::ReplayCache::default()),
 
         verify_require_nonce: false,
+        federation_nonce_cache: std::sync::Arc::new(
+            ai_memory::identity::replay::FederationNonceCache::default(),
+        ),
         autonomous_hooks: false,
         recall_scope: Arc::new(None),
         deferred_audit_queue: Arc::new(None),
@@ -134,7 +131,7 @@ async fn store_memory(
         "tags": [],
         "priority": 5,
         "confidence": 1.0,
-        "source": "continuation3-test",
+        "source": "import",
     });
     let resp = client
         .post(format!("{base}/api/v1/memories"))
@@ -222,7 +219,7 @@ async fn consolidate_preserves_provenance_via_sal() {
             "tags": [],
             "priority": 5,
             "confidence": 1.0,
-            "source": "test",
+            "source": "import",
             "agent_id": format!("author-{i}"),
         });
         let v: Value = client
@@ -262,7 +259,11 @@ async fn consolidate_preserves_provenance_via_sal() {
         .json()
         .await
         .expect("body");
-    let metadata = &got["metadata"];
+    // GET /api/v1/memories/{id} envelope is `{"links": [...], "memory":
+    // {"metadata": {...}, ...}}` — metadata is nested under `memory`, not
+    // at the top level. Original test had `got["metadata"]` which always
+    // resolves to Null.
+    let metadata = &got["memory"]["metadata"];
     assert_eq!(metadata["agent_id"], "consolidator-bob");
     assert!(
         metadata["consolidated_from_agents"].is_array(),
@@ -296,7 +297,7 @@ async fn detect_contradictions_synthesizes_pair_via_sal() {
             "tags": [],
             "priority": 5,
             "confidence": 1.0,
-            "source": "test",
+            "source": "import",
             "metadata": {"topic": "the-answer"},
         });
         client
@@ -435,7 +436,7 @@ async fn import_lands_memories_via_sal() {
                 "tags": [],
                 "priority": 5,
                 "confidence": 1.0,
-                "source": "test",
+                "source": "import",
                 "access_count": 0,
                 "created_at": now,
                 "updated_at": now,
@@ -528,24 +529,85 @@ async fn approve_unknown_pending_id_rejected_via_sal() {
         eprintln!("skipping approve_unknown_pending_id_rejected_via_sal");
         return;
     };
+    // S5-C1 (2026-05-13): /pending/approve is HMAC-gated. Set the
+    // process-wide secret + attach a valid signature so the test
+    // reaches the trait's governance_approve_with_consensus path.
+    let secret = "continuation3-approve-secret";
+    ai_memory::config::set_active_hooks_hmac_secret(Some(secret.to_string()));
     let (base, shutdown, handle) = spawn_daemon(&url).await;
     let client = reqwest::Client::new();
     let bogus = uuid::Uuid::new_v4().to_string();
+    let body = String::new();
+    let timestamp = chrono::Utc::now().timestamp().to_string();
+    let sig = sign_approval(secret, &timestamp, &bogus, &body);
     let resp = client
         .post(format!("{base}/api/v1/pending/{bogus}/approve"))
         .header("x-agent-id", "approver-alice")
+        .header("x-ai-memory-timestamp", &timestamp)
+        .header("x-ai-memory-signature", sig)
+        .body(body)
         .send()
         .await
         .expect("approve");
-    // The full state machine returns 403 (Rejected) for not-found
-    // pendings — the postgres branch surfaces it as a structured
-    // `approve rejected: pending action not found` envelope.
+    // Post-#857 product fix the postgres branch surfaces missing
+    // pending as StoreError::NotFound (404). Pre-fix it returned
+    // ApproveOutcome::Rejected (403). Test tolerates either.
     assert!(
         resp.status() == reqwest::StatusCode::FORBIDDEN
             || resp.status() == reqwest::StatusCode::NOT_FOUND
     );
+    ai_memory::config::set_active_hooks_hmac_secret(None);
     shutdown.notify_one();
     let _ = handle.await;
+}
+
+/// Compute the K7-style HMAC signature header value. Mirrors the
+/// helper in `serve_postgres_continuation2.rs`.
+fn sign_approval(secret: &str, timestamp: &str, pending_id: &str, body: &str) -> String {
+    use sha2::{Digest, Sha256};
+    fn sha256_hex(s: &str) -> String {
+        let mut h = Sha256::new();
+        h.update(s.as_bytes());
+        format!("{:x}", h.finalize())
+    }
+    fn hex_decode(s: &str) -> Option<Vec<u8>> {
+        if !s.len().is_multiple_of(2) {
+            return None;
+        }
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+            .collect()
+    }
+    fn hmac_sha256_hex(key_hex: &str, body: &str) -> String {
+        const BLOCK: usize = 64;
+        let key_bytes = hex_decode(key_hex).unwrap_or_else(|| key_hex.as_bytes().to_vec());
+        let mut key = key_bytes;
+        if key.len() > BLOCK {
+            let mut h = Sha256::new();
+            h.update(&key);
+            key = h.finalize().to_vec();
+        }
+        key.resize(BLOCK, 0);
+        let mut opad = [0x5cu8; BLOCK];
+        let mut ipad = [0x36u8; BLOCK];
+        for i in 0..BLOCK {
+            opad[i] ^= key[i];
+            ipad[i] ^= key[i];
+        }
+        let mut inner = Sha256::new();
+        inner.update(ipad);
+        inner.update(body.as_bytes());
+        let inner_digest = inner.finalize();
+        let mut outer = Sha256::new();
+        outer.update(opad);
+        outer.update(inner_digest);
+        format!("{:x}", outer.finalize())
+    }
+    let key_hash = sha256_hex(secret);
+    let canonical = format!("{timestamp}.POST.{pending_id}.{body}");
+    let sig = hmac_sha256_hex(&key_hash, &canonical);
+    format!("sha256={sig}")
 }
 
 /// Inheritance-chain walk on writes: a namespace with no policy lets
@@ -567,7 +629,7 @@ async fn inheritance_walk_no_policy_allows_via_sal() {
         "tags": [],
         "priority": 5,
         "confidence": 1.0,
-        "source": "test",
+        "source": "import",
     });
     let resp = client
         .post(format!("{base}/api/v1/memories"))

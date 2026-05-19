@@ -1,0 +1,158 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+  Brass-tacks essay 3 of 3 — "why ai-memory beats vector-DB-only" — issue #832.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Why ai-memory beats vector-DB-only &mdash; with measured numbers</title>
+<meta name="description" content="Typed memory_kind taxonomy, KG with temporal validity, Ed25519-signed links, operator-signed substrate rules L1-L6, HMAC-required subscriptions, NHI agent_id semantics, autonomous tier &mdash; what a vector DB cannot give you alone.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/essays/brass-tacks-3-why.html">
+<style>
+:root{--bg:#0a0a0a;--panel:#121212;--border:#262626;--border-hi:#3a3a3a;--text:#f5f5f5;--muted:#9a9a9a;--dim:#6b6b6b;--accent:#6ee7ff;--good:#7cd992;--warn:#ffb86b;--code-bg:#161616;--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;--font-serif:Georgia,"Iowan Old Style","Apple Garamond",Cambria,Times,serif;--font-mono:"SF Mono","JetBrains Mono","Cascadia Code",Consolas,monospace;--w-read:680px;--w-wide:1080px}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:var(--font-sans);line-height:1.7;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+code,pre{font-family:var(--font-mono);font-size:.85rem}
+code{background:var(--code-bg);padding:.1em .35em;border-radius:3px;color:#d4d4d4}
+pre{background:var(--code-bg);border:1px solid var(--border);border-radius:6px;padding:.85rem 1.15rem;overflow-x:auto;line-height:1.55;margin:1.25rem 0}
+pre code{background:none;padding:0;color:#d4d4d4}
+.wrap{max-width:var(--w-read);margin:0 auto;padding:0 1.5rem}
+.topnav{border-bottom:1px solid var(--border);position:sticky;top:0;background:rgba(10,10,10,.92);backdrop-filter:blur(8px);z-index:50}
+.topnav .row{display:flex;align-items:center;justify-content:space-between;padding:1rem 1.5rem;max-width:var(--w-wide);margin:0 auto;font-size:.9rem}
+.topnav .brand{color:var(--text);font-weight:600}
+.topnav .links{display:flex;gap:1.5rem}
+.topnav .links a{color:var(--muted)}
+.topnav .links a:hover{color:var(--text);text-decoration:none}
+.crumb{padding:1.25rem 1.5rem 0;max-width:var(--w-read);margin:0 auto;color:var(--dim);font-size:.82rem;font-family:var(--font-mono)}
+.crumb a{color:var(--muted)}
+.essay{padding:2.5rem 0 4rem}
+.essay .meta{font-family:var(--font-mono);font-size:.72rem;color:var(--dim);text-transform:uppercase;letter-spacing:.18em;margin-bottom:1rem}
+.essay h1{font-size:2.4rem;font-weight:700;letter-spacing:-.025em;line-height:1.15;margin-bottom:1.5rem}
+.essay .deck{font-size:1.15rem;color:var(--muted);font-family:var(--font-serif);font-style:italic;margin-bottom:2.5rem;padding-bottom:1.5rem;border-bottom:1px solid var(--border);line-height:1.55}
+.essay h2{font-size:1.4rem;font-weight:700;letter-spacing:-.015em;margin:3rem 0 1rem;color:var(--text)}
+.essay h2 .num{font-family:var(--font-mono);color:var(--accent);font-size:.85em;margin-right:.5em}
+.essay h3{font-size:1.05rem;font-weight:600;margin:1.75rem 0 .5rem;color:var(--text)}
+.essay p{color:var(--text);margin-bottom:1.15rem;font-size:1.025rem}
+.essay p.callout{color:var(--text);font-family:var(--font-serif);font-size:1.08rem;font-style:italic;border-left:3px solid var(--accent);padding:.75rem 1.25rem;margin:2rem 0;background:rgba(110,231,255,.04)}
+.essay ul,.essay ol{color:var(--text);margin:0 0 1.25rem 1.5rem}
+.essay li{margin-bottom:.4rem}
+.essay li strong{color:var(--accent);font-weight:600}
+.fact{display:grid;grid-template-columns:auto 1fr;gap:.5rem 1rem;margin:1rem 0;padding:1rem 1.25rem;background:var(--panel);border:1px solid var(--border);border-radius:6px;font-size:.88rem}
+.fact dt{color:var(--accent);font-family:var(--font-mono);font-weight:600;white-space:nowrap}
+.fact dd{color:var(--muted)}
+hr{border:none;border-top:1px solid var(--border);margin:2.5rem 0}
+footer{padding:3rem 0;border-top:1px solid var(--border);color:var(--dim);font-size:.82rem;text-align:center}
+footer a{color:var(--muted)}
+.nav-essays{display:flex;justify-content:space-between;gap:1rem;margin-top:3rem;padding-top:1.5rem;border-top:1px solid var(--border);font-size:.9rem}
+.nav-essays a{color:var(--accent)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="row">
+    <a class="brand" href="../">ai-memory</a>
+    <div class="links">
+      <a href="brass-tacks-1-what.html">1. What</a>
+      <a href="brass-tacks-2-how.html">2. How</a>
+      <a href="brass-tacks-3-why.html" style="color:var(--text)">3. Why</a>
+      <a href="../#install">Install</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<div class="crumb"><a href="../">ai-memory</a> &nbsp;/&nbsp; essays &nbsp;/&nbsp; brass tacks 03</div>
+
+<article class="essay wrap">
+  <div class="meta">Brass tacks &middot; 03 of 03 &middot; about a 7 minute read</div>
+  <h1>Why ai-memory beats vector-DB-only.</h1>
+  <p class="deck">With measured numbers. Vector databases solve text-similarity search; they do not solve the eight other things an autonomous AI Non-Human Identity agent needs from its substrate. Here are those eight things, each one a real surface in ai-memory, each one absent from "Postgres + a vector column" alone.</p>
+
+  <p>This essay is not anti-vector-DB. ai-memory uses one (HNSW over MiniLM embeddings, blended with FTS5 keyword score, in the recall pipeline). The argument is narrower: <strong>if all you have is similarity search, you do not have a substrate</strong>. Eight things you also need.</p>
+
+  <h2><span class="num">01.</span> Typed memory_kind taxonomy</h2>
+  <p>A vector DB stores text + a vector. ai-memory stores text + a vector + a <strong>kind</strong>: Observation, Reflection, Persona, Concept, Entity, Claim, Relation, Event, Conversation, Decision (the Batman Form-6 vocabulary, v0.7.0). Plus an open-ended free-form kind field for project-specific taxonomies.</p>
+  <p>Why this matters: an agent recalling "what policies apply here" is a different query from "what did I observe last Tuesday." Without typed kinds, you smear them together and the LLM has to disambiguate every time. With typed kinds, you filter at SQL.</p>
+  <div class="fact"><dt>Source of truth</dt><dd><code>src/models/memory.rs</code> &mdash; the 25-field Memory struct, kind is a first-class column</dd></div>
+
+  <h2><span class="num">02.</span> Knowledge graph with temporal validity</h2>
+  <p>Memories link to other memories with typed directional edges: <code>related_to</code>, <code>supersedes</code>, <code>contradicts</code>, <code>derived_from</code>, <code>reflects_on</code>, <code>derives_from</code> (six variants at v0.7.0). Each edge carries optional <code>valid_from</code> / <code>valid_until</code> so the substrate can answer "what was true on date X" instead of just "what is in the DB now."</p>
+  <p>Backends: in-process SQL for T1; Apache AGE for T3+. The same Cypher-shaped query surface in both.</p>
+  <div class="fact"><dt>Source of truth</dt><dd><code>src/models/link.rs::MemoryLinkRelation</code> + <code>docs/knowledge-graph.html</code></dd></div>
+
+  <h2><span class="num">03.</span> Ed25519-signed links (attest_level)</h2>
+  <p>When the autonomous tier writes a link, it signs the link with the agent's Ed25519 key. The link's <code>attest_level</code> field records the signing strength &mdash; <code>unsigned</code>, <code>signed_by_agent</code>, <code>signed_by_operator</code>. The verifier replays the signature on read; tampering breaks verification; the substrate refuses to surface a tampered edge in a high-attest query.</p>
+  <p>A plain vector DB has no notion of "who said this link is true and can I cryptographically verify it."</p>
+
+  <h2><span class="num">04.</span> Operator-signed substrate rules (L1&ndash;L6)</h2>
+  <p>The substrate ships with six rule layers, L1 through L6, each Ed25519-signed by the operator's key. Examples: L1 identity rules (every memory carries agent_id), L3 audit rules (every state change emits a signed event), L5 governance rules (per-agent permission scopes). The operator's pubkey lives at <code>operator.key.pub</code> on disk; the env-var override (<code>AI_MEMORY_OPERATOR_PUBKEY</code>) is documented as <strong>override-authority</strong>.</p>
+  <p>An agent cannot rewrite the rules. The operator can. That separation is the whole point.</p>
+  <div class="fact"><dt>Surface</dt><dd><code>ai-memory governance check-action</code> (CLI, #863), the governance HTTP endpoint, and the <code>memory_check_agent_action</code> MCP tool</dd></div>
+
+  <h2><span class="num">05.</span> HMAC-required subscriptions + SSRF gate</h2>
+  <p>The hook pipeline fires on 20 named substrate events. External subscribers (webhooks) must register an HMAC secret at subscription time; events are POSTed with an <code>X-AI-Memory-Signature</code> header; unsigned subscriptions are refused at registration. Loopback URLs are refused unless <code>AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS=1</code> &mdash; an SSRF gate (issue #628, H11) so a compromised agent cannot pivot to localhost services.</p>
+
+  <h2><span class="num">06.</span> Autonomous tier (LLM consolidate / contradict / auto-tag)</h2>
+  <p>When you wire in an LLM (local Ollama, OpenAI-compatible endpoint, whatever), the substrate runs:</p>
+  <ul>
+    <li><strong>consolidation</strong> &mdash; merges duplicate memories, preserves source <code>agent_id</code>s under <code>consolidated_from_agents</code>, emits <code>supersedes</code> links</li>
+    <li><strong>contradiction detection</strong> &mdash; flags pairs of memories whose claims are mutually inconsistent and emits a <code>contradicts</code> link</li>
+    <li><strong>auto-tag</strong> &mdash; assigns tags on store so subsequent recall can filter by topic</li>
+    <li><strong>reflection</strong> &mdash; bounded recursive synthesis over a memory scope, signed and stored as kind <code>reflection</code></li>
+  </ul>
+  <p>Measured note: on <code>gemma4:e4b</code> Q4_K_M on an M4 Mac Mini, the curator's auto-tag + contradiction passes hit a p50 wall of ~2.9 s for an 80-token completion at 31 tok/sec. Speculative-decoding (MTP) gating on the same host is currently a no-op pending a GGUF-converted drafter; details and reproduction in <a href="../v0.7.0/mtp-bench-2026-05-17.md">docs/v0.7.0/mtp-bench-2026-05-17.md</a>.</p>
+
+  <h2><span class="num">07.</span> NHI <code>agent_id</code> semantics</h2>
+  <p>Every memory carries <code>metadata.agent_id</code>. Resolution ladder, preservation invariants, validation regex, special-key reservations &mdash; all documented in the developer audience page and in <code>docs/agent-identity.html</code>. The substrate <em>preserves</em> <code>agent_id</code> across update, dedup, MCP <code>memory_update</code>, HTTP <code>PUT</code>, import, sync, and consolidate &mdash; enforced at the caller layer and again at the SQL layer (<code>json_set</code> CASE clauses in <code>db::insert</code> and <code>db::insert_if_newer</code>) so a single-layer bug cannot leak.</p>
+
+  <h2><span class="num">08.</span> Append-only signed audit chain</h2>
+  <p>Every store, update, link, reflection, consolidation, promotion writes a signed event into an append-only chain. The chain replays deterministically; the verifier catches tampering; the operator can audit who did what at any prior point in time. v0.7.0 names this <em>signed-events v4</em>; the spec is <a href="../signed-events-v4.md">docs/signed-events-v4.md</a>.</p>
+
+  <hr>
+
+  <h2>The honest counter-cases</h2>
+  <p>Where a vector-DB-only setup wins:</p>
+  <ul>
+    <li><strong>Pure information-retrieval-over-corpus.</strong> If your use case is "give me the top-k passages similar to this query against a 100M-document corpus," a hosted vector DB tuned for ANN at scale is the right tool. ai-memory's HNSW is in-process and pragmatic; it is not a million-vector behemoth.</li>
+    <li><strong>No autonomous agent in the loop.</strong> If a human is reading every retrieval result and there is no agent acting on its own behalf, you may not need the substrate features &mdash; you have a human in the loop providing identity, governance, and audit out-of-band.</li>
+    <li><strong>You already have a substrate.</strong> If your platform already provides typed memory + KG + governance + signed audit, you don't need a second one.</li>
+  </ul>
+  <p>Where you want ai-memory:</p>
+  <ul>
+    <li><strong>You are running autonomous AI agents on behalf of an organization.</strong> The NHI framing exists because the security industry has converged on it.</li>
+    <li><strong>You need the audit trail to survive a model swap.</strong> Identity, links, and audit chain are independent of the LLM you used to write them; switching from Claude to Grok to GPT does not lose the chain.</li>
+    <li><strong>You want the substrate to enforce things against itself.</strong> Operator-signed rules, HMAC subscriptions, SSRF gate, append-only audit are constraints the agent cannot lift.</li>
+  </ul>
+
+  <p class="callout">The argument is not "vector DB bad." The argument is: <em>similarity search is one feature out of nine</em>. If you need the other eight, you need a substrate, and ai-memory is the open-source one designed around the AI NHI agent as the load-bearing user.</p>
+
+  <hr>
+
+  <h2>Reproducing the claims</h2>
+  <ul>
+    <li>Tool counts (71 MCP entries, 72 HTTP routes, ~50 CLI subcommands): asserted by <code>Profile::full().expected_tool_count()</code> in <code>src/profile.rs</code> and by the HTTP route registry in <code>src/lib.rs</code>; full surface lists in <a href="../USER_GUIDE.md">USER_GUIDE</a>, <a href="../API_REFERENCE.md">API_REFERENCE</a>, <a href="../CLI_REFERENCE.md">CLI_REFERENCE</a>.</li>
+    <li>Schema version v43, 25-field Memory struct, 6 link variants: <code>src/models/memory.rs</code>, <code>src/models/link.rs</code>, <code>src/storage/migrations.rs</code>.</li>
+    <li>Autonomous-tier latency p50 ~2.9 s on <code>gemma4:e4b</code>: <a href="../v0.7.0/mtp-bench-2026-05-17.md">mtp-bench-2026-05-17.md</a>.</li>
+    <li>Test campaign SHIP verdict, 85 PASS / 0 FAIL across 12 phases: <a href="../v0.7.0/test-campaign-2026-05-18/">2026-05-18 Track A re-run</a>.</li>
+  </ul>
+
+  <div class="nav-essays">
+    <a href="brass-tacks-2-how.html">&larr; previous &middot; how an NHI uses it</a>
+    <a href="../">back to index &rarr;</a>
+  </div>
+</article>
+
+<footer>
+  <a href="../">&larr; back to ai-memory</a> &middot;
+  <a href="https://github.com/alphaonedev/ai-memory-mcp">source</a> &middot;
+  Apache-2.0 &middot; &copy; 2026 AlphaOne LLC
+</footer>
+
+</body>
+</html>

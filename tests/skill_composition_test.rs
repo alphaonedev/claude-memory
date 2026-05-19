@@ -135,6 +135,7 @@ fn seed_reflection(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let id = db::insert(conn, &m).expect("insert reflection");
 

@@ -135,23 +135,35 @@ embeddings lose information on long text.
 ## MCP (Model Context Protocol)
 
 Anthropic's JSON-RPC protocol for AI-tool integration. ai-memory ships
-an MCP server via `ai-memory mcp` exposing 43 tools (memory_store,
-memory_recall, etc.) + 2 prompts over stdio. Works with Claude Code,
-Claude Desktop, Cursor, Codex, Grok, Gemini, Llama Stack. See
-`docs/USER_GUIDE.md`.
+an MCP server via `ai-memory mcp` exposing **71 advertised entries at
+`--profile full` at v0.7.0** (70 callable "memory tools" + the always-on
+`memory_capabilities` bootstrap — both numbers are intentional; see
+issue [#862](https://github.com/alphaonedev/ai-memory-mcp/issues/862))
+plus 2 prompts over stdio. Default `--profile core` exposes 7 tools (the
+original 5 + `memory_load_family` + `memory_smart_load`) plus the
+always-on bootstrap. Works with Claude Code, Claude Desktop, Cursor,
+Codex, Grok, Gemini, Llama Stack. See `docs/USER_GUIDE.md`.
 
 ## Memory
 
-The core data unit. A 15-field record with `id`, `tier`, `namespace`,
-`title`, `content`, `tags`, `priority`, `confidence`, `source`,
-`access_count`, timestamps, `expires_at`, and `metadata`.
-`(title, namespace)` is a unique key — storing a duplicate upserts.
-See `docs/DEVELOPER_GUIDE.md` § "Data Model".
+The core data unit. **A 25-field record at v0.7.0** (was 15 at v0.6.x) —
+adds `reflection_depth` (Task 1/8 recursive-learning), `memory_kind`
+(Batman Form-6 vocabulary), `entity_id`/`persona_version` (QW-2 persona
+artefact), `citations`/`source_uri`/`source_span` (Form-4 fact
+provenance), `confidence_source`/`confidence_signals`/`confidence_decayed_at`
+(Form-5 calibration). Original v0.6.x fields still present: `id`,
+`tier`, `namespace`, `title`, `content`, `tags`, `priority`,
+`confidence`, `source`, `access_count`, timestamps, `expires_at`,
+`metadata`. `(title, namespace)` is a unique key — storing a duplicate
+upserts. Canonical truth in `src/models/memory.rs`. See
+`docs/DEVELOPER_GUIDE.md` § "Data Model".
 
 ## Memory link
 
-A typed relationship between two memories. Kinds: `related_to`,
-`supersedes`, `contradicts`, `derived_from`. Used by consolidate (to
+A typed relationship between two memories. **Six kinds at v0.7.0** (was
+four at v0.6.x): `related_to`, `supersedes`, `contradicts`,
+`derived_from`, `reflects_on` (recursive-learning Task 1/8), `derives_from`
+(WT-1-A atomisation). Used by consolidate (to
 track provenance) and the curator (to mark contradictions).
 
 ## Namespace

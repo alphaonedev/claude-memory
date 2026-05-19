@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  dev.alphaone.ai-memory.sync.plist — macOS launchd template for the
+  optional peer-to-peer sync daemon (issue #800 Crack 6).
+
+  The sync daemon implements the "no SaaS, peer-to-peer mesh" structural
+  bet — two or more ai-memory nodes pointed at each other form a live
+  knowledge mesh with no cloud, no login, no central server. Disabled
+  by default in the Batman activation recipe because a single-node
+  install has no peers; load this plist only when you have at least
+  one peer address to mesh with.
+
+  Pre-flight:
+    1. Add at least one peer's HTTP base URL to your config or pass
+       it via --peer below.
+    2. Make sure each peer trusts your operator key fingerprint
+       (mTLS allowlist; see docs/federation.md).
+    3. Set BATMAN_SYNC_PEERS env var below to the comma-separated
+       peer list (or hardcode --peer flags into ProgramArguments).
+
+  Install:
+    cp scripts/templates/dev.alphaone.ai-memory.sync.plist \
+       ~/Library/LaunchAgents/
+    sed -i.bak 's|REPLACE_DB|/Users/YOU/.claude/ai-memory.db|g' \
+       ~/Library/LaunchAgents/dev.alphaone.ai-memory.sync.plist
+    sed -i.bak 's|REPLACE_PEER_URLS|https://peer-a.local:9078,https://peer-b.local:9078|g' \
+       ~/Library/LaunchAgents/dev.alphaone.ai-memory.sync.plist
+    launchctl bootstrap "gui/$(id -u)" \
+       ~/Library/LaunchAgents/dev.alphaone.ai-memory.sync.plist
+
+  Operations:
+    launchctl print  "gui/$(id -u)/dev.alphaone.ai-memory.sync" | grep state
+    tail -f ~/Library/Logs/ai-memory/sync.log
+    launchctl bootout "gui/$(id -u)/dev.alphaone.ai-memory.sync"
+
+  Linux operators: use scripts/templates/ai-memory-sync.service (systemd).
+  Windows operators: use scripts/install-batman-active.ps1 -EnableSync (TODO).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.alphaone.ai-memory.sync</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOU/.local/bin/ai-memory</string>
+        <string>--db</string>
+        <string>REPLACE_DB</string>
+        <string>sync-daemon</string>
+        <string>--peer</string>
+        <string>REPLACE_PEER_URLS</string>
+        <string>--poll-interval-secs</string>
+        <string>30</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/YOU/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/YOU</string>
+        <key>AI_MEMORY_AUTO_CONFIDENCE</key>
+        <string>1</string>
+        <key>AI_MEMORY_CONFIDENCE_SHADOW</key>
+        <string>1</string>
+        <key>AI_MEMORY_CONFIDENCE_DECAY</key>
+        <string>1</string>
+    </dict>
+
+    <key>RunAtLoad</key><true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key><false/>
+        <key>Crashed</key><true/>
+        <key>NetworkState</key><true/>
+    </dict>
+
+    <key>ThrottleInterval</key><integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOU/Library/Logs/ai-memory/sync.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOU/Library/Logs/ai-memory/sync.log</string>
+
+    <key>ProcessType</key><string>Background</string>
+    <key>Nice</key><integer>5</integer>
+</dict>
+</plist>

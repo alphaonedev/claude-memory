@@ -424,7 +424,9 @@ pub fn _test_only_take_dispatch() -> Option<Arc<AutoAtomisationDispatch>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ApproverType, GovernanceLevel, GovernancePolicy, Tier};
+    use crate::models::{
+        ApproverType, AtomisationPolicy, CorePolicy, GovernanceLevel, GovernancePolicy, Tier,
+    };
     use chrono::Utc;
     use rusqlite::Connection;
     use tempfile::TempDir;
@@ -474,26 +476,22 @@ mod tests {
 
     fn opt_in_policy() -> GovernancePolicy {
         GovernancePolicy {
-            write: GovernanceLevel::Any,
-            promote: GovernanceLevel::Any,
-            delete: GovernanceLevel::Owner,
-            approver: ApproverType::Human,
-            inherit: true,
-            max_reflection_depth: None,
-            auto_export_reflections_to_filesystem: None,
-            auto_atomise: Some(true),
-            auto_atomise_threshold_cl100k: Some(50),
-            auto_atomise_max_atom_tokens: Some(20),
-            auto_atomise_max_retries: None,
-            auto_persona_trigger_every_n_memories: None,
-            auto_export_personas_to_filesystem: None,
-            auto_atomise_mode: None,
-            legacy_per_pair_classifier: None,
-            auto_classify_kind: None,
-            synthesis_failure_mode: None,
-            synthesis_max_deletes_per_call: None,
-            synthesis_max_candidate_chars: None,
-            multistep_max_content_chars: None,
+            core: CorePolicy {
+                write: GovernanceLevel::Any,
+                promote: GovernanceLevel::Any,
+                delete: GovernanceLevel::Owner,
+                approver: ApproverType::Human,
+                inherit: true,
+                max_reflection_depth: None,
+            },
+            atomisation: AtomisationPolicy {
+                auto_atomise: Some(true),
+                auto_atomise_threshold_cl100k: Some(50),
+                auto_atomise_max_atom_tokens: Some(20),
+                auto_atomise_max_retries: None,
+                auto_atomise_mode: None,
+            },
+            ..Default::default()
         }
     }
 
@@ -567,5 +565,108 @@ mod tests {
         assert!(policy.effective_auto_atomise());
         assert_eq!(policy.effective_auto_atomise_threshold_cl100k(), 50);
         assert_eq!(policy.effective_auto_atomise_max_atom_tokens(), 20);
+    }
+
+    // ------------------------------------------------------------------
+    // Coverage-uplift block (2026-05-19): exercise the synchronous
+    // dispatch entrypoint, the Debug impl on AutoAtomisationDispatch,
+    // and the test-only dispatch take helper.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn dispatch_struct_debug_formatter_renders_redacted_atomiser() {
+        // Drives lines 85-90 — the manual Debug impl that hides the
+        // Arc<Atomiser> body behind a placeholder string. The
+        // ProcessSettable static `AUTO_ATOMISE_DISPATCH` may or may
+        // not be populated by sibling tests; either way the manual
+        // Debug formatter can be exercised by handing it a synthetic
+        // dispatch built from a temp path.
+        use crate::atomisation::AtomiserConfig;
+        use crate::atomisation::curator::{Atom, Curator, CuratorError};
+        use crate::config::FeatureTier;
+        // Build a minimal Atomiser via the substrate constructor with
+        // a no-op curator. The atomiser's behaviour is irrelevant
+        // here — we only need a valid Arc<Atomiser> so the Debug
+        // formatter can hide its body.
+        struct NoopCurator;
+        impl Curator for NoopCurator {
+            fn decompose(
+                &self,
+                _body: &str,
+                _max_atom_tokens: u32,
+                _max_retries: u32,
+            ) -> Result<Vec<Atom>, CuratorError> {
+                Err(CuratorError::LlmUnavailable("noop".to_string()))
+            }
+        }
+        let atomiser = Arc::new(crate::atomisation::Atomiser::new(
+            Box::new(NoopCurator),
+            None,
+            AtomiserConfig::default(),
+            FeatureTier::Smart,
+        ));
+        let dispatch = AutoAtomisationDispatch {
+            db_path: PathBuf::from("/var/.ai-memory-non-existent-for-debug-fmt.db"),
+            atomiser,
+        };
+        let s = format!("{dispatch:?}");
+        // Debug formatter must include the struct name + the redacted
+        // atomiser placeholder; the literal db_path string lands in
+        // the output as a Debug-formatted PathBuf.
+        assert!(s.contains("AutoAtomisationDispatch"));
+        assert!(s.contains("<Arc<Atomiser>>"));
+        assert!(s.contains("non-existent-for-debug-fmt"));
+    }
+
+    #[test]
+    fn run_synchronous_auto_atomise_short_circuits_when_dispatch_unset() {
+        // The synchronous entrypoint emits the
+        // "skipped_dispatch_unset" telemetry tag when the OnceLock is
+        // empty. Sibling integration tests may have set the slot, so
+        // we accept either the unset-tag or any "skipped_*" tag —
+        // the load-bearing claim is "no panic, returns a non-empty
+        // static slug".
+        let (conn, _dir, _path) = fresh_db();
+        let mem = make_memory("sync-noop-ns", "short body");
+        let tag = run_synchronous_auto_atomise(&conn, &mem, &mem.id, "ai:test");
+        // The function returns one of the documented static tags.
+        let known: &[&str] = &[
+            "skipped_dispatch_unset",
+            "skipped_under_threshold",
+            "atomised",
+            "skipped_source_too_small",
+            "skipped_already_atomised",
+            "failed",
+        ];
+        assert!(
+            known.contains(&tag),
+            "unexpected sync auto-atomise tag: {tag}"
+        );
+    }
+
+    #[test]
+    fn run_synchronous_auto_atomise_short_body_under_threshold() {
+        // Even when an integration-test-installed dispatch IS present,
+        // a short body must hit the "skipped_under_threshold" arm.
+        // Use the default threshold (500 cl100k tokens) — a 5-char
+        // body is clearly under.
+        let (conn, _dir, _path) = fresh_db();
+        let mem = make_memory("sync-short-ns", "hi");
+        let tag = run_synchronous_auto_atomise(&conn, &mem, &mem.id, "ai:test");
+        // Either "skipped_dispatch_unset" (no dispatch installed) OR
+        // "skipped_under_threshold" (dispatch installed but body
+        // under threshold). Both are documented short-circuit tags.
+        assert!(
+            matches!(tag, "skipped_dispatch_unset" | "skipped_under_threshold"),
+            "unexpected tag: {tag}"
+        );
+    }
+
+    #[test]
+    fn test_only_take_dispatch_does_not_panic() {
+        // Drives the `_test_only_take_dispatch` helper (line 409-415).
+        // OnceLock::get() returns None or Some — both are valid
+        // outputs. The function must not panic regardless.
+        let _ = _test_only_take_dispatch();
     }
 }

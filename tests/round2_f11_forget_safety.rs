@@ -159,6 +159,7 @@ fn cmd_forget_proceeds_with_confirm_global() {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&conn, &m).unwrap();
     }

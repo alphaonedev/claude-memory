@@ -42,18 +42,12 @@ use ai_memory::models::{Citation, Memory, MemoryKind, SourceSpan, Tier};
 use ai_memory::storage;
 use ai_memory::validate;
 
-use rusqlite::Connection;
-use tempfile::NamedTempFile;
+mod common;
+use common::fresh_db_tempfile_conn as fresh_db;
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
 // ---------------------------------------------------------------------------
-
-fn fresh_db() -> (NamedTempFile, Connection) {
-    let tmp = NamedTempFile::new().expect("tempfile");
-    let conn = db::open(tmp.path()).expect("db::open");
-    (tmp, conn)
-}
 
 fn test_serial() -> &'static Mutex<()> {
     static M: OnceLock<Mutex<()>> = OnceLock::new();
@@ -92,6 +86,7 @@ fn mem_with_citations(ns: &str, title: &str, content: &str, citations: Vec<Citat
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 

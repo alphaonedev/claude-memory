@@ -492,6 +492,50 @@ mod tests {
     }
 
     #[test]
+    fn human_error_message_signer_error_and_db_error_carry_detail() {
+        // Drives uncovered lines 184-185 in `human_error_message`.
+        let sig = human_error_message(&AtomiseError::SignerError("key revoked".into()), "src");
+        assert!(sig.starts_with("Signer error:"));
+        assert!(sig.contains("key revoked"));
+        let db = human_error_message(&AtomiseError::DbError("disk full".into()), "src");
+        assert!(db.starts_with("Database error:"));
+        assert!(db.contains("disk full"));
+    }
+
+    #[test]
+    fn run_wrapper_delegates_to_run_with_curator_keyword_tier_short_circuits() {
+        // Drives the bare `run` function (line 220-228) plus the
+        // TierLocked early-out at the CLI layer (line 252-254) by
+        // passing an explicit `tier = "keyword"` config.
+        use crate::config::AppConfig;
+        let mut cfg = AppConfig::default();
+        cfg.tier = Some("keyword".to_string());
+        let args = AtomiseArgs {
+            memory_id: "src-id".to_string(),
+            max_atom_tokens: 100,
+            force: false,
+            json: false,
+            quiet: false,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("atomise-cli.db");
+        let mut stdout = Vec::<u8>::new();
+        let mut stderr = Vec::<u8>::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        let code = run(&db_path, &args, &cfg, None, &mut out).unwrap();
+        // TierLocked is exit_code 3.
+        assert_eq!(code, 3);
+        let s = String::from_utf8(stderr).unwrap();
+        assert!(
+            s.contains("requires smart tier") || s.contains("tier"),
+            "got stderr: {s}",
+        );
+    }
+
+    #[test]
     fn error_details_already_atomised_carries_payload() {
         let err = AtomiseError::AlreadyAtomised {
             source_id: "s".into(),

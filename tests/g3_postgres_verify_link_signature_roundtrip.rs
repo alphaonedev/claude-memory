@@ -56,14 +56,8 @@ use ai_memory::store::postgres::PostgresStore;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, RwLock};
 
-fn postgres_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-}
-
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    listener.local_addr().expect("local_addr").port()
-}
+mod common;
+use common::{free_port, postgres_url};
 
 /// M9 — process-wide guard around `AI_MEMORY_KEY_DIR` mutation. The CI
 /// postgres lane runs with `--test-threads=1` but this lock keeps the
@@ -138,6 +132,9 @@ async fn build_postgres_app_state(
         replay_cache: std::sync::Arc::new(ai_memory::identity::replay::ReplayCache::default()),
 
         verify_require_nonce: false,
+        federation_nonce_cache: std::sync::Arc::new(
+            ai_memory::identity::replay::FederationNonceCache::default(),
+        ),
         autonomous_hooks: false,
         recall_scope: Arc::new(None),
         deferred_audit_queue: Arc::new(None),
@@ -249,6 +246,7 @@ async fn seed_signed_link_with_nanosecond_valid_from(
         valid_until: None,
         observed_by: None,
         signature: None,
+        attest_level: None,
     };
     let ctx = ai_memory::store::CallerContext::for_agent(kp.agent_id.clone());
     let attest = store

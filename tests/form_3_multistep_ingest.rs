@@ -328,8 +328,12 @@ fn helpers_degrade_cleanly_with_empty_candidates_and_namespace() {
 //
 // The pointer recorder is exposed via a `cfg(test)` accessor on the
 // executor (`helper_content_ptrs()`); production callers never see
-// the recorder.
+// the recorder. The recorder itself is gated on `debug_assertions`
+// (zero overhead in release) — pair the test with the same gate so
+// `cargo test --release` filters it out cleanly instead of asserting
+// against an intentionally-empty Vec.
 // ---------------------------------------------------------------------------
+#[cfg(debug_assertions)]
 #[test]
 fn multistep_phase_1_helpers_receive_content_borrow_not_clone() {
     let mock = MockLlmDispatch::new(vec![Ok(

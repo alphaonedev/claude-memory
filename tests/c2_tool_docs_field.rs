@@ -134,20 +134,35 @@ fn c2_every_short_description_is_under_50_tokens() {
 }
 
 #[test]
-fn c2_tools_list_token_budget_is_under_3500() {
+fn c2_tools_list_token_budget_is_under_post_859_ceiling() {
     // C5 budget gate (the structural side of C2) — the full
     // `tools/list` response (no verbose, full profile) must serialize
-    // to ≤ 3500 cl100k_base tokens. This is the always-on payload
+    // to ≤ 5000 cl100k_base tokens. This is the always-on payload
     // every MCP client pays per session, so the cap matters.
+    //
+    // **Post-#859 update (was: 3500).** Pre-#859 the C4 trim dropped
+    // every optional property entry from the wire (keeping only
+    // `required` + an allow-list of `[namespace, format]`), which let
+    // the wire payload sit at ~3456 tokens for 71 tools. That trim
+    // broke NHI runtime discovery: clients reading `tools/list` had
+    // no way to learn that `max_depth`, `relation`, `valid_at`, etc.
+    // were valid params. #859 restored every property entry on the
+    // wire (with per-property `description` prose stripped + the
+    // top-level tool description compacted to the first sentence) so
+    // clients can discover the call surface. The irreducible cost of
+    // that fully-discoverable schema is ~4500-4700 tokens; the new
+    // 5000 ceiling pins that with ~300 tokens of headroom for future
+    // tool additions.
     let defs = tool_definitions_for_profile(&Profile::full());
     let serialized = serde_json::to_string(&defs).expect("tool defs must serialize");
     let tokens = count_tokens_cl100k(&serialized);
 
-    // Hard ceiling per V0.7-EPIC C5 (3500 cl100k tokens).
     assert!(
-        tokens <= 3500,
-        "tools/list bare payload exceeded the C5 budget — got {tokens} cl100k tokens, \
-         ceiling is 3500. Tighten short descriptions or move more content into `docs`."
+        tokens <= 5000,
+        "tools/list bare payload exceeded the post-#859 budget — got {tokens} cl100k tokens, \
+         ceiling is 5000. Audit per-property prose (must be stripped on the wire), top-level \
+         tool descriptions (compacted to first sentence), and consider whether a new tool's \
+         schema can move under `family=power` instead of the always-on core."
     );
 }
 

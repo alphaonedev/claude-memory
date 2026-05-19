@@ -12,6 +12,17 @@
 use ai_memory::governance::agent_action::{AgentAction, Decision, check_agent_action};
 use ai_memory::governance::rules_store::{self, Rule};
 
+mod common;
+use common::*;
+
+// Tests in this file mutate the process-wide
+// `AI_MEMORY_OPERATOR_PUBKEY` env var so `resolve_operator_pubkey()`
+// returns the in-test key rather than the host's on-disk
+// `operator.key.pub`. `common::install_test_operator_key()` does the
+// install + returns an `EnvVarGuard` whose drop restores prior state;
+// the guard holds the shared `ENV_LOCK` so parallel tests in this
+// binary don't race on the env var.
+
 fn fresh_conn() -> rusqlite::Connection {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     conn.execute_batch(
@@ -55,13 +66,15 @@ fn replicate_rule(peer_a: &rusqlite::Connection, peer_b: &rusqlite::Connection, 
 
 #[test]
 fn rule_authored_at_peer_a_replicated_to_peer_b_enforces_at_b() {
+    let (signing, _env_guard) = install_test_operator_key();
     let peer_a = fresh_conn();
     let peer_b = fresh_conn();
 
-    // Peer A: operator adds R001 (no /tmp).
-    rules_store::insert(
-        &peer_a,
-        &Rule {
+    // Peer A: operator adds R001 (no /tmp). Signed with the in-test
+    // operator key so the production `enforced_rule_passes` filter
+    // accepts it under L1-6 (pubkey resolved → signed rules required).
+    let r001 = sign_rule(
+        Rule {
             id: "R001".into(),
             kind: "filesystem_write".into(),
             matcher: r#"{"glob":"/tmp/**"}"#.into(),
@@ -71,19 +84,24 @@ fn rule_authored_at_peer_a_replicated_to_peer_b_enforces_at_b() {
             created_by: "operator".into(),
             created_at: 0,
             enabled: true,
-            signature: Some(vec![0xaa, 0xbb, 0xcc]),
+            signature: None,
             attest_level: "operator_signed".into(),
         },
-    )
-    .unwrap();
+        &signing,
+    );
+    let expected_sig = r001
+        .signature
+        .clone()
+        .expect("sign_rule populates signature");
+    rules_store::insert(&peer_a, &r001).unwrap();
 
     // Replication step.
     replicate_rule(&peer_a, &peer_b, "R001");
 
-    // Peer B: rule is present.
+    // Peer B: rule is present with the same 64-byte signature.
     let on_b = rules_store::get(&peer_b, "R001").unwrap().unwrap();
     assert_eq!(on_b.id, "R001");
-    assert_eq!(on_b.signature, Some(vec![0xaa, 0xbb, 0xcc]));
+    assert_eq!(on_b.signature, Some(expected_sig));
     assert_eq!(on_b.attest_level, "operator_signed");
 
     // Peer B enforces: a /tmp write is refused.
@@ -97,13 +115,18 @@ fn rule_authored_at_peer_a_replicated_to_peer_b_enforces_at_b() {
 
 #[test]
 fn disabled_rule_at_peer_b_does_not_enforce_even_if_enabled_at_a() {
+    let (signing, _env_guard) = install_test_operator_key();
     let peer_a = fresh_conn();
     let peer_b = fresh_conn();
 
-    // Peer A: enabled rule.
-    rules_store::insert(
-        &peer_a,
-        &Rule {
+    // Peer A: enabled rule. Signed with the in-test operator key so
+    // the L1-6 enforcement filter accepts it on the peer-A refuse
+    // assertion below (the disabled branch on peer B doesn't depend
+    // on signing — the SQL `enabled = 0` filter short-circuits before
+    // signature verification — but we sign here too for symmetry with
+    // production replication semantics).
+    let r002 = sign_rule(
+        Rule {
             id: "R002".into(),
             kind: "filesystem_write".into(),
             matcher: r#"{"glob":"/tmp/**"}"#.into(),
@@ -114,10 +137,11 @@ fn disabled_rule_at_peer_b_does_not_enforce_even_if_enabled_at_a() {
             created_at: 0,
             enabled: true,
             signature: None,
-            attest_level: "unsigned".into(),
+            attest_level: "operator_signed".into(),
         },
-    )
-    .unwrap();
+        &signing,
+    );
+    rules_store::insert(&peer_a, &r002).unwrap();
 
     // Replicate, then disable on B (peer B's operator opts out).
     replicate_rule(&peer_a, &peer_b, "R002");

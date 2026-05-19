@@ -1,0 +1,12 @@
+# #873 — per-function size budget. Companion to `[lints.clippy]
+# too_many_lines = "deny"` in Cargo.toml. The integer threshold cannot
+# live in `Cargo.toml` (stable cargo's `[lints]` table doesn't accept
+# per-lint config payloads as of 1.88, see rust-lang/cargo#13310), so
+# the value sits here.
+#
+# 250 is the discipline anchor. Existing offenders carry
+# `#![allow(clippy::too_many_lines)] // tracked for split as #...` at
+# the top of their containing file with a tracker reference. The
+# allowance keeps CI green while the split lands; removing the
+# allowance is the gate that says "this file is now under-budget".
+too-many-lines-threshold = 250

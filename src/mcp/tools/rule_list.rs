@@ -176,6 +176,11 @@ mod tests {
 
     #[test]
     fn kind_and_enabled_only_combined() {
+        // Issue #819 — handle_rule_list internally uses
+        // list_enabled_by_kind which filters by operator pubkey signature.
+        // Suppress pubkey resolution so the unsigned R1/R3 fixtures
+        // surface regardless of dev-host / CI-runner state.
+        let _no_pubkey = crate::governance::rules_store::force_no_operator_pubkey_for_test();
         let conn = fresh_conn();
         insert(&conn, "R1", "bash", true);
         insert(&conn, "R2", "bash", false);

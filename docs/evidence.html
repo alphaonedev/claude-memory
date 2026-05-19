@@ -18,8 +18,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ai-memory · Evidence — frozen public claims for v0.6.3</title>
-<meta name="description" content="Canonical evidence page for ai-memory v0.6.3. Frozen test count, coverage, MCP tool count, HTTP endpoint count, CLI command count, federation status, and certification status. Single source of truth — every other public page sources its numbers from here.">
+<title>ai-memory · Evidence — frozen public claims for v0.7.0</title>
+<meta name="description" content="Canonical evidence page for ai-memory v0.7.0. Frozen test count, coverage, MCP tool count, HTTP route count, CLI subcommand count, federation status, and certification status. Single source of truth — every other public page sources its numbers from here.">
 <meta name="theme-color" content="#0d1117">
 <link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/evidence.html">
 <style>
@@ -94,7 +94,7 @@ footer a{color:var(--text-muted)}
     <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Evidence</span></a>
     <div class="right">
       <a href="at-a-glance.html" style="color:#6ee7ff">Atlas</a>
-      <a href="whats-new-v063.html" style="color:#ffb86b">v0.6.3</a>
+      <a href="v0.7.0/release-notes.md" style="color:#ffb86b">v0.7.0</a>
       <div class="menu">
         <button class="menu-btn">Audiences<span class="caret">▾</span></button>
         <div class="menu-pane">
@@ -149,7 +149,7 @@ footer a{color:var(--text-muted)}
         <div class="menu-pane">
           <a href="evidence.html" class="current">Frozen Claims</a>
           <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
-          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence (historical)</a>
           <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
           <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A Gate</a>
           <a href="performance.html">Performance budgets</a>
@@ -163,7 +163,7 @@ footer a{color:var(--text-muted)}
 
 <section class="hero">
   <div class="container">
-    <span class="frozen-badge">FROZEN · v0.6.3 · 2026-04-24</span>
+    <span class="frozen-badge">FROZEN · v0.7.0 · 2026-05-18</span>
     <h1>The single source of truth.</h1>
     <p class="lead">
       Every public page about ai-memory — README, marketing site, roadmap, architecture pages, sales decks — must source its numbers from this page or from the upstream test-hub evidence it cites.
@@ -171,7 +171,7 @@ footer a{color:var(--text-muted)}
     </p>
     <div style="display:flex;justify-content:center;gap:.75rem;flex-wrap:wrap;margin-top:1.75rem">
       <a href="https://alphaonedev.github.io/ai-memory-test-hub/" style="display:inline-block;padding:.65rem 1.25rem;border:1px solid var(--p1);color:var(--p1);background:rgba(110,231,255,.06);border-radius:6px;font-family:var(--font-mono);font-size:.9rem;font-weight:600;text-decoration:none">🧪 Live test-hub →</a>
-      <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/" style="display:inline-block;padding:.65rem 1.25rem;border:1px solid var(--p2);color:var(--p2);background:rgba(255,184,107,.06);border-radius:6px;font-family:var(--font-mono);font-size:.9rem;font-weight:600;text-decoration:none">📊 v0.6.3 release evidence →</a>
+      <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/" style="display:inline-block;padding:.65rem 1.25rem;border:1px solid var(--p2);color:var(--p2);background:rgba(255,184,107,.06);border-radius:6px;font-family:var(--font-mono);font-size:.9rem;font-weight:600;text-decoration:none">📊 v0.6.3 release evidence (historical) →</a>
       <a href="https://alphaonedev.github.io/ai-memory-ship-gate/" style="display:inline-block;padding:.65rem 1.25rem;border:1px solid var(--text-muted);color:var(--text-muted);border-radius:6px;font-family:var(--font-mono);font-size:.9rem;text-decoration:none">🚢 ship-gate</a>
       <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/" style="display:inline-block;padding:.65rem 1.25rem;border:1px solid var(--text-muted);color:var(--text-muted);border-radius:6px;font-family:var(--font-mono);font-size:.9rem;text-decoration:none">🤝 A2A-gate</a>
     </div>
@@ -180,24 +180,27 @@ footer a{color:var(--text-muted)}
 
 <section>
   <div class="container">
-    <span class="eyebrow">Frozen facts · v0.6.3</span>
+    <span class="eyebrow">Frozen facts · v0.7.0</span>
     <h2>The numbers.</h2>
-    <p>All values below are taken from the v0.6.3 release evidence published on the test-hub, or counted directly from the v0.6.3 source tree. Source links accompany each row.</p>
+    <p>All values below are taken from the v0.7.0 release evidence published on the test-hub, or counted directly from the v0.7.0 source tree. Source links accompany each row.</p>
     <table class="facts">
       <thead>
         <tr><th>Field</th><th>Value</th><th>Source of truth</th></tr>
       </thead>
       <tbody>
-        <tr><td>Current release</td><td class="num">v0.6.3</td><td class="src">git tag <code>v0.6.3</code> on <a href="https://github.com/alphaonedev/ai-memory-mcp/releases/tag/v0.6.3">main</a> · cut 2026-04-24</td></tr>
-        <tr><td>Test count (total)</td><td class="num">1,809</td><td class="src">1,600 lib (cargo test --lib) + 209 integration (cargo test --tests). Tier 1 row of the <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence page</a> — "1 600/1 600 lib tests pass" plus integration suite</td></tr>
-        <tr><td>Test count (lib only)</td><td class="num">1,600</td><td class="src">Library tests only — Tier 1 PASS row, "1 600/1 600 lib tests pass"</td></tr>
-        <tr><td>Test coverage</td><td class="num">93.08%</td><td class="src">Tier 1 row of the <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence page</a> · cargo llvm-cov · gate ≥92% · release-cut measurement was 93.05% (within rounding of most-recent 93.08%)</td></tr>
-        <tr><td>MCP tools (unique)</td><td class="num">43</td><td class="src">Counted from <code>tool_definitions()</code> in <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/mcp.rs">src/mcp.rs</a></td></tr>
-        <tr><td>HTTP endpoints (unique routes)</td><td class="num">42</td><td class="src">Counted from <code>.route(...)</code> calls across <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/handlers.rs">handlers.rs</a> + <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/federation.rs">federation.rs</a> + <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/lib.rs">lib.rs</a></td></tr>
-        <tr><td>CLI commands</td><td class="num">26</td><td class="src">Counted from the <code>Command</code> enum + dispatch in <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/main.rs">src/main.rs</a></td></tr>
+        <tr><td>Current release</td><td class="num">v0.7.0</td><td class="src">git tag <code>v0.7.0</code> on <a href="https://github.com/alphaonedev/ai-memory-mcp/releases/tag/v0.7.0">main</a> · 2026-05 release campaign</td></tr>
+        <tr><td>MCP tools advertised (<code>--profile full</code>)</td><td class="num">71</td><td class="src">70 callable memory tools + always-on <code>memory_capabilities</code> bootstrap. Pinned by <code>Profile::full().expected_tool_count()</code> in <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/profile.rs">src/profile.rs</a> · disambiguation issue <a href="https://github.com/alphaonedev/ai-memory-mcp/issues/862">#862</a></td></tr>
+        <tr><td>MCP tools default (<code>--profile core</code>)</td><td class="num">7</td><td class="src">Original 5 + <code>memory_load_family</code> + <code>memory_smart_load</code>, plus always-on <code>memory_capabilities</code> bootstrap. See <code>Profile::core()</code> in <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/profile.rs">src/profile.rs</a></td></tr>
+        <tr><td>HTTP routes (<code>/api/v1/</code>)</td><td class="num">72</td><td class="src">Counted from <code>.route(...)</code> registrations in <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/lib.rs">src/lib.rs</a> (plus the bare <code>/metrics</code> Prometheus surface)</td></tr>
+        <tr><td>CLI subcommands</td><td class="num">~50</td><td class="src">Counted from clap top-level <code>Command</code> enum in <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/daemon_runtime.rs">src/daemon_runtime.rs</a> (was 40 at v0.6.4)</td></tr>
+        <tr><td>Schema version (sqlite)</td><td class="num">v43</td><td class="src">Constant <code>CURRENT_SCHEMA_VERSION</code> in <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/storage/migrations.rs">src/storage/migrations.rs</a> · postgres parity ladder ends at migration 0020</td></tr>
+        <tr><td>Capabilities envelope <code>schema_version</code></td><td class="num">"3"</td><td class="src">Post-A5; v1/v2 still negotiable via <code>accept=</code> on <code>memory_capabilities</code> MCP / <code>Accept-Capabilities</code> HTTP header — see <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/mcp/tools/capabilities.rs">src/mcp/tools/capabilities.rs</a></td></tr>
+        <tr><td>Memory struct fields</td><td class="num">25</td><td class="src">Was 15 at v0.6.x; v0.7.0 adds recursive-learning, Batman vocabulary, Form-4 provenance, Form-5 confidence-calibration columns. See <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/models/memory.rs">src/models/memory.rs</a></td></tr>
+        <tr><td>MemoryLink relation variants</td><td class="num">6</td><td class="src"><code>related_to</code>, <code>supersedes</code>, <code>contradicts</code>, <code>derived_from</code>, <code>reflects_on</code>, <code>derives_from</code>. Enum <code>MemoryLinkRelation</code> in <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/models/link.rs">src/models/link.rs</a></td></tr>
+        <tr><td>Subscription dispatch</td><td class="num">HMAC mandatory</td><td class="src">Unsigned dispatch DISABLED post-R3-S1.HMAC (fix campaign 2026-05-13). See <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/subscriptions.rs">src/subscriptions.rs</a></td></tr>
+        <tr><td>TTL on access</td><td class="num">sliding replacement</td><td class="src">Touch sets <code>expires_at = now + per-tier-TTL</code> — replacement, not max-of-old-and-new extend. Create-time backstop (6h short / 7d mid) applies only until first access. See recall pipeline docs in <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/CLAUDE.md">CLAUDE.md</a></td></tr>
         <tr><td>CI matrix platforms</td><td class="num">3</td><td class="src">ubuntu-latest · macos-latest · windows-latest — see <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/.github/workflows/ci.yml"><code>.github/workflows/ci.yml</code></a></td></tr>
         <tr><td>LongMemEval Recall@5</td><td class="num">97.8%</td><td class="src">489/500 questions · ICLR 2025 benchmark · pure SQLite FTS5+BM25 · zero cloud — see <a href="performance.html">performance.html</a></td></tr>
-        <tr><td>Schema version</td><td class="num">v15</td><td class="src">v0.6.3 KG temporal-validity migration · see <a href="schema.html">schema.html</a></td></tr>
       </tbody>
     </table>
     <div class="callout">
@@ -228,7 +231,7 @@ footer a{color:var(--text-muted)}
       <div class="status-card production">
         <span class="tag">Production-ready</span>
         <h3>MCP + HTTP + CLI surface</h3>
-        <p>43 MCP tools, 42 HTTP routes, 26 CLI commands. Stable contract. 1,809 tests passing (1,600 lib + 209 integration) at 93.08% line coverage. Used by Claude Code, Codex, Cursor, Windsurf, Continue.dev, Grok, OpenClaw, Hermes, and Llama integrations today.</p>
+        <p>71 MCP tools at <code>--profile full</code> (7 at <code>--profile core</code>), 72 HTTP routes at <code>/api/v1/</code>, ~50 CLI subcommands. Stable contract. Used by Claude Code, Codex, Cursor, Windsurf, Continue.dev, Grok, OpenClaw, Hermes, and Llama integrations today.</p>
       </div>
 
       <div class="status-card production">
@@ -258,7 +261,7 @@ footer a{color:var(--text-muted)}
       <div class="status-card unsupported">
         <span class="tag">Unsupported (today)</span>
         <h3>Cryptographic agent attestation</h3>
-        <p>The <code>memory_links.signature</code> field is <em>reserved</em> in schema v15 but not signed/verified by the binary today. <code>agent_id</code> today is <em>claimed</em>, not <em>attested</em>. Do not make security decisions on <code>agent_id</code> alone. Attestation lands in v0.7.</p>
+        <p>v0.7.0 ships attestation in the <code>memory_links</code> table: <code>signature</code>, <code>attest_level</code> (<code>unsigned</code> / <code>self_signed</code> / <code>peer_attested</code>), and <code>signed_at</code> columns are wired through H2 (outbound self-sign), H3 (inbound verify), and H4 (<code>memory_verify</code> MCP tool). <code>agent_id</code> remains a claim — pair with the attestation envelope for security decisions.</p>
       </div>
 
       <div class="status-card unsupported">
@@ -282,7 +285,7 @@ footer a{color:var(--text-muted)}
   <div class="container">
     <span class="eyebrow">Certification</span>
     <h2>Current certification status.</h2>
-    <p>ai-memory v0.6.3 holds the following internal certifications. External (third-party) audits and compliance attestations are <strong>not yet held</strong> for any release; do not represent ai-memory as SOC 2, ISO 27001, FedRAMP, or HIPAA-compliant.</p>
+    <p>ai-memory v0.7.0 holds the following internal certifications. External (third-party) audits and compliance attestations are <strong>not yet held</strong> for any release; do not represent ai-memory as SOC 2, ISO 27001, FedRAMP, or HIPAA-compliant.</p>
     <table class="facts">
       <thead><tr><th>Certification</th><th>Status</th><th>Authority</th></tr></thead>
       <tbody>
@@ -312,7 +315,7 @@ footer a{color:var(--text-muted)}
 </section>
 
 <footer>
-  <p>© 2026 AlphaOne LLC. Licensed Apache-2.0. ai-memory v0.6.3 — <a href="https://github.com/alphaonedev/ai-memory-mcp">source on GitHub</a> · <a href="./">home</a></p>
+  <p>© 2026 AlphaOne LLC. Licensed Apache-2.0. ai-memory v0.7.0 — <a href="https://github.com/alphaonedev/ai-memory-mcp">source on GitHub</a> · <a href="./">home</a></p>
 </footer>
 
 </body>

@@ -19,7 +19,7 @@
 //!
 //! let cfg = PersonaConfig::default();
 //! let mut gen = PersonaGenerator::new(&conn, &llm, signer, cfg);
-//! let persona = gen.generate("entity-alice", "team/alpha")?;
+//! let persona = generator.generate("entity-alice", "team/alpha")?;
 //! ```
 //!
 //! # Persona body shape
@@ -51,6 +51,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use anyhow::{Context, Result};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::Utc;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -58,6 +60,7 @@ use sha2::{Digest, Sha256};
 
 use crate::autonomy::AutonomyLlm;
 use crate::identity::keypair::AgentKeypair;
+use crate::identity::sign::{SignablePersona, sign_persona};
 use crate::models::{Memory, MemoryKind, Tier};
 use crate::signed_events::{SignedEvent, append_signed_event};
 use crate::storage as db;
@@ -71,6 +74,26 @@ pub const DEFAULT_MAX_REFLECTION_SOURCES: usize = 20;
 /// Default curator family stamp on the Persona's `metadata.agent_id`
 /// when the engine is constructed without an explicit keypair (tests).
 const ANONYMOUS_CURATOR_AGENT_ID: &str = "ai:curator";
+
+/// v0.7.0 issue #848 — sentinel namespace value reported in
+/// [`PersonaError::NoReflections`] when the caller asked for the
+/// cross-namespace aggregation path and zero matching reflections
+/// existed in ANY namespace. Distinct from any real namespace string
+/// (`"global"`, `"team/alpha"`, etc.) so an operator-facing error
+/// message can distinguish "no reflections in namespace 'X'" from
+/// "no reflections anywhere in the substrate".
+pub const CROSS_NAMESPACE_SENTINEL: &str = "<any namespace>";
+
+/// v0.7.0 issue #848 — namespace-scope discriminator for
+/// [`PersonaGenerator::generate_in_scope`]. Single-namespace mode
+/// preserves the pre-#848 behaviour; `AnyTargeting(ns)` aggregates
+/// every reflection that mentions the entity across all namespaces
+/// and lands the new persona row in `ns`.
+#[derive(Debug, Clone, Copy)]
+enum PersonaScope<'a> {
+    Single(&'a str),
+    AnyTargeting(&'a str),
+}
 
 /// Static configuration for [`PersonaGenerator`].
 #[derive(Debug, Clone)]
@@ -236,25 +259,78 @@ impl<'a> PersonaGenerator<'a> {
         entity_id: &str,
         namespace: &str,
     ) -> std::result::Result<Persona, PersonaError> {
+        self.generate_in_scope(entity_id, PersonaScope::Single(namespace))
+    }
+
+    /// v0.7.0 issue #848 — cross-namespace persona generation.
+    ///
+    /// Equivalent to [`Self::generate`] except the source-reflection
+    /// scan is broadened to every namespace the substrate stores. The
+    /// new persona row lands in `target_namespace` (callers
+    /// typically pass `"global"` so subsequent
+    /// `memory_persona(entity_id)` reads have a deterministic
+    /// landing zone). Use this when an NHI agent has spread its
+    /// reflections across multiple namespaces (e.g.
+    /// `global/policies`, `ai-memory/v0.7.0-nhi-testing`, project
+    /// buckets) and needs a single Persona that aggregates the full
+    /// identity arc.
+    ///
+    /// # Errors
+    ///
+    /// Same envelope as [`Self::generate`]. When zero matching
+    /// reflections exist in ANY namespace, the
+    /// `NoReflections.namespace` field is the
+    /// [`CROSS_NAMESPACE_SENTINEL`] string.
+    pub fn generate_cross_namespace(
+        &self,
+        entity_id: &str,
+        target_namespace: &str,
+    ) -> std::result::Result<Persona, PersonaError> {
+        self.generate_in_scope(entity_id, PersonaScope::AnyTargeting(target_namespace))
+    }
+
+    /// Internal common path. Routes to the appropriate source loader
+    /// based on `scope`; centralises validation, version bump,
+    /// curator invocation, write, link emission, and signed-events
+    /// stamping so the single-namespace and cross-namespace entry
+    /// points stay in lockstep for free.
+    fn generate_in_scope(
+        &self,
+        entity_id: &str,
+        scope: PersonaScope<'_>,
+    ) -> std::result::Result<Persona, PersonaError> {
         validate_entity_id(entity_id)?;
+        let namespace = match scope {
+            PersonaScope::Single(ns) | PersonaScope::AnyTargeting(ns) => ns,
+        };
         validate::validate_namespace(namespace)
             .map_err(|e| PersonaError::Validation(e.to_string()))?;
 
-        let sources = load_reflections_for_entity(
-            self.conn,
-            entity_id,
-            namespace,
-            self.config.max_reflection_sources,
-        )?;
+        let sources = match scope {
+            PersonaScope::Single(ns) => load_reflections_for_entity(
+                self.conn,
+                entity_id,
+                ns,
+                self.config.max_reflection_sources,
+            )?,
+            PersonaScope::AnyTargeting(_) => load_reflections_for_entity_any_namespace(
+                self.conn,
+                entity_id,
+                self.config.max_reflection_sources,
+            )?,
+        };
         if sources.is_empty() {
+            let reported_ns = match scope {
+                PersonaScope::Single(ns) => ns.to_string(),
+                PersonaScope::AnyTargeting(_) => CROSS_NAMESPACE_SENTINEL.to_string(),
+            };
             return Err(PersonaError::NoReflections {
                 entity_id: entity_id.to_string(),
-                namespace: namespace.to_string(),
+                namespace: reported_ns,
             });
         }
 
         let version = next_version(self.conn, entity_id, namespace)?;
-        let attest_level = "unsigned".to_string();
 
         // Curator synthesis — `AutonomyLlm::summarize_memories` is the
         // narrow LLM trait every other curator pass already uses; mock
@@ -275,19 +351,28 @@ impl<'a> PersonaGenerator<'a> {
         let title = persona_title(entity_id, version);
         let source_ids: Vec<String> = sources.iter().map(|m| m.id.clone()).collect();
 
-        let metadata = serde_json::json!({
+        // v0.7.0 issue #810 / #811 / #812 — the in-flight `attest_level`
+        // is unknown until after the `derived_from` link writes complete
+        // (BUG-A's atomic invariant means the row tells the truth about
+        // its signature). We stamp a provisional metadata envelope now,
+        // then patch `attest_level` + `signature` in place once the
+        // post-link computation finishes. This keeps the write order
+        // (memory → links → metadata patch → signed_events) auditable.
+        let persona_id_local = uuid::Uuid::new_v4().to_string();
+
+        let mut metadata = serde_json::json!({
             "agent_id": agent_id,
             "persona": {
                 "entity_id": entity_id,
                 "sources": source_ids.clone(),
                 "version": version,
-                "attest_level": attest_level,
+                "attest_level": "unsigned",
                 "generated_at": now,
             }
         });
 
         let persona_mem = Memory {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: persona_id_local.clone(),
             tier: self.config.tier.clone(),
             namespace: namespace.to_string(),
             title,
@@ -301,7 +386,7 @@ impl<'a> PersonaGenerator<'a> {
             updated_at: now.clone(),
             last_accessed_at: None,
             expires_at: None,
-            metadata,
+            metadata: metadata.clone(),
             reflection_depth: 0,
             memory_kind: MemoryKind::Persona,
             entity_id: Some(entity_id.to_string()),
@@ -312,25 +397,118 @@ impl<'a> PersonaGenerator<'a> {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
 
         let persona_id = db::insert(self.conn, &persona_mem)
             .with_context(|| format!("inserting persona for {entity_id} v{version}"))?;
 
-        // One `derives_from` edge per source reflection. We use
-        // `db::link` so the existing relation taxonomy + cycle check
-        // apply uniformly — there's no separate persona graph; the
-        // KG walker traverses these edges with the rest.
+        // v0.7.0 issue #811 — `derived_from` edges must use the
+        // signing-aware `create_link_signed` shim. The pre-#811 code
+        // path passed `None` here unconditionally even when the
+        // generator was constructed with a keypair; that regression
+        // is what produced unsigned link rows alongside a curator
+        // whose daemon already owned a private key.
         for source in &sources {
-            db::create_link(self.conn, &persona_id, &source.id, "derived_from")
-                .with_context(|| format!("linking persona {persona_id} -> source {}", source.id))?;
+            db::create_link_signed(
+                self.conn,
+                &persona_id,
+                &source.id,
+                "derived_from",
+                self.signer,
+            )
+            .with_context(|| format!("linking persona {persona_id} -> source {}", source.id))?;
         }
-        // Silence unused-warning when the signer wasn't consumed
-        // (production wiring stamps the agent_id into the metadata
-        // envelope; the link path uses create_link's unsigned shim).
-        let _ = &agent_id;
 
-        emit_persona_generated_event(self.conn, &persona_id, &agent_id, &source_ids, &now)?;
+        // v0.7.0 issue #812 — sign the persona artifact end-to-end when
+        // the generator was constructed with a signing keypair. The
+        // signature commits to the seven-field SignablePersona envelope
+        // (persona_id, entity_id, namespace, version, generated_at,
+        // sources, body_md_sha256). The body hash is computed over the
+        // rendered Markdown so the bounded payload size is independent
+        // of body length.
+        let body_hash = {
+            let mut h = Sha256::new();
+            h.update(body_md.as_bytes());
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&h.finalize());
+            out
+        };
+
+        let signature_bytes: Option<Vec<u8>> = match self.signer {
+            Some(kp) if kp.can_sign() => {
+                let p = SignablePersona {
+                    persona_id: persona_id.as_str(),
+                    entity_id,
+                    namespace,
+                    version,
+                    generated_at: now.as_str(),
+                    sources: &source_ids,
+                    body_md_sha256: &body_hash,
+                };
+                Some(sign_persona(kp, &p).context("sign persona artifact")?)
+            }
+            _ => None,
+        };
+
+        // Resolve the effective `attest_level` for the persona from the
+        // `derived_from` link rows we just wrote. The strongest level
+        // across the source edges is the level the persona truthfully
+        // bears — a Persona whose links are unsigned cannot honestly
+        // claim `self_signed` even when the curator stamps a signature
+        // on its own body. The match between the curator's signing
+        // status and the source edges' signing status keeps the
+        // wire-level `attest_level` strictly monotone.
+        let link_attest = db::strongest_attest_level_for_source(self.conn, &persona_id)
+            .context("resolve strongest link attest_level")?;
+        let attest_level = if signature_bytes.is_some() {
+            // The persona body itself is signed. Prefer the stronger of
+            // the two labels (`peer_attested` beats `self_signed`).
+            match link_attest.as_str() {
+                "peer_attested" => "peer_attested".to_string(),
+                _ => "self_signed".to_string(),
+            }
+        } else {
+            link_attest
+        };
+
+        // Patch the metadata envelope in place — the wire response
+        // returned to the caller, the `metadata.persona.attest_level`
+        // field used by `get_latest_persona` readers, and the
+        // base64-encoded signature all flow from here.
+        if let Some(env) = metadata
+            .get_mut("persona")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            env.insert(
+                "attest_level".to_string(),
+                serde_json::Value::String(attest_level.clone()),
+            );
+            if let Some(sig) = signature_bytes.as_ref() {
+                env.insert(
+                    "signature".to_string(),
+                    serde_json::Value::String(BASE64_STANDARD.encode(sig)),
+                );
+            }
+        }
+        let new_metadata_str = serde_json::to_string(&metadata)
+            .context("serialise updated persona metadata envelope")?;
+        self.conn
+            .execute(
+                "UPDATE memories SET metadata = ?1, updated_at = ?2 WHERE id = ?3",
+                rusqlite::params![new_metadata_str, &now, &persona_id],
+            )
+            .context("patch persona metadata with signature/attest_level")?;
+
+        emit_persona_generated_event(
+            self.conn,
+            &persona_id,
+            &agent_id,
+            &source_ids,
+            &now,
+            signature_bytes.as_deref(),
+            &attest_level,
+        )?;
 
         Ok(Persona {
             id: persona_id,
@@ -494,6 +672,39 @@ fn load_reflections_for_entity(
     Ok(out)
 }
 
+/// v0.7.0 issue #848 — cross-namespace reflection loader. Identical
+/// to [`load_reflections_for_entity`] minus the `namespace = ?`
+/// predicate so a single query aggregates every reflection that
+/// references the entity regardless of which namespace it lives in.
+/// Still rides the `idx_memories_mentioned_entity` PERF-8 index
+/// (mentioned_entity_id is the leading column). Bounded by `limit`.
+fn load_reflections_for_entity_any_namespace(
+    conn: &Connection,
+    entity_id: &str,
+    limit: usize,
+) -> Result<Vec<Memory>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, tier, namespace, title, content, tags, priority, confidence, source,
+                access_count, created_at, updated_at, last_accessed_at, expires_at,
+                metadata, COALESCE(reflection_depth, 0), COALESCE(memory_kind, 'observation'),
+                entity_id, persona_version
+         FROM memories
+         WHERE memory_kind = 'reflection'
+           AND mentioned_entity_id = ?1
+         ORDER BY priority DESC, created_at DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![entity_id, i64::try_from(limit).unwrap_or(i64::MAX)],
+        crate::storage::row_to_memory,
+    )?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 /// Compose the on-disk Markdown body. Appends a footer with one
 /// `[^N]: <reflection-id>` line per source so every citation in the
 /// raw body renders as a clickable footnote in standard Markdown
@@ -519,12 +730,20 @@ fn persona_title(entity_id: &str, version: i32) -> String {
 /// Append a `persona_generated` row to the H5 audit chain so an
 /// auditor walking `signed_events` can replay every persona mint /
 /// regeneration with provenance over the source-id list.
+///
+/// v0.7.0 issue #812 / #813 — when the persona was signed, `signature`
+/// carries the 64-byte Ed25519 bytes and `attest_level` stamps the
+/// label the persona ended up with (`self_signed` or `peer_attested`).
+/// When the persona was unsigned both fall back to `None` / `unsigned`
+/// preserving the pre-#812 ledger shape.
 fn emit_persona_generated_event(
     conn: &Connection,
     persona_id: &str,
     agent_id: &str,
     sources: &[String],
     now: &str,
+    signature: Option<&[u8]>,
+    attest_level: &str,
 ) -> Result<()> {
     let mut hasher = Sha256::new();
     hasher.update(persona_id.as_bytes());
@@ -539,8 +758,8 @@ fn emit_persona_generated_event(
         agent_id: agent_id.to_string(),
         event_type: "persona_generated".to_string(),
         payload_hash,
-        signature: None,
-        attest_level: "unsigned".to_string(),
+        signature: signature.map(<[u8]>::to_vec),
+        attest_level: attest_level.to_string(),
         timestamp: now.to_string(),
         ..SignedEvent::default()
     };
@@ -699,6 +918,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(conn, &mem).unwrap()
     }
@@ -788,6 +1008,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&conn, &mem).unwrap();
         assert_eq!(next_version(&conn, "alice", "team/alpha").unwrap(), 2);
@@ -838,5 +1059,302 @@ mod tests {
     fn mock_llm_available() {
         // Smoke test that the project's mock LLM scaffolding is reachable.
         let _ = MockOllamaClient::new_with_url("http://localhost:11434", "gemma2:2b").unwrap();
+    }
+
+    // -------------------------------------------------------------------------
+    // v0.7.0 issue #810 / #811 / #812 / #813 — signing-path unit coverage
+    // -------------------------------------------------------------------------
+
+    /// Mint two reflections tagged with `entity_id = alice` so the
+    /// PERF-8 `mentioned_entity_id` lookup matches. Returns the seeded
+    /// source ids for downstream assertion.
+    fn seed_two_alice_reflections(conn: &Connection, namespace: &str) -> Vec<String> {
+        let mut ids = Vec::new();
+        for i in 0..2 {
+            let now = Utc::now().to_rfc3339();
+            let mem = Memory {
+                id: uuid::Uuid::new_v4().to_string(),
+                tier: Tier::Mid,
+                namespace: namespace.to_string(),
+                title: format!("obs-{i} about alice"),
+                content: format!("alice did thing {i}"),
+                tags: vec!["reflection".into()],
+                priority: 5,
+                confidence: 1.0,
+                source: "test".into(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now,
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: serde_json::json!({"agent_id": "ai:test", "entity_id": "alice"}),
+                reflection_depth: 1,
+                memory_kind: MemoryKind::Reflection,
+                entity_id: None,
+                persona_version: None,
+                citations: Vec::new(),
+                source_uri: None,
+                source_span: None,
+                confidence_source: ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
+                version: 1,
+            };
+            ids.push(db::insert(conn, &mem).unwrap());
+        }
+        ids
+    }
+
+    #[test]
+    fn generate_unsigned_path_writes_unsigned_links() {
+        // Pre-#811: every code path through PersonaGenerator wrote
+        // links via `db::create_link` (the unsigned shim). The
+        // intentional "passes None as signer" behaviour stays correct
+        // — the link column AND the persona metadata agree on
+        // "unsigned" instead of disagreeing.
+        let (conn, _dir) = fresh_db();
+        seed_two_alice_reflections(&conn, "team/alpha");
+        let llm = StubLlm {
+            canned: "Alice is methodical.".into(),
+        };
+        let generator = PersonaGenerator::new(&conn, &llm, None, PersonaConfig::default());
+        let persona = generator.generate("alice", "team/alpha").expect("generate");
+        assert_eq!(persona.attest_level, "unsigned");
+        // Every `derived_from` link rooted at the persona must say
+        // `unsigned` (matching the absent signer).
+        let links: Vec<(Option<Vec<u8>>, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT signature, attest_level FROM memory_links \
+                     WHERE source_id = ?1 AND relation = 'derived_from'",
+                )
+                .unwrap();
+            stmt.query_map(rusqlite::params![&persona.id], |r| {
+                Ok((r.get::<_, Option<Vec<u8>>>(0)?, r.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+        };
+        assert_eq!(links.len(), 2);
+        for (sig, level) in &links {
+            assert!(sig.is_none(), "unsigned link must have NULL signature");
+            assert_eq!(level, "unsigned");
+        }
+    }
+
+    #[test]
+    fn generate_signed_path_writes_signed_links_and_metadata() {
+        // BUG-B + BUG-C closing test — when a keypair is wired into
+        // PersonaGenerator the `derived_from` links land signed, the
+        // persona's metadata carries the base64 signature, and the
+        // returned struct stamps `self_signed` on `attest_level`.
+        let (conn, _dir) = fresh_db();
+        seed_two_alice_reflections(&conn, "team/alpha");
+        let kp = crate::identity::keypair::generate("ai:curator").unwrap();
+        let llm = StubLlm {
+            canned: "Signed alice body".into(),
+        };
+        let generator = PersonaGenerator::new(&conn, &llm, Some(&kp), PersonaConfig::default());
+        let persona = generator.generate("alice", "team/alpha").expect("generate");
+        assert_eq!(persona.attest_level, "self_signed");
+
+        // Links: all signed, 64-byte signature on each row.
+        let links: Vec<(Option<Vec<u8>>, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT signature, attest_level FROM memory_links \
+                     WHERE source_id = ?1 AND relation = 'derived_from'",
+                )
+                .unwrap();
+            stmt.query_map(rusqlite::params![&persona.id], |r| {
+                Ok((r.get::<_, Option<Vec<u8>>>(0)?, r.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+        };
+        assert_eq!(links.len(), 2);
+        for (sig, level) in &links {
+            assert_eq!(level, "self_signed");
+            let sig_bytes = sig.as_ref().expect("signed link must have signature blob");
+            assert_eq!(sig_bytes.len(), 64, "Ed25519 signatures are 64 bytes");
+        }
+
+        // Persona metadata carries base64 signature + matching
+        // attest_level + matching agent_id (curator).
+        let meta_str: String = conn
+            .query_row(
+                "SELECT metadata FROM memories WHERE id = ?1",
+                rusqlite::params![&persona.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap();
+        assert_eq!(meta["agent_id"], "ai:curator");
+        assert_eq!(meta["persona"]["attest_level"], "self_signed");
+        let b64 = meta["persona"]["signature"]
+            .as_str()
+            .expect("metadata.persona.signature must be a string");
+        let decoded = BASE64_STANDARD.decode(b64).expect("base64 decode");
+        assert_eq!(decoded.len(), 64, "decoded sig must be 64 bytes");
+
+        // The persona body hash + the metadata signature must verify
+        // against the curator's public key.
+        let body_md: String = conn
+            .query_row(
+                "SELECT content FROM memories WHERE id = ?1",
+                rusqlite::params![&persona.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(body_md.as_bytes());
+        let mut body_hash = [0u8; 32];
+        body_hash.copy_from_slice(&hasher.finalize());
+
+        let signable = SignablePersona {
+            persona_id: persona.id.as_str(),
+            entity_id: persona.entity_id.as_str(),
+            namespace: persona.namespace.as_str(),
+            version: persona.version,
+            generated_at: persona.generated_at.as_str(),
+            sources: &persona.sources,
+            body_md_sha256: &body_hash,
+        };
+        let bytes = crate::identity::sign::canonical_cbor_persona(&signable).unwrap();
+        let mut arr = [0u8; 64];
+        arr.copy_from_slice(&decoded);
+        let sig = ed25519_dalek::Signature::from_bytes(&arr);
+        use ed25519_dalek::Verifier;
+        kp.public.verify(&bytes, &sig).expect("verify persona sig");
+    }
+
+    #[test]
+    fn generate_signed_path_emits_signed_event() {
+        // BUG-C — the `persona_generated` audit row must carry the
+        // same signature bytes the metadata holds, and its
+        // attest_level must agree.
+        let (conn, _dir) = fresh_db();
+        seed_two_alice_reflections(&conn, "team/alpha");
+        let kp = crate::identity::keypair::generate("ai:curator").unwrap();
+        let llm = StubLlm {
+            canned: "body".into(),
+        };
+        let generator = PersonaGenerator::new(&conn, &llm, Some(&kp), PersonaConfig::default());
+        let persona = generator.generate("alice", "team/alpha").expect("generate");
+
+        let (sig, attest): (Option<Vec<u8>>, String) = conn
+            .query_row(
+                "SELECT signature, attest_level FROM signed_events \
+                 WHERE event_type = 'persona_generated' \
+                 ORDER BY sequence DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attest, "self_signed");
+        let sig_bytes = sig.expect("signed audit row must have signature");
+        assert_eq!(sig_bytes.len(), 64);
+
+        // Cross-check vs the metadata's base64 signature.
+        let meta_str: String = conn
+            .query_row(
+                "SELECT metadata FROM memories WHERE id = ?1",
+                rusqlite::params![&persona.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap();
+        let b64 = meta["persona"]["signature"].as_str().unwrap();
+        let decoded = BASE64_STANDARD.decode(b64).unwrap();
+        assert_eq!(
+            decoded, sig_bytes,
+            "metadata signature must match signed_events.signature"
+        );
+    }
+
+    #[test]
+    fn generate_with_public_only_keypair_falls_back_to_unsigned() {
+        // A public-only handle (can_sign() == false) must collapse
+        // to the unsigned path: the substrate must not pretend to
+        // sign with a key it cannot use.
+        let (conn, _dir) = fresh_db();
+        seed_two_alice_reflections(&conn, "team/alpha");
+        let kp = crate::identity::keypair::generate("ai:curator").unwrap();
+        let pub_only = crate::identity::keypair::AgentKeypair {
+            agent_id: "ai:curator".to_string(),
+            public: kp.public,
+            private: None,
+        };
+        let llm = StubLlm {
+            canned: "body".into(),
+        };
+        let generator =
+            PersonaGenerator::new(&conn, &llm, Some(&pub_only), PersonaConfig::default());
+        let persona = generator.generate("alice", "team/alpha").expect("generate");
+        assert_eq!(
+            persona.attest_level, "unsigned",
+            "public-only keypair must NOT produce self_signed"
+        );
+        let meta_str: String = conn
+            .query_row(
+                "SELECT metadata FROM memories WHERE id = ?1",
+                rusqlite::params![&persona.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap();
+        assert!(
+            meta["persona"]["signature"].is_null()
+                || !meta["persona"]
+                    .as_object()
+                    .unwrap()
+                    .contains_key("signature"),
+            "metadata must not carry a signature for the unsigned path"
+        );
+    }
+
+    #[test]
+    fn signed_persona_v2_regenerates_with_fresh_signature() {
+        // BUG-B regression — calling generate() twice with the same
+        // keypair MUST produce two distinct signed personas (different
+        // ids, different signatures) and v2 must still be signed
+        // end-to-end. This pins the "regeneration also signs" property.
+        let (conn, _dir) = fresh_db();
+        seed_two_alice_reflections(&conn, "team/alpha");
+        let kp = crate::identity::keypair::generate("ai:curator").unwrap();
+        let llm = StubLlm {
+            canned: "body".into(),
+        };
+        let generator = PersonaGenerator::new(&conn, &llm, Some(&kp), PersonaConfig::default());
+        let v1 = generator.generate("alice", "team/alpha").expect("v1");
+        let v2 = generator.generate("alice", "team/alpha").expect("v2");
+        assert_eq!(v1.version, 1);
+        assert_eq!(v2.version, 2);
+        assert_ne!(v1.id, v2.id);
+        assert_eq!(v1.attest_level, "self_signed");
+        assert_eq!(v2.attest_level, "self_signed");
+
+        // Both v1 and v2 metadata envelopes carry a 64-byte sig and
+        // they differ (different persona_id pins different bytes).
+        let sigs: Vec<Vec<u8>> = [&v1.id, &v2.id]
+            .iter()
+            .map(|id| {
+                let meta_str: String = conn
+                    .query_row(
+                        "SELECT metadata FROM memories WHERE id = ?1",
+                        rusqlite::params![id],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap();
+                let b64 = meta["persona"]["signature"].as_str().expect("sig present");
+                BASE64_STANDARD.decode(b64).unwrap()
+            })
+            .collect();
+        assert_eq!(sigs[0].len(), 64);
+        assert_eq!(sigs[1].len(), 64);
+        assert_ne!(sigs[0], sigs[1], "v1 + v2 signatures must differ");
     }
 }

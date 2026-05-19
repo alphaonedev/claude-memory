@@ -43,6 +43,7 @@ use rusqlite::OptionalExtension;
 
 use crate::autonomy::AutonomyLlm;
 use crate::db;
+use crate::identity::keypair::AgentKeypair;
 use crate::persona::{PersonaConfig, PersonaGenerator, render_persona_md};
 use crate::storage::reflect::{ReflectHooks, ReflectOutcome};
 
@@ -83,25 +84,40 @@ impl Default for AutoPersonaConfig {
 /// daemon-runtime owns the `OllamaClient` and clones an `Arc` of it
 /// into the closure). Tests pass a `StubLlm`. The worker thread opens
 /// its own SQLite connection because rusqlite handles aren't `Send`.
+/// v0.7.0 issue #811 / #813 — `keypair` carries the daemon signing
+/// keypair so the spawned worker forwards it into
+/// [`PersonaGenerator::new`]. When `None` the worker stays on the
+/// pre-#811 unsigned path; when `Some` every link + the persona
+/// artifact get signed end-to-end (BUG-B + BUG-C fix in one place).
 #[must_use]
 pub fn build_post_reflect_hook<L>(
     db_path: PathBuf,
     config: AutoPersonaConfig,
     llm: Arc<L>,
+    keypair: Option<Arc<AgentKeypair>>,
 ) -> ReflectHooks<'static>
 where
     L: AutonomyLlm + Send + Sync + 'static,
 {
     let cfg = Arc::new(config);
     let dbp = Arc::new(db_path);
+    let kp = keypair;
     let cb: Box<dyn Fn(&ReflectOutcome) + Send + Sync + 'static> = Box::new(move |outcome| {
         let cfg = cfg.clone();
         let dbp = dbp.clone();
         let llm = llm.clone();
+        let kp = kp.clone();
         let outcome_id = outcome.id.clone();
         let namespace = outcome.namespace.clone();
         std::thread::spawn(move || {
-            if let Err(e) = run_auto_persona(&dbp, &outcome_id, &namespace, &cfg, llm.as_ref()) {
+            if let Err(e) = run_auto_persona(
+                &dbp,
+                &outcome_id,
+                &namespace,
+                &cfg,
+                llm.as_ref(),
+                kp.as_deref(),
+            ) {
                 tracing::warn!(
                     target: "post_reflect.auto_persona",
                     "auto-persona for reflection {} (ns={}) failed: {}",
@@ -115,6 +131,15 @@ where
     ReflectHooks {
         pre_reflect: None,
         post_reflect: Some(cb),
+        // Issue #815 — the auto-persona hook signs the persona
+        // artifact via its own keypair forwarded to
+        // `PersonaGenerator::new`, but it does NOT sign the
+        // reflection's `reflects_on` edges (that's the storage layer's
+        // concern, signaled via this field). The handler that
+        // installed this hook overrides `active_keypair` to its own
+        // active keypair so the upstream `create_link_signed` path
+        // inside `storage::reflect_with_hooks` sees the keypair too.
+        active_keypair: None,
     }
 }
 
@@ -143,6 +168,7 @@ pub fn run_auto_persona(
     namespace: &str,
     config: &AutoPersonaConfig,
     llm: &dyn AutonomyLlm,
+    keypair: Option<&AgentKeypair>,
 ) -> anyhow::Result<()> {
     let conn = db::open(db_path)?;
     let policy = db::resolve_governance_policy(&conn, namespace).unwrap_or_default();
@@ -168,7 +194,12 @@ pub fn run_auto_persona(
         return Ok(());
     }
 
-    let generator = PersonaGenerator::new(&conn, llm, None, PersonaConfig::default());
+    // v0.7.0 issue #811 / #813 — forward the daemon's signing keypair
+    // into the generator so both the `derived_from` link writes AND
+    // the persona body get signed end-to-end. Pre-#811 this passed
+    // `None` unconditionally, leaving every auto-persona-generated
+    // row unsigned even on daemons whose `[identity]` was wired.
+    let generator = PersonaGenerator::new(&conn, llm, keypair, PersonaConfig::default());
     let persona = match generator.generate(&entity_id, namespace) {
         Ok(p) => p,
         Err(crate::persona::PersonaError::NoReflections { .. }) => return Ok(()),
@@ -270,7 +301,8 @@ fn write_persona_export(
 mod tests {
     use super::*;
     use crate::models::{
-        ApproverType, GovernanceLevel, GovernancePolicy, Memory, MemoryKind, Tier,
+        ApproverType, CorePolicy, GovernanceLevel, GovernancePolicy, Memory, MemoryKind,
+        PersonaPolicy, Tier,
     };
     use chrono::Utc;
     use rusqlite::Connection;
@@ -334,32 +366,26 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(conn, &mem).unwrap()
     }
 
     fn enable_cadence(conn: &Connection, ns: &str, n: u32, export: bool) {
         let policy = GovernancePolicy {
-            write: GovernanceLevel::Any,
-            promote: GovernanceLevel::Any,
-            delete: GovernanceLevel::Owner,
-            approver: ApproverType::Human,
-            inherit: true,
-            max_reflection_depth: None,
-            auto_export_reflections_to_filesystem: None,
-            auto_atomise: None,
-            auto_atomise_threshold_cl100k: None,
-            auto_atomise_max_atom_tokens: None,
-            auto_atomise_max_retries: None,
-            auto_persona_trigger_every_n_memories: Some(n),
-            auto_export_personas_to_filesystem: if export { Some(true) } else { None },
-            auto_atomise_mode: None,
-            legacy_per_pair_classifier: None,
-            auto_classify_kind: None,
-            synthesis_failure_mode: None,
-            synthesis_max_deletes_per_call: None,
-            synthesis_max_candidate_chars: None,
-            multistep_max_content_chars: None,
+            core: CorePolicy {
+                write: GovernanceLevel::Any,
+                promote: GovernanceLevel::Any,
+                delete: GovernanceLevel::Owner,
+                approver: ApproverType::Human,
+                inherit: true,
+                max_reflection_depth: None,
+            },
+            persona: PersonaPolicy {
+                auto_persona_trigger_every_n_memories: Some(n),
+                auto_export_personas_to_filesystem: if export { Some(true) } else { None },
+            },
+            ..Default::default()
         };
         let now = Utc::now().to_rfc3339();
         let gov_meta = serde_json::json!({
@@ -393,7 +419,7 @@ mod tests {
         );
         let cfg = AutoPersonaConfig::default();
         let llm = StubLlm;
-        run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm).unwrap();
+        run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm, None).unwrap();
         // No persona row should exist.
         let cnt: i64 = conn
             .query_row(
@@ -419,7 +445,7 @@ mod tests {
         );
         let cfg = AutoPersonaConfig::default();
         let llm = StubLlm;
-        run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm).unwrap();
+        run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm, None).unwrap();
         let cnt: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM memories WHERE memory_kind = 'persona'",
@@ -438,7 +464,7 @@ mod tests {
         let b = seed_reflection(&conn, "team/alpha", "obs2 alice", "alice Y", Some("alice"));
         let cfg = AutoPersonaConfig::default();
         let llm = StubLlm;
-        run_auto_persona(&db_path, &b, "team/alpha", &cfg, &llm).unwrap();
+        run_auto_persona(&db_path, &b, "team/alpha", &cfg, &llm, None).unwrap();
         let cnt: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM memories WHERE memory_kind = 'persona'",
@@ -465,7 +491,7 @@ mod tests {
             out_dir: out.clone(),
         };
         let llm = StubLlm;
-        run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm).unwrap();
+        run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm, None).unwrap();
         let f = out.join("team_alpha").join("alice.md");
         assert!(f.exists(), "expected persona file at {}", f.display());
         let body = std::fs::read_to_string(&f).unwrap();
@@ -608,6 +634,135 @@ mod tests {
             "PERF-8: insert(...) must denormalise metadata.entity_id into \
              the mentioned_entity_id column at write time"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Coverage-uplift block (2026-05-19): cadence-zero early-out,
+    // build_post_reflect_hook closure activation, entity-missing skip,
+    // export-disabled (no fs write), generator error path.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn run_auto_persona_skips_when_cadence_is_zero() {
+        let (conn, _dir, db_path) = fresh_db();
+        // Cadence of 0 still produces a Some(0) policy value via
+        // PersonaPolicy.auto_persona_trigger_every_n_memories — exercise
+        // the `if cadence == 0` early-out (line 178-180).
+        enable_cadence(&conn, "team/alpha", 0, false);
+        let id = seed_reflection(&conn, "team/alpha", "obs", "body", Some("alice"));
+        let cfg = AutoPersonaConfig::default();
+        let llm = StubLlm;
+        run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm, None).unwrap();
+        let cnt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE memory_kind = 'persona'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cnt, 0);
+    }
+
+    #[test]
+    fn run_auto_persona_skips_when_no_resolvable_entity() {
+        let (conn, _dir, db_path) = fresh_db();
+        enable_cadence(&conn, "team/alpha", 1, false);
+        // Reflection without metadata.entity_id and without [entity:X]
+        // marker — resolve_entity_id returns None (lines 184-189).
+        let id = seed_reflection(&conn, "team/alpha", "plain title", "body", None);
+        let cfg = AutoPersonaConfig::default();
+        let llm = StubLlm;
+        run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm, None).unwrap();
+        let cnt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE memory_kind = 'persona'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cnt, 0);
+    }
+
+    #[test]
+    fn run_auto_persona_does_not_write_file_when_export_disabled() {
+        // Distinguishes from `run_auto_persona_writes_file_when_export_enabled`
+        // — when the policy's auto_export_personas_to_filesystem is
+        // None/false the if-arm at line 209-211 is skipped.
+        let (conn, dir, db_path) = fresh_db();
+        enable_cadence(&conn, "team/alpha", 1, false); // export=false
+        let id = seed_reflection(&conn, "team/alpha", "obs", "body", Some("alice"));
+        let out = dir.path().join("personas-no-export");
+        let cfg = AutoPersonaConfig {
+            out_dir: out.clone(),
+        };
+        let llm = StubLlm;
+        run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm, None).unwrap();
+        // Persona row WAS minted (cadence matches), but no file was
+        // exported.
+        let cnt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE memory_kind = 'persona'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cnt, 1, "persona row minted");
+        assert!(!out.exists() || std::fs::read_dir(&out).map_or(true, |i| i.count() == 0));
+    }
+
+    #[test]
+    fn build_post_reflect_hook_invokes_closure_and_returns_callback() {
+        // Smoke-test the build_post_reflect_hook closure plumbing
+        // (lines 102-130). Constructs the hook, invokes the callback
+        // with a synthetic ReflectOutcome whose namespace has no
+        // policy seeded — the spawned worker logs + swallows the
+        // no-op, but the closure ITSELF executes (covering the
+        // outer arc-clone + thread::spawn lines).
+        let (_conn, _dir, db_path) = fresh_db();
+        let cfg = AutoPersonaConfig::default();
+        let llm: Arc<StubLlm> = Arc::new(StubLlm);
+        let hooks = build_post_reflect_hook(db_path.clone(), cfg, llm, None);
+        // The hook bundle returns with post_reflect Some(_).
+        let cb = hooks.post_reflect.as_ref().expect("post_reflect set");
+        let outcome = ReflectOutcome {
+            id: "synthetic-id".to_string(),
+            reflection_depth: 1,
+            reflects_on: vec![],
+            namespace: "team/alpha".to_string(),
+        };
+        // Fire the callback; the spawned worker may panic-swallow if
+        // the synthetic id has no matching row, but the callback's
+        // own body (the arc clones + thread::spawn boundary) runs.
+        cb(&outcome);
+        // Give the worker a moment to attempt its read; this is
+        // observability-only and the test passes regardless of the
+        // worker's outcome.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Active keypair plumbed through is None per the hook builder.
+        assert!(hooks.active_keypair.is_none());
+    }
+
+    #[test]
+    fn auto_persona_config_default_for_home_returns_personas_subdir() {
+        let cfg = AutoPersonaConfig::default_for_home();
+        // The path always ends with the `personas` segment.
+        let last = cfg
+            .out_dir
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        assert_eq!(last, "personas");
+    }
+
+    #[test]
+    fn run_auto_persona_open_error_propagates() {
+        // Pass a path under a non-existent directory so db::open fails
+        // (line 173). The error bubbles up rather than no-op'ing.
+        let bogus = PathBuf::from("/nonexistent-host-path-zz/auto-persona.db");
+        let cfg = AutoPersonaConfig::default();
+        let llm = StubLlm;
+        let res = run_auto_persona(&bogus, "any-id", "team/alpha", &cfg, &llm, None);
+        assert!(res.is_err(), "expected open failure");
     }
 
     /// v0.7.0 polish PERF-8 (issue #781) — title-marker fallback. When

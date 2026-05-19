@@ -191,6 +191,7 @@ fn insert_memory(conn: &Connection, ns: &str, title: &str, depth: i32, kind: Mem
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(conn, &m).expect("insert")
 }

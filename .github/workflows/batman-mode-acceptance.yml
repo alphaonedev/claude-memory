@@ -1,0 +1,194 @@
+name: Batman Mode acceptance gate
+
+# Issue #800 / Gap #2 — hard CI gate for the Form 7 signature round-trip
+# + the Batman Mode activation surface.
+#
+# This workflow exists because the v0.7.0 ship campaign had a critical
+# Form 7 governance bypass (canonical-bytes mismatch between rules add /
+# enable / disable signers and verify_rule_signature) that lived for
+# ~24 hours post-tag. The bypass was undetectable from the existing CI
+# matrix because no test exercised the full enable-then-check round-trip
+# through the CLI binary against a fresh DB.
+#
+# This gate runs:
+#   1. tests/issue_800_batman_mode.rs       — Rust integration tests
+#                                              that pin the signature
+#                                              round-trip, the namespace
+#                                              CLI verb, and the
+#                                              end-to-end refuse path.
+#   2. scripts/test/test-batman-mode-suite.sh — bash integration test
+#                                              that drives the install
+#                                              script + acceptance suite
+#                                              + warmup against a temp
+#                                              DB.
+#
+# Hard-fails any PR touching the load-bearing surfaces:
+#   - src/governance/**          (the substrate-side rules engine)
+#   - src/cli/rules.rs           (the signer paths fixed in PR #801)
+#   - src/cli/namespace.rs       (the new namespace CLI verb)
+#   - src/mcp/tools/namespace.rs (the MCP handlers the CLI wraps)
+#   - scripts/install-batman-active.{sh,ps1}
+#   - scripts/batman-mode-acceptance.{sh,ps1}
+#   - scripts/batman-warmup.sh
+#   - scripts/batman-bench.sh
+#   - scripts/templates/**
+#   - scripts/docker/**
+#   - tests/issue_800_batman_mode.rs
+#
+# Also runs on every PR to main/develop/release branches to catch
+# tertiary regressions where a refactor in src/governance/ breaks the
+# round-trip without touching the immediate file list.
+
+on:
+  pull_request:
+    branches: [main, develop, "release/**", "feat/**"]
+    paths:
+      - 'src/governance/**'
+      - 'src/cli/rules.rs'
+      - 'src/cli/namespace.rs'
+      - 'src/cli/mod.rs'
+      - 'src/daemon_runtime.rs'
+      - 'src/mcp/tools/namespace.rs'
+      - 'src/mcp/tools/persona.rs'
+      - 'scripts/install-batman-active.sh'
+      - 'scripts/install-batman-active.ps1'
+      - 'scripts/batman-mode-acceptance.sh'
+      - 'scripts/batman-mode-acceptance.ps1'
+      - 'scripts/batman-warmup.sh'
+      - 'scripts/batman-bench.sh'
+      - 'scripts/test/test-batman-mode-suite.sh'
+      - 'scripts/templates/**'
+      - 'scripts/docker/**'
+      - 'tests/issue_800_batman_mode.rs'
+      - 'tests/form_7_agent_external_wiring.rs'
+      - '.github/workflows/batman-mode-acceptance.yml'
+  push:
+    branches: [main, develop, "release/**"]
+  # v0.7.0 issue #807 — nightly run against develop regardless of
+  # path filter. Catches cross-module refactors that drift the
+  # canonical-bytes shape without touching the immediate file
+  # allowlist. Mirrors the contract documented in
+  # .github/branch-protection.yml::nightly_schedule.
+  schedule:
+    - cron: "0 8 * * *"  # 08:00 UTC daily
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-integration:
+    name: Rust integration (issue_800_batman_mode)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: batman-mode-acceptance
+      - name: Build release binary
+        run: cargo build --release --bin ai-memory
+      - name: Run Batman Mode regression tests
+        env:
+          AI_MEMORY_NO_CONFIG: '1'
+        run: cargo test --release --test issue_800_batman_mode -- --test-threads=1
+      - name: Run Form 7 agent-EXTERNAL wiring tests (regression cordon)
+        env:
+          AI_MEMORY_NO_CONFIG: '1'
+        run: cargo test --release --test form_7_agent_external_wiring -- --test-threads=1
+      - name: Assert binary refuses /tmp write under R001 end-to-end
+        run: |
+          set -euo pipefail
+          mkdir -p .local-runs/ci-form7
+          DB=.local-runs/ci-form7/test.db
+          BIN=target/release/ai-memory
+          # bootstrap schema
+          $BIN --db "$DB" store --title init --content init --tier mid --namespace ci-form7 >/dev/null
+          # generate key + sign + enable
+          export AI_MEMORY_KEY_DIR=.local-runs/ci-form7/keys
+          mkdir -p "$AI_MEMORY_KEY_DIR"
+          $BIN rules keygen --key-dir "$AI_MEMORY_KEY_DIR" --out "$AI_MEMORY_KEY_DIR/operator.key" 2>&1 | tail -3
+          $BIN --db "$DB" rules sign-seed --key-dir "$AI_MEMORY_KEY_DIR" 2>&1 | tail -3
+          $BIN --db "$DB" rules enable --key-dir "$AI_MEMORY_KEY_DIR" --id R001 --sign 2>&1 | tail -3
+          # the load-bearing assert: this MUST return refuse
+          OUT=$($BIN --db "$DB" --json rules check --kind filesystem_write \
+              --payload '{"path":"/tmp/ci-test"}' --agent-id ci 2>&1 | grep -v '^ai-memory: loaded' || true)
+          echo "rules check output: $OUT"
+          echo "$OUT" | python3 -c "
+          import sys, json
+          d = json.loads(sys.stdin.read())
+          if d.get('result', {}).get('decision') != 'refuse':
+              print(f'FAIL: expected refuse, got {d}')
+              sys.exit(1)
+          print('PASS: Form 7 enforcement live (refuse via {})'.format(d['result'].get('rule_id')))
+          "
+
+  bash-integration:
+    name: Bash integration (test-batman-mode-suite.sh)
+    runs-on: ubuntu-latest
+    needs: rust-integration
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: batman-mode-acceptance
+      - name: Install sqlite3 + jq
+        run: sudo apt-get update && sudo apt-get install -y sqlite3 jq
+      - name: Build release binary + install to PATH
+        run: |
+          cargo build --release --bin ai-memory
+          mkdir -p "$HOME/.local/bin"
+          cp target/release/ai-memory "$HOME/.local/bin/ai-memory"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Run Batman Mode bash integration suite (quick mode)
+        run: bash scripts/test/test-batman-mode-suite.sh --quick
+        timeout-minutes: 10
+      - name: Upload .local-runs artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: batman-suite-runs
+          path: .local-runs/batman-suite-*/
+          retention-days: 7
+
+  # Drift catcher — if anyone removes or renames the load-bearing
+  # functions the integration tests depend on, this job catches it
+  # before the test fails with a confusing rustc error.
+  surface-stability:
+    name: Surface stability (load-bearing symbols)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Assert load-bearing symbols are present
+        run: |
+          set -euo pipefail
+          missing=0
+          check() {
+              local pat="$1" desc="$2"
+              if ! grep -qE "$pat" $(git ls-files 'src/**/*.rs'); then
+                  echo "::error::missing symbol: $desc (regex: $pat)"
+                  missing=$((missing + 1))
+              else
+                  echo "OK: $desc"
+              fi
+          }
+          # The functions PR #801 fixed
+          check 'pub fn canonical_bytes_for_signing' 'canonical_bytes_for_signing exists (sign + verify must agree)'
+          check 'pub fn verify_rule_signature' 'verify_rule_signature exists'
+          check 'pub fn enforced_rule_passes' 'enforced_rule_passes exists (L1-6 gate)'
+          # The new namespace CLI verb surface
+          check 'pub mod namespace' 'cli/namespace.rs module exists'
+          check 'pub enum NamespaceAction' 'NamespaceAction enum exists'
+          check 'SetStandard' 'NamespaceAction::SetStandard variant exists'
+          check 'BatmanPolicy' 'NamespaceAction::BatmanPolicy variant exists'
+          # The MCP handlers the CLI wraps
+          check 'pub fn handle_namespace_set_standard' 'handle_namespace_set_standard MCP entry exists'
+          if [ "$missing" -gt 0 ]; then
+              echo "::error::$missing load-bearing symbol(s) missing — Batman Mode CI gate will fail downstream"
+              exit 1
+          fi

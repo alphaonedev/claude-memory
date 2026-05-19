@@ -254,10 +254,12 @@ At the `semantic` tier and above, ai-memory downloads a sentence-transformer mod
 | `ttl.short_ttl_secs` | Integer | `21600` (6 hours) | `0` = never expires, or positive integer | TTL for short-tier memories in seconds |
 | `ttl.mid_ttl_secs` | Integer | `604800` (7 days) | `0` = never expires, or positive integer | TTL for mid-tier memories in seconds |
 | `ttl.long_ttl_secs` | Integer | `0` (never expires) | `0` = never expires, or positive integer | TTL for long-tier memories in seconds |
-| `ttl.short_extend_secs` | Integer | `3600` (1 hour) | Non-negative integer | TTL extension on access for short-tier memories |
-| `ttl.mid_extend_secs` | Integer | `86400` (1 day) | Non-negative integer | TTL extension on access for mid-tier memories |
+| `ttl.short_extend_secs` | Integer | `3600` (1 hour) | Non-negative integer | Per-access TTL window for short-tier memories. **Sliding-window REPLACEMENT semantic** (not max-of-old-and-new extend): on every access, `expires_at = now + short_extend_secs`. The create-time `short_ttl_secs` (6h default) is only a backstop until first access. |
+| `ttl.mid_extend_secs` | Integer | `86400` (1 day) | Non-negative integer | Per-access TTL window for mid-tier memories. **Sliding-window REPLACEMENT semantic** (not extend): on every access, `expires_at = now + mid_extend_secs`. The create-time `mid_ttl_secs` (7d default) is only a backstop until first access. |
 
 > **Note:** Set any TTL to `0` to disable expiry for that tier. Values are clamped to a 10-year maximum (315,360,000 seconds). Negative extension values are clamped to 0.
+
+> **Sliding-window REPLACEMENT (CLAUDE.md prime-directive contract, issue [#830](https://github.com/alphaonedev/ai-memory-mcp/issues/830)):** the `*_extend_secs` fields are misnamed historically — the implementation does NOT take `max(old_expires_at, now + extend_secs)`. Each access REPLACES `expires_at` outright with `now + per-tier-extend_secs`. A short memory accessed every 30 minutes never expires, even though it started with a 6h backstop. The field-name "extend" is preserved for backward-compat with v0.6.x callers and config files.
 
 > **Note:** Restored memories have their `expires_at` cleared (set to NULL) and become permanent.
 
@@ -386,11 +388,11 @@ The MCP server's tool surface is selected by `--profile`. Profiles compose tool 
 
 | Profile | Advertised tools | Use when |
 |---|---|---|
-| `core` (default) | 5 + bootstrap | Eager-loading harnesses where every kilobyte of `tools/list` schema costs input tokens (Claude Desktop / Codex CLI / Grok CLI / Gemini CLI). |
+| `core` (default) | **7 + bootstrap at v0.7.0** (the original 5 + `memory_load_family` + `memory_smart_load`) | Eager-loading harnesses where every kilobyte of `tools/list` schema costs input tokens (Claude Desktop / Codex CLI / Grok CLI / Gemini CLI). |
 | `graph` | core + KG family | Agents that walk `memory_link` / `memory_get_links` / `memory_kg_query` / `memory_find_paths`. |
 | `admin` | core + governance + audit | Operator sessions doing `memory_governance_*`, `memory_audit_*`, archive purges. |
 | `power` | core + smart-tier LLM tools | Smart/autonomous tier deployments that want `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction` always available. |
-| `full` | every family — 43 tools | Pre-v0.6.4 behavior 1:1, plus v0.7 additions. |
+| `full` | every family — **71 advertised entries at v0.7.0** (70 callable memory tools + the always-on `memory_capabilities` bootstrap; both numbers are intentional, see issue [#862](https://github.com/alphaonedev/ai-memory-mcp/issues/862)) | Pre-v0.6.4 behavior 1:1, plus v0.7 additions. Canonical count asserted by `Profile::full().expected_tool_count()` in `src/profile.rs`. |
 
 **v0.7 always-on additions:** `memory_load_family(family)` and `memory_smart_load(intent)` are advertised under every profile. They register additional families at runtime without restarting the MCP server — preferred over re-launching with a wider `--profile` for short-lived expansions. The pinned phrasings the agent sees for these recovery paths live in [`v0.7/canonical-phrasings.md`](v0.7/canonical-phrasings.md).
 
@@ -910,9 +912,58 @@ When `sync-daemon` is invoked without `--client-cert`, the underlying reqwest cl
 
 #### Any valid mTLS peer can dump the full database (issue #239)
 
-`GET /api/v1/sync/since?since=<old-ts>` paginates the entire database. By design — the trust boundary IS the mTLS cert — but the implication is that **a compromised peer cert grants access to every memory**, including `scope: private` memories from other agents' namespaces. Sync endpoints bypass the per-memory visibility filtering used by `/recall`.
+> **OPERATOR ADVISORY — mTLS certificates are full trust anchors.**
+> A compromised peer cert grants access to **every memory in the
+> database**. The sync substrate's threat model trusts the cert and
+> stops there. There is no per-memory authorization layer behind it.
 
-**Allowlist only peers you fully trust.** Per-namespace / per-scope sync filtering is a Phase 5 feature (post-v0.6.0).
+`GET /api/v1/sync/since?since=<old-ts>` (or omit `since` to start from
+the epoch) paginates the **entire database**, including:
+
+- `scope: private` memories from other agents' namespaces
+- Memories that `/recall` would have filtered for visibility
+- Memories with `agent_id` belonging to other principals
+- Operator-signed governance rules (the `governance_rules` table is
+  exposed for federation parity)
+- Reflection chains and persona artifacts
+
+This is **documented and intentional** — the trust boundary IS the
+mTLS cert. Sync endpoints deliberately bypass the per-memory
+visibility filtering used by `/recall` because federation needs the
+full row to merge correctly (CRDT-style). The implication is the
+operator must treat every entry on the `--mtls-allowlist` as a
+full-database read principal.
+
+**Required operator discipline:**
+
+1. **Allowlist only peers you fully trust at the database level.**
+   Treat each fingerprint as "this principal can read everything".
+   Do not allowlist peers operated by other tenants, other security
+   zones, or other regulatory contexts.
+2. **Compromise model: a peer cert leak == full DB leak.** Plan for
+   cert rotation if a peer host is compromised. SHA-256 fingerprints
+   are easy to rotate (`openssl x509 -outform DER | sha256sum` →
+   replace the line in the allowlist file → SIGHUP `serve`).
+3. **Per-host cert separation.** Issue a distinct client cert per
+   peer host (not a wildcard CA-signed cert that any host could
+   reissue from). This narrows the blast radius of a single host
+   compromise to that host's fingerprint.
+4. **Audit the allowlist on every deployment.** The fingerprint set
+   is the security perimeter — review it the same way you'd review a
+   firewall rule.
+5. **Cross-tenant separation requires separate databases.** If two
+   tenants need isolated memory but want federation within each
+   tenant, run two `ai-memory serve` processes on different ports
+   with non-overlapping `--mtls-allowlist` files. The sync substrate
+   does not enforce namespace-level tenancy across mTLS peers.
+
+**Roadmap to per-namespace / per-scope sync filtering.** Per-memory
+visibility filtering on `/sync/since` is a Phase 5 hub feature
+(post-v0.7.0, tracked under [#311](https://github.com/alphaonedev/ai-memory-mcp/issues/311)
+for the targeted-share variant and under [#717](https://github.com/alphaonedev/ai-memory-mcp/issues/717)
+for cert-SAN agent-id attestation). v0.7.0 ships the mTLS full-trust
+model documented above as the canonical disposition for the
+`alphaonedev/ai-memory-mcp` v0.7.0 release line.
 
 #### Body-claimed sender_agent_id is not yet attested (issue #238)
 
@@ -974,7 +1025,7 @@ Both are cleaned up on graceful shutdown (the daemon runs `PRAGMA wal_checkpoint
 
 Maximum request body size: 50 MB.
 
-The HTTP daemon exposes **50 endpoints** under `/api/v1`:
+The HTTP daemon exposes **72 routes** at v0.7.0 (canonical count via `grep -cE "^\s*\.route\(" src/lib.rs`; the table below lists the high-traffic surfaces — see [`docs/API_REFERENCE.md`](API_REFERENCE.md) for the complete enumeration):
 
 | Method | Path | Description |
 |--------|------|-------------|

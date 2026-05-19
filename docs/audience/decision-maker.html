@@ -1,0 +1,214 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+  Audience page: decision-maker — issue #832.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>ai-memory for decision makers &mdash; value, risk, cost, roadmap</title>
+<meta name="description" content="ai-memory for product, PM, exec: what problem this solves, measured comparison to vector-DB-only, risk profile, total cost, roadmap v0.7 to v1.0.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/audience/decision-maker.html">
+<style>
+:root{--bg:#0a0a0a;--panel:#121212;--border:#262626;--border-hi:#3a3a3a;--text:#f5f5f5;--muted:#9a9a9a;--dim:#6b6b6b;--accent:#6ee7ff;--warn:#ffb86b;--good:#7cd992;--code-bg:#161616;--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;--font-mono:"SF Mono","JetBrains Mono","Cascadia Code",Consolas,monospace;--w-mid:840px;--w-wide:1080px}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--text);font-family:var(--font-sans);line-height:1.65;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+code,pre{font-family:var(--font-mono);font-size:.88rem}
+code{background:var(--code-bg);padding:.1em .35em;border-radius:3px;color:#d4d4d4}
+pre{background:var(--code-bg);border:1px solid var(--border);border-radius:6px;padding:1rem 1.15rem;overflow-x:auto;line-height:1.55;margin:1rem 0}
+.wrap-mid{max-width:var(--w-mid);margin:0 auto;padding:0 1.5rem}
+.topnav{border-bottom:1px solid var(--border);position:sticky;top:0;background:rgba(10,10,10,.92);backdrop-filter:blur(8px);z-index:50}
+.topnav .row{display:flex;align-items:center;justify-content:space-between;padding:1rem 1.5rem;max-width:var(--w-wide);margin:0 auto;font-size:.9rem}
+.topnav .brand{color:var(--text);font-weight:600}
+.topnav .links{display:flex;gap:1.5rem}
+.topnav .links a{color:var(--muted)}
+.topnav .links a:hover{color:var(--text);text-decoration:none}
+.crumb{padding:1.25rem 1.5rem 0;max-width:var(--w-mid);margin:0 auto;color:var(--dim);font-size:.82rem;font-family:var(--font-mono)}
+.crumb a{color:var(--muted)}
+.hero{padding:3rem 0 2.5rem}
+.hero .eyebrow{font-family:var(--font-mono);font-size:.72rem;letter-spacing:.18em;color:var(--accent);text-transform:uppercase;margin-bottom:1rem}
+.hero h1{font-size:2.2rem;font-weight:700;letter-spacing:-.025em;line-height:1.15;margin-bottom:1.25rem}
+.hero .lede{font-size:1.1rem;color:var(--muted);max-width:680px;line-height:1.6}
+section{padding:3rem 0;border-top:1px solid var(--border)}
+.eyebrow-h2{font-family:var(--font-mono);font-size:.7rem;letter-spacing:.18em;color:var(--dim);text-transform:uppercase;margin-bottom:.5rem}
+h2{font-size:1.5rem;font-weight:700;letter-spacing:-.015em;margin-bottom:1rem}
+h3{font-size:1.05rem;font-weight:600;margin:1.75rem 0 .5rem;color:var(--text)}
+p{color:var(--muted);margin-bottom:1rem;max-width:680px}
+p.lede{color:var(--text);font-size:1rem}
+ul,ol{color:var(--muted);margin:0 0 1rem 1.5rem}
+li{margin-bottom:.4rem}
+.cmp{width:100%;border-collapse:collapse;margin:1.5rem 0;font-size:.9rem}
+.cmp th,.cmp td{padding:.75rem 1rem;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
+.cmp th{background:var(--panel);color:var(--muted);font-weight:600;font-size:.78rem;text-transform:uppercase;letter-spacing:.08em}
+.cmp td:first-child{color:var(--text);font-weight:600}
+.cmp .yes{color:var(--good)}
+.cmp .no{color:var(--dim)}
+.cmp .meh{color:var(--warn)}
+.callout{border-left:3px solid var(--accent);padding:1rem 1.25rem;background:rgba(110,231,255,.04);border-radius:0 6px 6px 0;margin:1.5rem 0;font-size:.92rem}
+.callout strong{color:var(--text)}
+.risk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:1rem;margin:1.5rem 0}
+.risk{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:1.25rem}
+.risk h4{font-size:.9rem;color:var(--accent);font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.5rem;font-weight:700}
+.risk p{font-size:.88rem;margin:0;color:var(--muted)}
+.timeline{margin:1.5rem 0;padding-left:1.5rem;border-left:2px solid var(--border)}
+.timeline .tl-item{position:relative;padding-left:1.25rem;margin-bottom:1.5rem}
+.timeline .tl-item::before{content:'';position:absolute;left:-1.65rem;top:.45rem;width:.6rem;height:.6rem;background:var(--accent);border-radius:50%}
+.timeline .tl-item h4{font-size:1rem;color:var(--text);margin-bottom:.25rem}
+.timeline .tl-item .when{font-family:var(--font-mono);font-size:.75rem;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.35rem}
+.timeline .tl-item p{font-size:.9rem;margin:0;color:var(--muted)}
+footer{padding:3rem 0;border-top:1px solid var(--border);color:var(--dim);font-size:.82rem;text-align:center}
+footer a{color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:.6rem;margin:1.5rem 0}
+.next a{display:block;padding:.85rem 1rem;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.9rem;transition:border-color .15s}
+.next a:hover{border-color:var(--accent);text-decoration:none}
+.next a .desc{display:block;color:var(--muted);font-size:.78rem;margin-top:.2rem;font-weight:400}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="row">
+    <a class="brand" href="../">ai-memory</a>
+    <div class="links">
+      <a href="../#install">Install</a>
+      <a href="operator.html">Operator</a>
+      <a href="developer.html">Developer</a>
+      <a href="decision-maker.html" style="color:var(--text)">Decision</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<div class="crumb"><a href="../">ai-memory</a> &nbsp;/&nbsp; audience &nbsp;/&nbsp; decision maker</div>
+
+<header class="hero wrap-mid">
+  <div class="eyebrow">For product / PM / exec</div>
+  <h1>Evaluate ai-memory.</h1>
+  <p class="lede">AI agents forget everything between sessions; vector databases store text but not meaning, identity, or governance. ai-memory is the substrate layer that gives autonomous AI agents persistent typed memory, a knowledge graph, and operator-signed governance rules &mdash; in a single Apache-2.0 Rust binary, deployable on a laptop or a fleet.</p>
+</header>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">The problem</div>
+  <h2>AI agents have no memory and no identity.</h2>
+  <p>Off-the-shelf, an LLM call is stateless. Conversation history is reconstructed token by token on every turn, which is expensive, error-prone, and forgets again once the context window rolls over. Most teams reach for a vector database; that buys text similarity search but nothing else &mdash; no typed memory, no temporal validity, no signed audit trail, no operator policy, no identity for the AI itself.</p>
+  <p>For real autonomous AI Non-Human Identity (NHI) agents &mdash; agents that act on behalf of an org, with persistence across sessions, multiple subordinate agents, and policy that survives a model swap &mdash; you need a substrate, not a similarity index.</p>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">The comparison</div>
+  <h2>ai-memory vs. vector-DB-only.</h2>
+  <table class="cmp">
+    <thead><tr><th>Capability</th><th>Vector DB only</th><th>ai-memory</th></tr></thead>
+    <tbody>
+      <tr><td>Semantic similarity search</td><td class="yes">Yes</td><td class="yes">Yes (hybrid: FTS5 + cosine)</td></tr>
+      <tr><td>Typed memory kinds</td><td class="no">No</td><td class="yes">15+ kinds, governed taxonomy</td></tr>
+      <tr><td>Knowledge graph with temporal validity</td><td class="no">No</td><td class="yes">Apache AGE, <code>valid_from</code> / <code>valid_until</code></td></tr>
+      <tr><td>Ed25519-signed memory links</td><td class="no">No</td><td class="yes">Per-link attest_level</td></tr>
+      <tr><td>Operator-signed substrate rules</td><td class="no">No</td><td class="yes">L1&ndash;L6, key on disk</td></tr>
+      <tr><td>HMAC-required event subscriptions</td><td class="no">No</td><td class="yes">SSRF gate by default</td></tr>
+      <tr><td>NHI agent_id semantics</td><td class="no">No</td><td class="yes">Resolution ladder, preservation invariants</td></tr>
+      <tr><td>Autonomous tier (consolidate / contradict / auto-tag)</td><td class="no">No</td><td class="yes">LLM-backed, local Ollama or remote</td></tr>
+      <tr><td>Single binary, zero cloud dependency</td><td class="meh">Often hosted</td><td class="yes">Single Rust binary, sqlite default</td></tr>
+      <tr><td>Apache-2.0</td><td class="meh">Mixed</td><td class="yes">Yes</td></tr>
+    </tbody>
+  </table>
+  <p>The comparison is not "ai-memory replaces your vector DB"; it is "ai-memory gives you the substrate that <em>holds</em> a vector DB if you want one, plus 9 things a vector DB cannot give you alone."</p>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">Risk profile</div>
+  <h2>What you are signing up for.</h2>
+  <div class="risk-grid">
+    <div class="risk"><h4>License risk</h4><p>Apache-2.0. No copyleft. No CLA. Permits commercial embedding.</p></div>
+    <div class="risk"><h4>Vendor lock-in</h4><p>Storage layer is SQLite (the world's most-deployed database). Export to JSONL or PostgreSQL+AGE is first-class. No proprietary format.</p></div>
+    <div class="risk"><h4>Supply chain</h4><p>Rust, <code>cargo audit</code> required to be clean as a release gate. Binary is statically linkable; reproducible builds are on the v1.0 roadmap.</p></div>
+    <div class="risk"><h4>Security posture</h4><p>v0.7.0 secure-default: permissions enforced by default, SSRF gate on webhooks, signed audit chain, HMAC subscriptions, optional sqlcipher for at-rest encryption.</p></div>
+    <div class="risk"><h4>Operational risk</h4><p>One process, one DB file. Failure modes are SQLite failure modes (well-understood). Migrations dry-run-tested by the maintainer dogfood loop before every release tag.</p></div>
+    <div class="risk"><h4>Project maturity</h4><p>v0.7.0 is the third major release. 71 MCP entries at <code>--profile full</code>, 72 HTTP routes, ~50 CLI subcommands. Test campaigns are reproducible and publicly logged under <code>docs/v0.7.0/test-campaign-*</code>.</p></div>
+  </div>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">Total cost</div>
+  <h2>What it actually costs to run.</h2>
+  <ul>
+    <li><strong>License: $0.</strong> Apache-2.0, perpetual.</li>
+    <li><strong>Hosting: $0 to whatever you spend on the host.</strong> Single binary. Runs on a developer laptop; runs on a $5/mo VPS; runs on a multi-region fleet. No mandatory cloud.</li>
+    <li><strong>Infrastructure: SQLite or Postgres+AGE.</strong> SQLite is bundled. Postgres+AGE is optional for the T3+ graph backend.</li>
+    <li><strong>Ops: one process to monitor.</strong> Standard <code>tracing</code> output, append-only audit chain, capabilities endpoint for health checks.</li>
+    <li><strong>LLM cost: optional and local-first.</strong> Smart and autonomous tiers integrate with Ollama (local, free) or any OpenAI-compatible endpoint. Keyword and semantic tiers need no LLM.</li>
+  </ul>
+  <p>There is no SaaS billing surface. The only cost you incur is your own hosting and (optionally) your own LLM call budget.</p>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">Roadmap</div>
+  <h2>Where this is going.</h2>
+  <div class="timeline">
+    <div class="tl-item">
+      <div class="when">v0.7.0 &mdash; attested-cortex (shipping)</div>
+      <h4>Ed25519 attestation chain + 20-event hook pipeline + Apache AGE acceleration.</h4>
+      <p>Per-agent signed events, programmable hooks, operator-signed substrate rules L1&ndash;L6, capabilities v3, real permission system. 6/6 PASS on the NHI Discovery Gate vs. live xAI Grok 4.3.</p>
+    </div>
+    <div class="tl-item">
+      <div class="when">v0.8.x &mdash; planned</div>
+      <h4>Federated quorum sync hardening, SDK polish, multi-tenant HTTP scaling.</h4>
+      <p>Cross-region replication discipline, signed-link verifiers, first-class Python and TypeScript SDKs, lock-contention work on the shared mutex.</p>
+    </div>
+    <div class="tl-item">
+      <div class="when">v1.0 &mdash; targeted</div>
+      <h4>Wire-format stability, reproducible builds, SOC 2-friendly audit packaging.</h4>
+      <p>Frozen MCP tool + HTTP API contract, reproducible-build verification, evidence-pack tooling for compliance auditors.</p>
+    </div>
+  </div>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">Who is using it</div>
+  <h2>The dogfooders.</h2>
+  <p>ai-memory is dogfooded by the maintainer's own multi-agent Claude Code workflow (the same workflow that builds every release). Every <code>release/v0.7.x.y</code> branch sits in real use for at least 24 hours against the operator's live MCP database before a tag cuts. Migration round-trips (now through schema v43) are tested against the operator's own DB on every commit. The project is also exercised by the IronClaw A2A 4-domain campaign on Docker against xAI Grok 4.3.</p>
+  <p>External adoption is intentionally early-and-honest; if you are evaluating for production, the recommended path is to dogfood it against a non-critical agent first and reach out via GitHub issues for any gaps.</p>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">Test results</div>
+  <h2>The evidence behind SHIP.</h2>
+  <p>Every release ships with a public test campaign directory: pinned binary SHA, every test in expected-vs-actual form, every issue closed with retest evidence. The latest campaign (2026-05-18, Track A NHI re-run) returned SHIP on 85 PASS / 0 FAIL across 12 phases with 10 issues fixed in-campaign &mdash; no deferrals to v0.7.1.</p>
+  <div class="next">
+    <a href="../v0.7.0/test-campaign-2026-05-18/"><strong>Latest campaign index</strong><span class="desc">2026-05-18 &middot; SHIP-recommended</span></a>
+    <a href="../v0.7.0/test-campaign-2026-05-18/audience-c-level.md"><strong>For decision-makers</strong><span class="desc">Verdict, risk profile, cost, vector-DB comparison, scope honesty</span></a>
+    <a href="../v0.7.0/test-campaign-2026-05-18/audience-non-technical.md"><strong>For non-technical readers</strong><span class="desc">Plain-English version &mdash; what it does, what it means</span></a>
+    <a href="../v0.7.0/test-campaign-2026-05-18/audience-sme-engineer.md"><strong>For SME engineers</strong><span class="desc">Full reproducibility + six-level provenance maturity</span></a>
+  </div>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">Next</div>
+  <h2>If you want to dig deeper.</h2>
+  <div class="next">
+    <a href="../essays/brass-tacks-1-what.html"><strong>What ai-memory is</strong><span class="desc">60-second essay</span></a>
+    <a href="../essays/brass-tacks-3-why.html"><strong>Why it beats vector-DB-only</strong><span class="desc">With measured numbers</span></a>
+    <a href="../v0.7.0/release-notes.md"><strong>v0.7.0 release notes</strong><span class="desc">Detailed changelog</span></a>
+    <a href="../v0.7.0/test-campaign-2026-05-18/"><strong>Latest test campaign</strong><span class="desc">2026-05-18 SHIP evidence</span></a>
+    <a href="../SECURITY.md"><strong>Security posture</strong><span class="desc">Threat model</span></a>
+    <a href="../positioning.md"><strong>Positioning</strong><span class="desc">Where this fits</span></a>
+    <a href="operator.html"><strong>Operator path</strong><span class="desc">For your SRE team</span></a>
+    <a href="developer.html"><strong>Developer path</strong><span class="desc">For your engineers</span></a>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap-mid">
+    <a href="../">&larr; back to ai-memory</a> &middot;
+    <a href="https://github.com/alphaonedev/ai-memory-mcp">source</a> &middot;
+    Apache-2.0 &middot; &copy; 2026 AlphaOne LLC
+  </div>
+</footer>
+
+</body>
+</html>

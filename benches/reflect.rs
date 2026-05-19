@@ -64,6 +64,10 @@ fn make_memory(namespace: &str, title: &str) -> Memory {
         metadata: serde_json::json!({"agent_id": "bench-agent"}),
         reflection_depth: 0,
         memory_kind: ai_memory::models::MemoryKind::Observation,
+        // Remaining Memory fields (citations, confidence_*, mentioned_
+        // entity_id, source_*, persona/atom fields) take their Default
+        // values — none are read by the reflect benchmark path.
+        ..Memory::default()
     }
 }
 

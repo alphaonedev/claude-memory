@@ -112,18 +112,49 @@ pub(super) fn handle_promote(
         }));
     }
 
-    // Default: tier promotion to long (historical behavior).
+    // Default: tier promotion to long (historical behavior). Issue #831
+    // — accept an optional `target_tier` parameter so callers can land
+    // on `mid` as an intermediate step instead of jumping straight to
+    // `long`. Omitting `target_tier` preserves the historical
+    // highest-reachable-tier behaviour (short→long / mid→long in a
+    // single call), which the v0.7.0 CLAUDE.md docs pin under
+    // "Data Model" + "Recall Pipeline → Touch operations".
+    let target_tier = match params["target_tier"].as_str() {
+        None => Tier::Long,
+        Some("long") => Tier::Long,
+        Some("mid") => Tier::Mid,
+        Some("short") => {
+            return Err(
+                "target_tier 'short' is not a valid promote target (would be a downgrade)".into(),
+            );
+        }
+        Some(other) => {
+            return Err(format!(
+                "target_tier must be one of 'mid' or 'long' (got '{other}')"
+            ));
+        }
+    };
+    // Mid-tier promotions must KEEP a live expires_at (mid is a
+    // 7-day-TTL bucket, not permanent). `db::update`'s expires_at
+    // contract: `Some("")` clears, `None` preserves the existing
+    // value. Long is permanent → clear. Mid → preserve whatever
+    // expiry the row already had (the upstream touch path is what
+    // refreshes it).
+    let expires_at_arg: Option<&str> = match target_tier {
+        Tier::Long => Some(""),          // empty string clears expires_at
+        Tier::Mid | Tier::Short => None, // preserve existing expiry
+    };
     let (found, _) = db::update(
         conn,
         &resolved_id,
         None,
         None,
-        Some(&Tier::Long),
+        Some(&target_tier),
         None,
         None,
         None,
         None,
-        Some(""), // empty string clears expires_at
+        expires_at_arg,
         None,
     )
     .map_err(|e| e.to_string())?;
@@ -131,10 +162,13 @@ pub(super) fn handle_promote(
         return Err("memory not found".into());
     }
     // P5 (G9): fire `memory_promote` webhook for the default tier-upgrade
-    // path AFTER the update commits.
+    // path AFTER the update commits. The webhook `tier` field reflects
+    // the requested target (long by default, or whatever `target_tier`
+    // resolved to).
+    let tier_str = target_tier.as_str().to_string();
     let details = serde_json::to_value(crate::subscriptions::PromoteEventDetails {
         mode: "tier".to_string(),
-        tier: Some("long".to_string()),
+        tier: Some(tier_str.clone()),
         to_namespace: None,
         clone_id: None,
     })
@@ -148,7 +182,7 @@ pub(super) fn handle_promote(
         db_path,
         details,
     );
-    Ok(json!({"promoted": true, "mode": "tier", "id": resolved_id, "tier": "long"}))
+    Ok(json!({"promoted": true, "mode": "tier", "id": resolved_id, "tier": tier_str}))
 }
 
 // ---- C-5 (#699): close lib-tier gaps in promote.rs (currently 93.39%).

@@ -71,6 +71,7 @@ fn seed_one(db: &Path, namespace: &str, title: &str, content: &str) -> String {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(&conn, &mem).expect("db::insert")
 }

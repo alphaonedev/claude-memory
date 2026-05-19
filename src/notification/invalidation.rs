@@ -254,6 +254,7 @@ fn write_notification(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
 
     crate::storage::insert(conn, &mem)?;
@@ -339,6 +340,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 

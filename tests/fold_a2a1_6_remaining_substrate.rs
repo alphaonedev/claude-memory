@@ -64,14 +64,8 @@ use ai_memory::store::postgres::PostgresStore;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, RwLock};
 
-fn postgres_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-}
-
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    listener.local_addr().expect("local_addr").port()
-}
+mod common;
+use common::{free_port, postgres_url};
 
 #[derive(Clone)]
 struct MockPeer {
@@ -155,6 +149,7 @@ fn federation_cfg_for_test(peer_urls: &[String], quorum_writes: usize) -> Federa
         client,
         sender_agent_id: "ai:fold-a2a1-6-test".to_string(),
         api_key: None,
+        signing_key: None,
     }
 }
 
@@ -185,6 +180,9 @@ async fn build_postgres_app_state(url: &str, federation: Option<FederationConfig
         llm_call_timeout: Duration::from_secs(30),
         replay_cache: Arc::new(ai_memory::identity::replay::ReplayCache::default()),
         verify_require_nonce: false,
+        federation_nonce_cache: std::sync::Arc::new(
+            ai_memory::identity::replay::FederationNonceCache::default(),
+        ),
         autonomous_hooks: false,
         recall_scope: Arc::new(None),
         deferred_audit_queue: Arc::new(None),

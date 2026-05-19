@@ -1,6 +1,6 @@
 # Installation Guide
 
-> **BLUF (Bottom Line Up Front):** `ai-memory` is an AI-agnostic memory management system that works with **any MCP-compatible AI client** -- including Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, OpenClaw, and others. Install the binary, configure your AI client's MCP settings, and you get **43 MCP memory tools** instantly. The default `semantic` tier includes embedding-based hybrid recall out of the box. Total time: ~60 seconds (pre-built binary + fast internet; first semantic-tier run also downloads a ~100MB embedding model).
+> **BLUF (Bottom Line Up Front):** `ai-memory` is an AI-agnostic memory management system that works with **any MCP-compatible AI client** -- including Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, OpenClaw, and others. Install the binary, configure your AI client's MCP settings, and you get **7 MCP memory tools at the default `--profile core`** (or 71 advertised entries at `--profile full` — 70 callable memory tools + the always-on `memory_capabilities` bootstrap) at v0.7.0. The default `semantic` tier includes embedding-based hybrid recall out of the box. Total time: ~60 seconds (pre-built binary + fast internet; first semantic-tier run also downloads a ~100MB embedding model).
 
 ## Install in 60 Seconds (pre-built binary + fast internet)
 
@@ -49,6 +49,19 @@
    sudo rpm -i ai-memory-0.5.1-1.x86_64.rpm    # or aarch64
    ```
 
+   **Arch Linux (AUR — v0.7.0 Gap #3 / issue #804):**
+   ```bash
+   # via your favourite AUR helper (paru / yay / aurutils):
+   paru -S ai-memory
+   # or build from the in-repo PKGBUILD:
+   git clone https://github.com/alphaonedev/ai-memory-mcp.git
+   cd ai-memory-mcp/packaging/aur
+   makepkg -si
+   ```
+   The PKGBUILD lives at `packaging/aur/PKGBUILD` and is reviewable in
+   the source tree. The submitted AUR slot is `ai-memory` (operator
+   ownership; upstream submission tracked in #804).
+
    **Docker:**
    ```bash
    docker build -t ai-memory https://github.com/alphaonedev/ai-memory-mcp.git
@@ -59,6 +72,26 @@
    ```bash
    cargo install --git https://github.com/alphaonedev/ai-memory-mcp.git
    ```
+
+   ### Version pinning (v0.7.0 Gap #3 / issue #804)
+
+   For production deployments, pin to an exact version. The substrate
+   honours semver discipline (`0.7.x` series stays backward-compatible;
+   `0.8.0` will land schema bumps and new tools). The supported pin
+   syntax per channel:
+
+   | Channel       | Pin syntax                                                          |
+   |---------------|---------------------------------------------------------------------|
+   | Cargo         | `cargo install ai-memory --version =0.7.0 --locked`                 |
+   | cargo-binstall| `cargo binstall ai-memory --version 0.7.0`                          |
+   | Homebrew      | `brew install alphaonedev/tap/ai-memory@0.7.0`                      |
+   | COPR          | `sudo dnf install ai-memory-0.7.0-1.fc40`                           |
+   | .deb / .rpm   | Download the `0.7.0` artifact from the GH Release; pin by filename. |
+   | AUR           | Use `ai-memory=0.7.0-1` in `paru -S ai-memory=0.7.0-1`.             |
+   | Docker        | `docker pull ghcr.io/alphaonedev/ai-memory:0.7.0` (digest pin is even safer: `@sha256:…`). |
+
+   In CI, prefer the cargo-binstall + `--version` form so the version
+   appears in your build manifest and reproducibility is trivial.
 
 2. **Configure MCP in your AI client.** The example below is for **Claude Code** — add the `mcpServers` key to `~/.claude.json` (user scope, applies to all projects):
 
@@ -93,7 +126,7 @@
 
 3. **Restart your AI client.**
 
-4. **Verify** -- you should see **43 new tools** registered. Highlights: `memory_store`, `memory_recall`, `memory_search`, `memory_list`, `memory_get`, `memory_update`, `memory_delete`, `memory_promote`, `memory_forget`, `memory_stats`, `memory_link`, `memory_get_links`, `memory_consolidate`, `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, `memory_archive_list`, `memory_archive_restore`, `memory_archive_purge`, `memory_archive_stats`, `memory_check_duplicate`, `memory_entity_register`, `memory_entity_get_by_alias`, `memory_kg_query`, `memory_kg_timeline`, `memory_kg_invalidate`, `memory_get_taxonomy`, `memory_namespace_set_standard`, `memory_namespace_get_standard`, `memory_namespace_clear_standard`, `memory_pending_list`, `memory_pending_approve`, `memory_pending_reject`, `memory_agent_register`, `memory_agent_list`, `memory_notify`, `memory_inbox`, `memory_subscribe`, `memory_unsubscribe`, `memory_list_subscriptions`, `memory_session_start`, `memory_gc`. Full per-tool reference: [API_REFERENCE.md](API_REFERENCE.md).
+4. **Verify** — at the default `--profile core` (v0.7.0) you should see **7 new tools** registered plus the always-on `memory_capabilities` bootstrap (8 total): `memory_store`, `memory_recall`, `memory_search`, `memory_list`, `memory_get`, `memory_load_family`, `memory_smart_load`. To eagerly load the full v0.7.0 surface (71 advertised entries — 70 callable memory tools + the always-on `memory_capabilities` bootstrap), launch with `ai-memory mcp --profile full`. The full-profile surface includes (highlights): `memory_update`, `memory_delete`, `memory_promote`, `memory_forget`, `memory_stats`, `memory_link`, `memory_get_links`, `memory_consolidate`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, the 4 archive tools, `memory_check_duplicate`, the 2 entity tools, the 3 KG tools (`memory_kg_query`/`memory_kg_timeline`/`memory_kg_invalidate`), `memory_get_taxonomy`, the 3 namespace-standard tools, the 3 pending-action tools, the 2 agent tools, `memory_notify`/`memory_inbox`, the 3 subscription tools, `memory_session_start`, `memory_gc`, and the v0.7 additions: `memory_reflect`, `memory_atomise`, `memory_ingest_multistep`, `memory_persona`, `memory_persona_generate`, `memory_offload`, `memory_deref`, `memory_calibrate_confidence`, the 7 L1-5 Agent Skills tools, `memory_check_agent_action`, `memory_rule_list`, `memory_export_reflection`, `memory_reflection_origin`, `memory_dependents_of_invalidated`, `memory_find_paths`, `memory_verify`, `memory_quota_status`, the archive-list metadata helpers (#860), and more. Full per-tool reference: [API_REFERENCE.md](API_REFERENCE.md). Run `memory_capabilities` from the agent loop to get the live family list.
 
 5. **Test** -- ask your AI assistant to store a memory. It should use `memory_store` automatically.
 

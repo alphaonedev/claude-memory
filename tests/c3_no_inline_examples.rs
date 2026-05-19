@@ -88,17 +88,21 @@ fn c3_prompt_definitions_have_no_inline_examples() {
 }
 
 #[test]
-fn c3_tools_list_token_budget_is_under_3500() {
-    // C5 hard ceiling — restate it on the C3 surface so a regression
-    // here is caught locally, not just by the cross-cutting C5 gate.
+fn c3_tools_list_token_budget_is_under_post_859_ceiling() {
+    // C5 + #859 ceiling — restate it on the C3 surface so a regression
+    // here is caught locally, not just by the cross-cutting gates.
+    // Post-#859 (v0.7.0): the wire-form ceiling moved from 3500 →
+    // 5000 because the trim now preserves every optional property
+    // entry for NHI runtime discovery (was: dropped entirely).
     let defs = tool_definitions_for_profile(&Profile::full());
     let serialized = serde_json::to_string(&defs).expect("tool defs must serialize");
     let tokens = ai_memory::db::count_tokens_cl100k(&serialized);
 
     assert!(
-        tokens <= 3500,
-        "tools/list bare payload exceeded the C5 budget — got {tokens} cl100k tokens, \
-         ceiling is 3500. C3 stripped inline examples; if this fires the surface grew \
-         elsewhere."
+        tokens <= 5000,
+        "tools/list bare payload exceeded the post-#859 budget — got {tokens} cl100k tokens, \
+         ceiling is 5000. C3 stripped inline examples; if this fires the surface grew \
+         elsewhere (e.g. a tool's `description` is no longer compacted, or per-property \
+         prose leaked back onto the wire)."
     );
 }

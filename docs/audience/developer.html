@@ -1,0 +1,228 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+  Audience page: developer — issue #832.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>ai-memory for developers &mdash; build, embed, extend</title>
+<meta name="description" content="ai-memory for engineers: build from source, three interfaces (MCP, HTTP, CLI) with a working example for each, NHI agent_id semantics, hooks and subscriptions, extending.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/audience/developer.html">
+<style>
+:root{--bg:#0a0a0a;--panel:#121212;--border:#262626;--border-hi:#3a3a3a;--text:#f5f5f5;--muted:#9a9a9a;--dim:#6b6b6b;--accent:#6ee7ff;--warn:#ffb86b;--good:#7cd992;--code-bg:#161616;--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;--font-mono:"SF Mono","JetBrains Mono","Cascadia Code",Consolas,monospace;--w-mid:840px;--w-wide:1080px}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--text);font-family:var(--font-sans);line-height:1.65;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+code,pre{font-family:var(--font-mono);font-size:.88rem}
+code{background:var(--code-bg);padding:.1em .35em;border-radius:3px;color:#d4d4d4}
+pre{background:var(--code-bg);border:1px solid var(--border);border-radius:6px;padding:1rem 1.15rem;overflow-x:auto;line-height:1.55;margin:1rem 0}
+pre code{background:none;padding:0;color:#d4d4d4}
+.wrap-mid{max-width:var(--w-mid);margin:0 auto;padding:0 1.5rem}
+.topnav{border-bottom:1px solid var(--border);position:sticky;top:0;background:rgba(10,10,10,.92);backdrop-filter:blur(8px);z-index:50}
+.topnav .row{display:flex;align-items:center;justify-content:space-between;padding:1rem 1.5rem;max-width:var(--w-wide);margin:0 auto;font-size:.9rem}
+.topnav .brand{color:var(--text);font-weight:600}
+.topnav .links{display:flex;gap:1.5rem}
+.topnav .links a{color:var(--muted)}
+.topnav .links a:hover{color:var(--text);text-decoration:none}
+.crumb{padding:1.25rem 1.5rem 0;max-width:var(--w-mid);margin:0 auto;color:var(--dim);font-size:.82rem;font-family:var(--font-mono)}
+.crumb a{color:var(--muted)}
+.hero{padding:3rem 0 2.5rem}
+.hero .eyebrow{font-family:var(--font-mono);font-size:.72rem;letter-spacing:.18em;color:var(--accent);text-transform:uppercase;margin-bottom:1rem}
+.hero h1{font-size:2.2rem;font-weight:700;letter-spacing:-.025em;line-height:1.15;margin-bottom:1.25rem}
+.hero .lede{font-size:1.1rem;color:var(--muted);max-width:680px;line-height:1.6}
+section{padding:3rem 0;border-top:1px solid var(--border)}
+.eyebrow-h2{font-family:var(--font-mono);font-size:.7rem;letter-spacing:.18em;color:var(--dim);text-transform:uppercase;margin-bottom:.5rem}
+h2{font-size:1.5rem;font-weight:700;letter-spacing:-.015em;margin-bottom:1rem}
+h3{font-size:1.05rem;font-weight:600;margin:1.75rem 0 .5rem;color:var(--text)}
+p{color:var(--muted);margin-bottom:1rem;max-width:680px}
+p.lede{color:var(--text);font-size:1rem}
+ul,ol{color:var(--muted);margin:0 0 1rem 1.5rem}
+li{margin-bottom:.35rem}
+li code{font-size:.85em}
+.if-tabs{display:flex;gap:.5rem;margin:1.5rem 0 .5rem;flex-wrap:wrap}
+.if-tab{padding:.4rem .9rem;background:var(--panel);border:1px solid var(--border);border-radius:5px;font-family:var(--font-mono);font-size:.78rem;color:var(--muted);font-weight:600}
+.if-tab.mcp{color:var(--accent);border-color:var(--accent)}
+.if-tab.http{color:var(--warn);border-color:var(--warn)}
+.if-tab.cli{color:var(--good);border-color:var(--good)}
+.callout{border-left:3px solid var(--accent);padding:1rem 1.25rem;background:rgba(110,231,255,.04);border-radius:0 6px 6px 0;margin:1.5rem 0;font-size:.92rem}
+.callout strong{color:var(--text)}
+footer{padding:3rem 0;border-top:1px solid var(--border);color:var(--dim);font-size:.82rem;text-align:center}
+footer a{color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:.6rem;margin:1.5rem 0}
+.next a{display:block;padding:.85rem 1rem;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.9rem;transition:border-color .15s}
+.next a:hover{border-color:var(--accent);text-decoration:none}
+.next a .desc{display:block;color:var(--muted);font-size:.78rem;margin-top:.2rem;font-weight:400}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="row">
+    <a class="brand" href="../">ai-memory</a>
+    <div class="links">
+      <a href="../#install">Install</a>
+      <a href="operator.html">Operator</a>
+      <a href="developer.html" style="color:var(--text)">Developer</a>
+      <a href="decision-maker.html">Decision</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<div class="crumb"><a href="../">ai-memory</a> &nbsp;/&nbsp; audience &nbsp;/&nbsp; developer</div>
+
+<header class="hero wrap-mid">
+  <div class="eyebrow">For developers</div>
+  <h1>Build with ai-memory.</h1>
+  <p class="lede">Three interfaces share one SQLite-backed core: MCP stdio, HTTP REST, native CLI. Same data, same validation, same agent_id semantics. This page gives you a working example of each in ten lines or less, then points at the extension surfaces.</p>
+</header>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">Build from source</div>
+  <h2>Rust 1.88+, one binary.</h2>
+  <pre><code>git clone https://github.com/alphaonedev/ai-memory-mcp
+cd ai-memory-mcp
+cargo build --release
+# binary at target/release/ai-memory (~26 MB stripped)</code></pre>
+  <p>All four gates must pass before a PR is opened:</p>
+  <pre><code>cargo fmt --check
+cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic
+AI_MEMORY_NO_CONFIG=1 cargo test
+cargo audit</code></pre>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">Three interfaces, one example each</div>
+  <h2>Pick the surface that fits your call site.</h2>
+  <p>All three share <code>src/db.rs</code> + <code>src/validate.rs</code>. There is no behavioural divergence; whatever the CLI does, the MCP tool and the HTTP endpoint do too.</p>
+
+  <h3>MCP &mdash; stdio JSON-RPC 2.0</h3>
+  <div class="if-tabs"><span class="if-tab mcp">71 entries at --profile full, 7 default in --profile core</span></div>
+  <pre><code>printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"demo","version":"0"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"memory_store","arguments":{"title":"hello","content":"first MCP memory","tier":"mid"}}}' \
+  | ai-memory mcp --profile core</code></pre>
+
+  <h3>HTTP &mdash; Axum REST</h3>
+  <div class="if-tabs"><span class="if-tab http">72 routes at /api/v1/ (+ /metrics)</span></div>
+  <pre><code>ai-memory serve --host 127.0.0.1 --port 9077 &amp;
+
+curl -X POST http://127.0.0.1:9077/api/v1/memories \
+  -H 'Content-Type: application/json' \
+  -H 'X-Agent-Id: ai:my-app@host01' \
+  -d '{"title":"hello","content":"first HTTP memory","tier":"mid"}'</code></pre>
+
+  <h3>CLI &mdash; clap subcommands</h3>
+  <div class="if-tabs"><span class="if-tab cli">~50 subcommands, all support --json</span></div>
+  <pre><code>ai-memory store --title hello --content "first CLI memory" --tier mid
+ai-memory recall "hello"
+ai-memory stats --json | jq .</code></pre>
+
+  <p>Full surface: <a href="../USER_GUIDE.md">USER_GUIDE.md</a> (MCP tools), <a href="../API_REFERENCE.md">API_REFERENCE.md</a> (HTTP), <a href="../CLI_REFERENCE.md">CLI_REFERENCE.md</a> (CLI). The canonical tool count is asserted by <code>Profile::full().expected_tool_count()</code> in <code>src/profile.rs</code>; see issue #862 for the 70+1 disambiguation.</p>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">NHI agent_id semantics</div>
+  <h2>Every memory carries a claimed identity.</h2>
+  <p><code>metadata.agent_id</code> is the AI Non-Human Identity marker. It is a <strong>claimed</strong> identity, not an attested one &mdash; pair it with agent registration before using it for security decisions.</p>
+
+  <h3>Resolution ladder (CLI + MCP)</h3>
+  <ol>
+    <li>Explicit caller value (<code>--agent-id</code>, MCP <code>agent_id</code> param, or <code>metadata.agent_id</code> in store request)</li>
+    <li><code>AI_MEMORY_AGENT_ID</code> env var</li>
+    <li>(MCP only) <code>initialize.clientInfo.name</code> &rarr; <code>ai:&lt;client&gt;@&lt;hostname&gt;:pid-&lt;pid&gt;</code></li>
+    <li><code>host:&lt;hostname&gt;:pid-&lt;pid&gt;-&lt;uuid8&gt;</code> (stable per-process)</li>
+    <li><code>anonymous:pid-&lt;pid&gt;-&lt;uuid8&gt;</code> (no hostname)</li>
+  </ol>
+
+  <p>The HTTP daemon is multi-tenant and skips the process-level default: it reads <code>agent_id</code> from the request body, then <code>X-Agent-Id</code>, then assigns <code>anonymous:req-&lt;uuid8&gt;</code> and logs WARN.</p>
+
+  <div class="callout"><strong>Validation regex:</strong> <code>^[A-Za-z0-9_\-:@./]{1,128}$</code>. Permits prefixed forms (<code>ai:</code>, <code>host:</code>), <code>@</code> scope separator, <code>/</code> for future SPIFFE-style ids. Rejects whitespace, null bytes, control chars, shell metacharacters.</div>
+
+  <p>Full reference (immutability invariants, special metadata keys, defaults-that-leak warnings): <a href="../agent-identity.html">agent-identity.html</a>.</p>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">Hooks and subscriptions</div>
+  <h2>20-event hook pipeline + HMAC subscriptions.</h2>
+  <p>The hook pipeline fires on 20 named substrate events: <code>memory_store</code>, <code>memory_touch</code>, <code>memory_link</code>, <code>memory_reflect</code>, <code>kg_invalidate</code>, etc. Hooks run synchronously (default) or async-fan-out (subscriptions).</p>
+
+  <h3>Register a webhook subscription</h3>
+  <pre><code>ai-memory subscribe \
+  --event memory_store \
+  --url https://my-app.example.com/ai-memory-events \
+  --hmac-secret-file /etc/my-app/hmac.key</code></pre>
+  <p>Events are POSTed as JSON with an <code>X-AI-Memory-Signature</code> HMAC header. Unsigned subscribers are refused at registration. SSRF gate: loopback URLs require <code>AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS=1</code>.</p>
+  <p>Full hook taxonomy + payload schemas: <a href="../hook-pipeline.md">hook-pipeline.md</a>.</p>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">Extend the substrate</div>
+  <h2>New tools, new families, new hooks.</h2>
+
+  <h3>New MCP tool</h3>
+  <ol>
+    <li>Add JSON definition in <code>tool_definitions()</code> (src/mcp.rs)</li>
+    <li>Add match arm in the dispatch block</li>
+    <li>Implement handler: <code>fn(&amp;Connection, params) -&gt; Result&lt;Value&gt;</code></li>
+  </ol>
+
+  <h3>New CLI subcommand</h3>
+  <ol>
+    <li>Add variant to <code>Command</code> enum (src/main.rs)</li>
+    <li>Define an <code>Args</code> struct</li>
+    <li>Add dispatch case in <code>main()</code></li>
+    <li>Implement <code>cmd_*</code> handler taking <code>&amp;Path</code> + args</li>
+  </ol>
+
+  <h3>New HTTP endpoint</h3>
+  <ol>
+    <li>Add route in the Axum router (src/main.rs)</li>
+    <li>Implement handler in <code>handlers.rs</code> using the <code>Db</code> extractor</li>
+  </ol>
+
+  <p>For deeper changes (new memory_kind, new family, new tier), the writeup is in <a href="../DEVELOPER_GUIDE.md">DEVELOPER_GUIDE.md</a> and the family/kind distinction is clarified in <a href="../agent-skills.md">agent-skills.md</a>.</p>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">Test results</div>
+  <h2>What the NHI playbook verified.</h2>
+  <p>The Track A NHI test playbook exercises the MCP tool surface, HTTP API parity, CLI dispatch, knowledge-graph traversal, capabilities v3 discovery, token budget, hooks, and chaos &mdash; the exact developer-facing surfaces you'd build against. Latest campaign: 85 PASS / 0 FAIL across 12 phases, 10 issues fixed in-campaign, no deferrals.</p>
+  <div class="next">
+    <a href="../v0.7.0/test-campaign-2026-05-18/"><strong>Latest campaign index</strong><span class="desc">2026-05-18 &middot; SHIP &middot; pinned binary SHA</span></a>
+    <a href="../v0.7.0/test-campaign-2026-05-18/track-a-nhi-results.md"><strong>Engineering writeup</strong><span class="desc">All 12 phases, expected vs actual</span></a>
+    <a href="../v0.7.0/test-campaign-2026-05-18/audience-sme-engineer.md"><strong>For SME engineers</strong><span class="desc">Reproducibility, methodology, schema ladder v43&rarr;v47, coverage, refactor LOC, six-level provenance</span></a>
+    <a href="../v0.7.0/test-campaign-2026-05-18/audience-c-level.md"><strong>For decision-makers</strong><span class="desc">Verdict, risk, cost, roadmap</span></a>
+  </div>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">Next</div>
+  <h2>Where to go from here.</h2>
+  <div class="next">
+    <a href="../DEVELOPER_GUIDE.md"><strong>Developer guide</strong><span class="desc">Full reference</span></a>
+    <a href="../USER_GUIDE.md"><strong>MCP tool reference</strong><span class="desc">71 entries at --profile full</span></a>
+    <a href="../API_REFERENCE.md"><strong>HTTP API</strong><span class="desc">72 routes</span></a>
+    <a href="../CLI_REFERENCE.md"><strong>CLI reference</strong><span class="desc">~50 subcommands</span></a>
+    <a href="../agent-identity.html"><strong>Agent identity</strong><span class="desc">NHI semantics</span></a>
+    <a href="../hook-pipeline.md"><strong>Hook pipeline</strong><span class="desc">20 events</span></a>
+    <a href="../knowledge-graph.html"><strong>Knowledge graph</strong><span class="desc">Typed links + temporal validity</span></a>
+    <a href="../integrations/README.md"><strong>Integrations</strong><span class="desc">Claude Code, Cursor, etc</span></a>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap-mid">
+    <a href="../">&larr; back to ai-memory</a> &middot;
+    <a href="https://github.com/alphaonedev/ai-memory-mcp">source</a> &middot;
+    Apache-2.0 &middot; &copy; 2026 AlphaOne LLC
+  </div>
+</footer>
+
+</body>
+</html>

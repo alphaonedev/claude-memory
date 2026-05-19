@@ -26,6 +26,25 @@ pub(super) fn handle_agent_register(
     validate::validate_agent_type(agent_type).map_err(|e| e.to_string())?;
     validate::validate_capabilities(&capabilities).map_err(|e| e.to_string())?;
 
+    // #913 (security-medium / SOC2, 2026-05-19) — admin/state-change
+    // audit. Registering an agent_id mints a new principal in the
+    // `_agents` namespace; emit the forensic-chain row BEFORE the
+    // storage write so the audit trail captures intent regardless of
+    // downstream storage outcome. Mirrors the #911 HTTP fix.
+    let caller = crate::identity::resolve_agent_id(params["caller_agent_id"].as_str(), None)
+        .unwrap_or_else(|_| "anonymous:invalid".to_string());
+    crate::governance::audit::record_decision(
+        &caller,
+        "allow",
+        "register_agent",
+        "",
+        json!({
+            "new_agent_id": agent_id,
+            "agent_type": agent_type,
+            "capabilities": &capabilities,
+        }),
+    );
+
     let id =
         db::register_agent(conn, agent_id, agent_type, &capabilities).map_err(|e| e.to_string())?;
 

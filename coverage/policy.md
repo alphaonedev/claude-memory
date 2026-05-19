@@ -683,3 +683,127 @@ lines (~2-3) are panic-on-defence-in-depth branches in the
 broken; documented as structurally unreachable.
 
 Threshold left at 99 (tier-A target). The new tests close the gap.
+
+### v0.7.0 coverage-uplift campaign — 90% global plateau (2026-05-19)
+
+**Goal.** Operator-mandated lift of the `coverage/thresholds.toml::[global]
+.min_line_coverage` floor from 88.0% to 90.0%, with a target measured
+global ≥ 90.5% to leave ~0.5pp noise headroom.
+
+**Method.** Per the campaign brief, this section measures the
+`--features sal,sal-postgres --workspace --lib --tests` global on
+`local/install-815-816` at HEAD `407a56744` (per-baseline) and walks
+the lowest-covered modules by absolute uncovered-line count to identify
+test-additive uplift candidates. 62 new targeted unit tests were
+authored across 10 modules.
+
+**Measured baseline (sal+sal-postgres, lib+tests, workspace).**
+
+```
+covered: 106295
+count:   119377
+pct:     89.04%
+```
+
+Filtered to `/v07-fixes/src/` only: 106292 / 119371 = 89.04% (identical
+to two-decimal places). Matches the campaign brief's stated CI baseline
+of 89.02%.
+
+**Honest plateau finding.** Even after adding 62 test functions whose
+new coverage adds ~200-300 line hits to the per-file measurement, the
+measured global lands at ~89.25%, **~1.25pp below the target 90.5%**.
+
+The structural reason is concentrated in a single module:
+
+| Module | Total lines | Covered | Pct | Uncovered |
+|--------|---|---|---|---|
+| `src/store/postgres.rs` | 5659 | 767 | 13.55% | **4892** |
+
+`store/postgres.rs` alone accounts for **4892 uncovered lines = 4.10pp
+of the workspace total**. With it included in the global denominator,
+no amount of unit-test additions can raise the measured global above
+~92.8% (the value computed by excluding `store/postgres.rs` from the
+denominator). To hit 90.5% with the file included, the file's coverage
+needs to rise from 13.55% to ≥ 39.0% — adding ~1437 covered lines —
+which is structurally impossible without a **live Postgres + pgvector
++ Apache AGE** test environment.
+
+**Same-feature global excluding documented structural exceptions.** When
+the global is computed across just the modules that have an achievable
+unit-test surface (i.e. excluding the 23 modules listed below with
+documented live-PG / listener / cross-encoder ceilings), the measured
+value is **95.77%** — well above the 90% target. The 89.04% number is
+NOT a quality regression on the unit-testable surface; it is the
+expected consequence of including 4892 lines of `sqlx::query!` macro
+bodies that physically cannot execute without a live DB.
+
+**Exception modules dragging the global below 90.5%**:
+
+| Module | Pct | Uncovered | Exception class |
+|---|---:|---:|---|
+| `store/postgres.rs` | 13.55% | 4892 | live-PG (already documented) |
+| `daemon_runtime.rs` | 85.37% | 446 | listener/sync-net bootstrap |
+| `handlers/power.rs` | 35.97% | 347 | PG-gated branch ceiling |
+| `handlers/kg.rs` | 60.57% | 319 | PG-gated branch ceiling |
+| `handlers/memories.rs` | 56.17% | 298 | PG-gated branch ceiling |
+| `handlers/power_consolidation.rs` | 39.48% | 282 | PG-gated branch ceiling |
+| `handlers/hook_subscribers.rs` | 58.03% | 269 | PG-gated branch ceiling |
+| `handlers/federation_receive.rs` | 57.91% | 226 | PG-gated branch ceiling |
+| `handlers/federation_signing_check.rs` | 46.37% | 192 | PG-gated branch ceiling |
+| `reranker.rs` | 85.76% | 174 | cross-encoder feature gate |
+| `handlers/links.rs` | 52.23% | 171 | PG-gated branch ceiling |
+| `handlers/create.rs` | 77.76% | 171 | PG-gated branch ceiling |
+| `handlers/governance.rs` | 43.28% | 169 | PG-gated branch ceiling |
+| `cli/schema_init.rs` | 73.10% | 163 | live-PG init body (#699) |
+| `handlers/admin.rs` | 69.00% | 150 | PG-gated branch ceiling |
+| `handlers/subscriptions.rs` | 77.33% | 119 | PG-gated branch ceiling |
+| `federation/sync.rs` | 87.50% | 119 | listener integration |
+| `handlers/approvals.rs` | 64.18% | 106 | PG-gated branch ceiling |
+| `handlers/recall.rs` | 73.13% | 101 | PG-gated branch ceiling |
+| `handlers/http.rs` | 78.04% | 83 | PG-gated branch ceiling |
+| `handlers/archive.rs` | 68.23% | 81 | PG-gated branch ceiling |
+| `hooks/executor.rs` | 89.99% (varies) | ~72 | real-subprocess integration |
+| `hooks/recall.rs` | 82.80% (varies) | ~30 | OnceLock ExecutorRegistry |
+
+Total uncovered across these 23 documented exceptions: **~9000 lines**,
+accounting for ~7.5pp of the workspace total being structurally
+unreachable without a live PG + listening Axum runtime + cross-encoder
+ONNX + real OS process lifecycle.
+
+**Threshold disposition.**
+
+- `min_line_coverage` **stays at 88.0** for v0.7.0. Raising it to 90 is
+  not honest — it implies a coverage level the workspace cannot reach
+  without live-PG infrastructure that v0.7.0 CI does not provision.
+- The 62 new test additions are real engineering improvements; per-
+  module floors for the affected files are raised per `floor(measured
+  - 0.5)` discipline (see `coverage/thresholds.toml` for the new
+  values).
+- The structural-exception class above is documented HERE; CI's
+  per-module gate enforces each documented residual at the value
+  measured today, so a future regression in any exception class
+  trips the gate immediately.
+
+**Path to 90 in v0.8.0.** Three options for honestly lifting the floor:
+
+1. **Live-PG in CI** — add a Postgres + pgvector + AGE container to the
+   `Code Coverage` job; this is the cleanest fix and the existing
+   `live_*` test family is already gated on `AI_MEMORY_TEST_POSTGRES_URL`.
+   Estimated effort: 1 day to add the container, ~2 days to debug AGE
+   binding under the GH Actions runner's memory profile. Expected
+   coverage lift: `store/postgres.rs` jumps from 13.55% to ~70%
+   (driven by the existing live test families), workspace global jumps
+   from 89% to ~93%.
+2. **Exclude `store/postgres.rs` from the workspace denominator** via
+   an `[exclude_modules]` table in `coverage/thresholds.toml`, with the
+   per-module gate continuing to pin 14% on the file. Cleaner audit
+   posture (90 means "90 on the unit-testable surface"), but requires
+   `coverage/check-thresholds.sh` to learn the exclude semantics.
+3. **Add unit-test coverage to the postgres parser/builder surface** —
+   `to_store_err`, `render_schema_sql`, `parse_rfc3339_*`,
+   `agtype_*`, etc. — pull each pure-logic helper out into its own
+   `#[cfg(test)]` block. Realistic ceiling: ~25-30% file coverage,
+   another ~7-9pp on the workspace global. Insufficient on its own;
+   pair with option 1 or 2.
+
+Operator decision required before bumping `min_line_coverage` to 90.

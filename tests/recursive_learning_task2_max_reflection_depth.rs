@@ -56,7 +56,7 @@
 //! `SCHEMA_VERSION` / `CURRENT_SCHEMA_VERSION` /
 //! `MAX_SUPPORTED_SCHEMA`.
 
-use ai_memory::models::{ApproverType, GovernanceLevel, GovernancePolicy};
+use ai_memory::models::{ApproverType, CorePolicy, GovernanceLevel, GovernancePolicy};
 
 // ─────────────────────────────────────────────────────────────────────
 // Accessor — default behavior and overrides.
@@ -69,7 +69,7 @@ fn effective_max_reflection_depth_default_is_three() {
     // the v0.7.0 baseline contract that Task 5/8 enforcement reads
     // against when no operator override exists.
     let p = GovernancePolicy::default();
-    assert_eq!(p.max_reflection_depth, None);
+    assert_eq!(p.core.max_reflection_depth, None);
     assert_eq!(p.effective_max_reflection_depth(), 3);
 }
 
@@ -79,7 +79,7 @@ fn effective_max_reflection_depth_managed_namespace_default_is_three() {
     // the override absent — operators get the same compiled-in
     // default of 3 until they explicitly tune it.
     let p = GovernancePolicy::default_for_managed_namespace();
-    assert_eq!(p.max_reflection_depth, None);
+    assert_eq!(p.core.max_reflection_depth, None);
     assert_eq!(p.effective_max_reflection_depth(), 3);
 }
 
@@ -89,26 +89,15 @@ fn effective_max_reflection_depth_explicit_override_returns_value() {
     // (e.g. v0.8.0 Pillar 2.5 curator chains) overrides via the
     // optional field. The accessor returns the override verbatim.
     let p = GovernancePolicy {
-        write: GovernanceLevel::Any,
-        promote: GovernanceLevel::Any,
-        delete: GovernanceLevel::Owner,
-        approver: ApproverType::Human,
-        inherit: true,
-        max_reflection_depth: Some(7),
-        auto_export_reflections_to_filesystem: None,
-        auto_atomise: None,
-        auto_atomise_threshold_cl100k: None,
-        auto_atomise_max_atom_tokens: None,
-        auto_atomise_max_retries: None,
-        auto_persona_trigger_every_n_memories: None,
-        auto_export_personas_to_filesystem: None,
-        auto_atomise_mode: None,
-        legacy_per_pair_classifier: None,
-        auto_classify_kind: None,
-        synthesis_failure_mode: None,
-        synthesis_max_deletes_per_call: None,
-        synthesis_max_candidate_chars: None,
-        multistep_max_content_chars: None,
+        core: CorePolicy {
+            write: GovernanceLevel::Any,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Human,
+            inherit: true,
+            max_reflection_depth: Some(7),
+        },
+        ..Default::default()
     };
     assert_eq!(p.effective_max_reflection_depth(), 7);
 }
@@ -123,26 +112,15 @@ fn effective_max_reflection_depth_some_zero_disables_reflection() {
     // semantic so a future "0 means use default" misreading would
     // be caught immediately.
     let p = GovernancePolicy {
-        write: GovernanceLevel::Any,
-        promote: GovernanceLevel::Any,
-        delete: GovernanceLevel::Owner,
-        approver: ApproverType::Human,
-        inherit: true,
-        max_reflection_depth: Some(0),
-        auto_export_reflections_to_filesystem: None,
-        auto_atomise: None,
-        auto_atomise_threshold_cl100k: None,
-        auto_atomise_max_atom_tokens: None,
-        auto_atomise_max_retries: None,
-        auto_persona_trigger_every_n_memories: None,
-        auto_export_personas_to_filesystem: None,
-        auto_atomise_mode: None,
-        legacy_per_pair_classifier: None,
-        auto_classify_kind: None,
-        synthesis_failure_mode: None,
-        synthesis_max_deletes_per_call: None,
-        synthesis_max_candidate_chars: None,
-        multistep_max_content_chars: None,
+        core: CorePolicy {
+            write: GovernanceLevel::Any,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Human,
+            inherit: true,
+            max_reflection_depth: Some(0),
+        },
+        ..Default::default()
     };
     assert_eq!(
         p.effective_max_reflection_depth(),
@@ -158,21 +136,10 @@ fn effective_max_reflection_depth_some_one_returns_one() {
     // refuses any deeper chain. This pins the boundary above the
     // disable sentinel.
     let p = GovernancePolicy {
-        max_reflection_depth: Some(1),
-        auto_export_reflections_to_filesystem: None,
-        auto_atomise: None,
-        auto_atomise_threshold_cl100k: None,
-        auto_atomise_max_atom_tokens: None,
-        auto_atomise_max_retries: None,
-        auto_persona_trigger_every_n_memories: None,
-        auto_export_personas_to_filesystem: None,
-        auto_atomise_mode: None,
-        legacy_per_pair_classifier: None,
-        auto_classify_kind: None,
-        synthesis_failure_mode: None,
-        synthesis_max_deletes_per_call: None,
-        synthesis_max_candidate_chars: None,
-        multistep_max_content_chars: None,
+        core: CorePolicy {
+            max_reflection_depth: Some(1),
+            ..CorePolicy::default()
+        },
         ..GovernancePolicy::default()
     };
     assert_eq!(p.effective_max_reflection_depth(), 1);
@@ -186,21 +153,10 @@ fn effective_max_reflection_depth_high_override_returns_value() {
     // Clamping is an enforcement-policy decision — the accessor
     // is a pure resolver.
     let p = GovernancePolicy {
-        max_reflection_depth: Some(255),
-        auto_export_reflections_to_filesystem: None,
-        auto_atomise: None,
-        auto_atomise_threshold_cl100k: None,
-        auto_atomise_max_atom_tokens: None,
-        auto_atomise_max_retries: None,
-        auto_persona_trigger_every_n_memories: None,
-        auto_export_personas_to_filesystem: None,
-        auto_atomise_mode: None,
-        legacy_per_pair_classifier: None,
-        auto_classify_kind: None,
-        synthesis_failure_mode: None,
-        synthesis_max_deletes_per_call: None,
-        synthesis_max_candidate_chars: None,
-        multistep_max_content_chars: None,
+        core: CorePolicy {
+            max_reflection_depth: Some(255),
+            ..CorePolicy::default()
+        },
         ..GovernancePolicy::default()
     };
     assert_eq!(p.effective_max_reflection_depth(), 255);
@@ -228,7 +184,7 @@ fn deserialize_legacy_policy_without_field_defaults_to_none() {
     }"#;
     let p: GovernancePolicy =
         serde_json::from_str(legacy).expect("pre-v0.7.0 governance JSON must deserialize");
-    assert_eq!(p.max_reflection_depth, None);
+    assert_eq!(p.core.max_reflection_depth, None);
     assert_eq!(p.effective_max_reflection_depth(), 3);
 }
 
@@ -243,8 +199,8 @@ fn deserialize_partial_legacy_policy_with_write_only_defaults_to_none() {
     let json = serde_json::json!({"write": "owner"});
     let p: GovernancePolicy =
         serde_json::from_value(json).expect("partial governance JSON must deserialize");
-    assert_eq!(p.write, GovernanceLevel::Owner);
-    assert_eq!(p.max_reflection_depth, None);
+    assert_eq!(p.core.write, GovernanceLevel::Owner);
+    assert_eq!(p.core.max_reflection_depth, None);
     assert_eq!(p.effective_max_reflection_depth(), 3);
 }
 
@@ -263,7 +219,7 @@ fn deserialize_v0_7_0_policy_with_explicit_field_preserves_value() {
     }"#;
     let p: GovernancePolicy =
         serde_json::from_str(v0_7_0).expect("v0.7.0 governance JSON must deserialize");
-    assert_eq!(p.max_reflection_depth, Some(5));
+    assert_eq!(p.core.max_reflection_depth, Some(5));
     assert_eq!(p.effective_max_reflection_depth(), 5);
 }
 
@@ -283,7 +239,7 @@ fn deserialize_v0_7_0_policy_with_explicit_zero_preserves_disable_sentinel() {
     }"#;
     let p: GovernancePolicy = serde_json::from_str(v0_7_0_disabled)
         .expect("v0.7.0 disabled-reflections governance JSON must deserialize");
-    assert_eq!(p.max_reflection_depth, Some(0));
+    assert_eq!(p.core.max_reflection_depth, Some(0));
     assert_eq!(p.effective_max_reflection_depth(), 0);
 }
 
@@ -313,21 +269,10 @@ fn serialize_policy_with_explicit_field_writes_key_on_the_wire() {
     // `skip_serializing_if` is only firing on `None`, not also on
     // `Some(0)` (which would silently drop the disable sentinel).
     let p = GovernancePolicy {
-        max_reflection_depth: Some(0),
-        auto_export_reflections_to_filesystem: None,
-        auto_atomise: None,
-        auto_atomise_threshold_cl100k: None,
-        auto_atomise_max_atom_tokens: None,
-        auto_atomise_max_retries: None,
-        auto_persona_trigger_every_n_memories: None,
-        auto_export_personas_to_filesystem: None,
-        auto_atomise_mode: None,
-        legacy_per_pair_classifier: None,
-        auto_classify_kind: None,
-        synthesis_failure_mode: None,
-        synthesis_max_deletes_per_call: None,
-        synthesis_max_candidate_chars: None,
-        multistep_max_content_chars: None,
+        core: CorePolicy {
+            max_reflection_depth: Some(0),
+            ..CorePolicy::default()
+        },
         ..GovernancePolicy::default()
     };
     let json = serde_json::to_value(&p).expect("serialize");
@@ -345,26 +290,15 @@ fn full_roundtrip_with_explicit_field() {
     // `governance_policy_full_roundtrip` test but adds the new
     // field to the matrix.
     let p = GovernancePolicy {
-        write: GovernanceLevel::Registered,
-        promote: GovernanceLevel::Approve,
-        delete: GovernanceLevel::Owner,
-        approver: ApproverType::Agent("maintainer".to_string()),
-        inherit: true,
-        max_reflection_depth: Some(4),
-        auto_export_reflections_to_filesystem: None,
-        auto_atomise: None,
-        auto_atomise_threshold_cl100k: None,
-        auto_atomise_max_atom_tokens: None,
-        auto_atomise_max_retries: None,
-        auto_persona_trigger_every_n_memories: None,
-        auto_export_personas_to_filesystem: None,
-        auto_atomise_mode: None,
-        legacy_per_pair_classifier: None,
-        auto_classify_kind: None,
-        synthesis_failure_mode: None,
-        synthesis_max_deletes_per_call: None,
-        synthesis_max_candidate_chars: None,
-        multistep_max_content_chars: None,
+        core: CorePolicy {
+            write: GovernanceLevel::Registered,
+            promote: GovernanceLevel::Approve,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Agent("maintainer".to_string()),
+            inherit: true,
+            max_reflection_depth: Some(4),
+        },
+        ..Default::default()
     };
     let json = serde_json::to_string(&p).expect("serialize");
     let back: GovernancePolicy = serde_json::from_str(&json).expect("deserialize");
@@ -381,7 +315,7 @@ fn full_roundtrip_without_explicit_field() {
     let json = serde_json::to_string(&p).expect("serialize");
     let back: GovernancePolicy = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(back, p);
-    assert_eq!(back.max_reflection_depth, None);
+    assert_eq!(back.core.max_reflection_depth, None);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -408,7 +342,7 @@ fn from_metadata_recognizes_v0_7_0_governance_with_max_reflection_depth() {
     let parsed = GovernancePolicy::from_metadata(&meta)
         .expect("governance key present")
         .expect("valid governance shape");
-    assert_eq!(parsed.max_reflection_depth, Some(2));
+    assert_eq!(parsed.core.max_reflection_depth, Some(2));
     assert_eq!(parsed.effective_max_reflection_depth(), 2);
 }
 
@@ -432,6 +366,6 @@ fn from_metadata_legacy_governance_without_field_falls_through_to_default() {
     let parsed = GovernancePolicy::from_metadata(&meta)
         .expect("governance key present")
         .expect("legacy shape must deserialize");
-    assert_eq!(parsed.max_reflection_depth, None);
+    assert_eq!(parsed.core.max_reflection_depth, None);
     assert_eq!(parsed.effective_max_reflection_depth(), 3);
 }

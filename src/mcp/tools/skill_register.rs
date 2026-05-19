@@ -283,6 +283,26 @@ pub fn handle_skill_register(
     // -----------------------------------------------------------------------
     let manifest = skill_md::parse(&skill_md_text)?;
 
+    // #913 (security-medium / SOC2, 2026-05-19) — admin/state-change
+    // audit. Skill registration mints an executable capability bundle
+    // in the substrate; emit the forensic-chain row BEFORE the storage
+    // write so the audit trail captures intent regardless of downstream
+    // signing / storage outcome.
+    let caller = crate::identity::resolve_agent_id(params["agent_id"].as_str(), None)
+        .unwrap_or_else(|_| "anonymous:invalid".to_string());
+    crate::governance::audit::record_decision(
+        &caller,
+        "allow",
+        "skill_register",
+        "",
+        json!({
+            "namespace": manifest.namespace,
+            "name": manifest.name,
+            "resource_count": resource_files.len(),
+            "signed": active_keypair.is_some(),
+        }),
+    );
+
     let body_bytes = manifest.body.as_bytes();
 
     // Compute resource digests for the signing surface.
@@ -338,11 +358,19 @@ fn collect_resources(
         if path.is_dir() {
             collect_resources(base, &path, out)?;
         } else {
+            // Always emit forward-slash-joined relative paths regardless of
+            // host OS. `to_string_lossy()` on Windows produces backslashes
+            // ("scripts\\run.sh") which then fail every downstream
+            // `WHERE resource_path = 'scripts/run.sh'` lookup — the wire
+            // format (and the `memory_skill_resource` MCP contract) is
+            // forward-slash-only. Issue #797 sibling fix.
             let rel = path
                 .strip_prefix(base)
                 .map_err(|_| "path prefix error".to_string())?
-                .to_string_lossy()
-                .into_owned();
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
             let content = std::fs::read(&path)
                 .map_err(|e| format!("read resource '{}': {e}", path.display()))?;
             // Determine kind from sub-directory name or file extension.
@@ -664,10 +692,27 @@ mod tests {
         let mut out: Vec<(String, String, Vec<u8>)> = Vec::new();
         collect_resources(&base, &base, &mut out).unwrap();
         assert_eq!(out.len(), 2);
-        // Paths are relative to base, with forward slashes (StringLossy).
+        // Resource paths MUST be forward-slash-joined on every platform —
+        // they are the wire-format key used by `memory_skill_resource`
+        // (`WHERE resource_path = ?2`). The previous `to_string_lossy`
+        // implementation emitted backslashes on Windows ("a\\f1.txt") and
+        // every peer lookup missed; the assertion below is the exact-string
+        // form so a future regression of the same shape fails the test on
+        // Unix even when CI is Linux-only.
         let paths: Vec<&str> = out.iter().map(|(p, _, _)| p.as_str()).collect();
-        assert!(paths.iter().any(|p| p.ends_with("f1.txt")));
-        assert!(paths.iter().any(|p| p.ends_with("f2.txt")));
+        assert!(
+            paths.iter().any(|p| *p == "a/f1.txt"),
+            "expected exact path 'a/f1.txt'; got {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| *p == "b/c/f2.txt"),
+            "expected exact path 'b/c/f2.txt'; got {paths:?}"
+        );
+        assert!(
+            paths.iter().all(|p| !p.contains('\\')),
+            "no resource path may contain a backslash (wire format is \
+             forward-slash-only); got {paths:?}"
+        );
     }
 
     #[test]

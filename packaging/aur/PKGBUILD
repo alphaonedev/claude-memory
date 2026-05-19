@@ -1,0 +1,63 @@
+# Maintainer: AlphaOne LLC <ops@alphaonedev.io>
+#
+# ai-memory — Rust-based persistent memory MCP server (v0.7.0 Gap #3 / issue #804).
+#
+# Distribution-channel coverage for the v0.7.0 adoption push. The AUR
+# slot is `ai-memory` (operator ownership). Submission to the AUR
+# tracked in #804; until merged users can build locally via
+# `makepkg -si` in this directory.
+
+pkgname=ai-memory
+pkgver=0.7.0
+pkgrel=1
+pkgdesc="Persistent, queryable AI memory MCP server (Rust). v0.7.0: 71 MCP tools, Ed25519 identity, Form 1-7 substrate."
+arch=('x86_64' 'aarch64')
+url="https://github.com/alphaonedev/ai-memory-mcp"
+license=('Apache-2.0')
+depends=('gcc-libs')
+makedepends=('rust' 'cargo' 'git')
+optdepends=(
+  'sqlcipher: encrypted SQLite database support'
+  'postgresql: postgres+AGE backend for multi-tenant deployments'
+  'ollama: smart-tier and autonomous-tier LLM features'
+)
+source=("$pkgname-$pkgver.tar.gz::https://github.com/alphaonedev/ai-memory-mcp/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')  # operator updates with the v0.7.0 release-tag sha256
+
+prepare() {
+  cd "ai-memory-mcp-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$CARCH-unknown-linux-gnu"
+}
+
+build() {
+  cd "ai-memory-mcp-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release --bin ai-memory
+}
+
+check() {
+  cd "ai-memory-mcp-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  # AI_MEMORY_NO_CONFIG=1 prevents the test harness from loading the
+  # user's ~/.config/ai-memory/config.toml (which may trigger
+  # embedder/LLM init during the build).
+  AI_MEMORY_NO_CONFIG=1 cargo test --frozen --release --lib
+}
+
+package() {
+  cd "ai-memory-mcp-$pkgver"
+  install -Dm755 target/release/ai-memory "$pkgdir/usr/bin/ai-memory"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 NOTICE "$pkgdir/usr/share/licenses/$pkgname/NOTICE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+  install -Dm644 docs/INSTALL.md "$pkgdir/usr/share/doc/$pkgname/INSTALL.md"
+  install -Dm644 docs/QUICKSTART.md "$pkgdir/usr/share/doc/$pkgname/QUICKSTART.md"
+
+  # systemd unit (matches the .deb / .rpm packaging conventions)
+  if [ -f packaging/systemd/ai-memory.service ]; then
+    install -Dm644 packaging/systemd/ai-memory.service \
+      "$pkgdir/usr/lib/systemd/system/ai-memory.service"
+  fi
+}

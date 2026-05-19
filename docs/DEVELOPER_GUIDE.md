@@ -6,27 +6,41 @@
 
 1. **MCP tool server** -- stdio JSON-RPC server exposing 43 memory tools + 2 MCP prompts for any MCP-compatible AI client (Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others)
 2. **CLI tool** -- direct SQLite operations for store, recall, search, list, etc. (completely AI-agnostic)
-3. **HTTP daemon** -- an Axum web server exposing the same operations as a REST API with 50 endpoints (completely AI-agnostic)
+3. **HTTP daemon** -- an Axum web server exposing the same operations as a REST API with 72 routes at v0.7.0 (completely AI-agnostic)
 
 **Key architectural features:** Zero token cost (no context loaded until recall), TOON compact default response format (79% smaller than JSON), MCP prompts capability (`recall-first` behavioral rules + `memory-workflow` reference card), 4 feature tiers with optional local LLMs via Ollama, true dedup on title+namespace, 6-factor recall scoring with score field in responses.
 
 All three interfaces share the same database layer (`db.rs`) and validation layer (`validate.rs`). The daemon adds automatic garbage collection (every 30 minutes) and graceful shutdown with WAL checkpointing.
 
 ```
-main.rs          -- CLI parsing (clap), daemon setup (axum), command dispatch (40 subcommands)
-models.rs        -- Data structures: Memory, MemoryLink, query types, constants
-handlers.rs      -- HTTP request handlers (Axum extractors + JSON responses), error sanitization
-db.rs            -- All SQLite operations: CRUD, FTS5, recall scoring, GC, migration, FTS query sanitization, transactional touch/consolidate
-mcp.rs           -- MCP (Model Context Protocol) server over stdio JSON-RPC, 43 tools, notification handling
-validate.rs      -- Input validation for all write paths
-errors.rs        -- Structured error types (ApiError, MemoryError), error sanitization for HTTP responses
-color.rs         -- ANSI color output for CLI (zero dependencies, auto-detects terminal)
-config.rs        -- Tier configuration system (keyword, semantic, smart, autonomous), feature gating, TtlConfig, and archive_on_gc
-embeddings.rs    -- Embedding pipeline: HuggingFace model loading, vector generation, cosine similarity
-llm.rs           -- LLM integration via Ollama for query expansion, auto-tagging, contradiction detection
-mine.rs          -- Retroactive conversation import from Claude, ChatGPT, and Slack exports
-reranker.rs      -- Hybrid recall algorithm: blends semantic (embedding) and keyword (FTS5) scores
-hnsw.rs          -- In-memory HNSW vector index for approximate nearest-neighbor search
+main.rs            -- Thin CLI shim (W6 refactor); top-level Command enum now lives in daemon_runtime.rs (~50 subcommands at v0.7.0)
+daemon_runtime.rs  -- HTTP daemon `serve` bootstrap, MCP `mcp` dispatch, top-level clap Command enum
+models/            -- Data structures: Memory (25 fields at v0.7.0), MemoryLink (6 relations at v0.7.0), MemoryKind (Batman Form-6 vocab), Citation/SourceSpan (Form-4), query types, constants
+handlers/          -- HTTP request handlers split per domain (http.rs, federation_receive.rs, hook_subscribers.rs, transport.rs); Axum extractors + JSON responses; error sanitization
+storage/           -- SAL trait + sqlite path; CRUD, FTS5, recall scoring, GC, migration (CURRENT_SCHEMA_VERSION = 43)
+store/             -- SAL adapter implementations (sqlite + postgres + AGE feature gates)
+mcp/               -- MCP server over stdio JSON-RPC; tool registry (registry.rs), per-tool handlers under tools/, notification handling
+validate.rs        -- Input validation for all write paths
+errors.rs          -- Structured error types (ApiError, MemoryError), error sanitization for HTTP responses
+color.rs           -- ANSI color output for CLI (zero dependencies, auto-detects terminal)
+config.rs          -- Tier configuration system (keyword, semantic, smart, autonomous), feature gating, TtlConfig, archive_on_gc
+embeddings.rs      -- Embedding pipeline: HuggingFace model loading, vector generation, cosine similarity
+llm.rs             -- LLM integration via Ollama for query expansion, auto-tagging, contradiction detection
+mine.rs            -- Retroactive conversation import from Claude, ChatGPT, and Slack exports
+reranker.rs        -- Hybrid recall algorithm: blends semantic (embedding) and keyword (FTS5) scores
+hnsw.rs            -- In-memory HNSW vector index for approximate nearest-neighbor search
+governance/        -- Rule engine, agent-action evaluator, signed rule storage (L1-6 substrate rules)
+atomisation/       -- WT-1 atomiser engine + LlmCurator
+multistep_ingest/  -- Form 3 multi-step ingest orchestrator (two-phase deterministic + LLM)
+synthesis/         -- Form 1 online dedup-and-synthesis
+confidence/        -- Form 5 auto-confidence + shadow + decay
+persona/           -- QW-2 persona-as-artifact generator
+offload/           -- QW-3 context-offload primitive + TTL sweep
+forensic/          -- L2-5 forensic bundle export/verify
+federation/        -- Quorum sync, peer attestation, mTLS allowlist
+kg/                -- Knowledge-graph traversal (recursive-CTE + AGE Cypher)
+subscriptions.rs   -- HMAC-signed webhook dispatch (mandatory at v0.7.0 post R3-S1.HMAC; unsigned dispatch DISABLED), DLQ, replay
+signed_events.rs   -- Append-only audit chain with V-4 cross-row hash chain
 ```
 
 ### Embedding Pipeline (semantic tier and above)
@@ -46,21 +60,21 @@ When running at the `semantic` tier or higher, ai-memory loads a HuggingFace emb
 
 ### `src/main.rs`
 
-- `Cli` struct with `clap` derive -- defines all CLI commands and global flags (`--db`, `--json`)
-- `Command` enum -- `Serve`, `Mcp`, `Store`, `Update`, `Recall`, `Search`, `Get`, `List`, `Delete`, `Promote`, `Forget`, `Link`, `Consolidate`, `Resolve`, `Shell`, `Sync`, `SyncDaemon`, `AutoConsolidate`, `Gc`, `Stats`, `Namespaces`, `Export`, `Import`, `Completions`, `Man`, `Mine`, `Archive`, `Agents`, `Pending`, `Backup`, `Restore`, `Curator`, `Bench`, `Migrate` (gated `--features sal`), `Doctor`, `Boot`, `Install`, `Wrap`, `Logs`, `Audit` — 40 subcommands total in v0.6.3.1.
+- `Cli` struct with `clap` derive -- defines all CLI commands and global flags (`--db`, `--json`). Lives in `src/daemon_runtime.rs` (W6 refactor moved it off `src/main.rs`).
+- `Command` enum (in `src/daemon_runtime.rs`) -- at v0.7.0 the enum carries **~50 top-level subcommands** (was 40 at v0.6.3.1): the v0.6.x core (`Serve`, `Mcp`, `Store`, `Update`, `Recall`, `Search`, `Get`, `List`, `Delete`, `Promote`, `Forget`, `Link`, `Consolidate`, `Resolve`, `Shell`, `Sync`, `SyncDaemon`, `AutoConsolidate`, `Gc`, `Stats`, `Namespaces`, `Namespace`, `Export`, `Import`, `Completions`, `Man`, `Mine`, `Archive`, `Agents`, `Pending`, `Backup`, `Restore`, `Curator`, `Bench`, `Migrate` (gated `--features sal`), `SchemaInit` (gated `--features sal`), `Doctor`, `Boot`, `Install`, `Wrap`, `Logs`, `Audit`) plus the v0.7 additions (`Identity`, `Offload`, `Deref`, `Rules`, `Governance`, `VerifyReflectionChain`, `VerifySignedEventsChain`, `ExportForensicBundle`, `VerifyForensicBundle`, `ExportReflections`, `Atomise`, `Persona`, `Calibrate`, `Skill`). Run `ai-memory --help` for the live list.
 - `StoreArgs` includes `--expires-at` and `--ttl-secs` flags for custom expiration
 - `UpdateArgs` includes `--expires-at` flag for setting expiration on existing memories
 - `ListArgs` includes `--offset` flag for pagination
 - `auto_namespace()` -- detects namespace from git remote URL or directory name
 - `human_age()` -- formats ISO timestamps as "2h ago", "3d ago" for CLI output
-- `serve()` -- starts the Axum server with all routes (50 endpoints including `POST /memories/{id}/promote`, the 4 archive endpoints, the namespace-standard endpoints, and the webhook subscription endpoints), spawns GC task, handles graceful shutdown via SIGINT with WAL checkpoint
+- `serve()` -- starts the Axum server with all routes (**72 `.route(...)` registrations in `src/lib.rs` at v0.7.0** — includes `POST /memories/{id}/promote`, the 4 archive endpoints, namespace-standard endpoints, webhook subscription endpoints, KG endpoints, approval-SSE, quota status, link-verify, forensic export, federation sync), spawns GC task, handles graceful shutdown via SIGINT with WAL checkpoint
 - `cmd_*()` functions -- one per CLI command, each opens the DB directly
 
-### `src/models.rs`
+### `src/models/`
 
 - `Tier` enum (`Short`, `Mid`, `Long`) with TTL defaults: 6h, 7d, none
-- `Memory` struct -- the core data type with 15 fields (includes extensible `metadata` JSON column)
-- `MemoryLink` struct -- typed directional links between memories
+- `Memory` struct -- the core data type with **25 fields at v0.7.0** (was 15 at v0.6.x): adds `reflection_depth` (Task 1/8), `memory_kind` (Batman Form-6 vocabulary), `entity_id` + `persona_version` (QW-2), `citations` + `source_uri` + `source_span` (Form-4 fact provenance), `confidence_source` + `confidence_signals` + `confidence_decayed_at` (Form-5 calibration). Extensible `metadata` JSON column still present. Canonical truth in `src/models/memory.rs`.
+- `MemoryLink` struct -- typed directional links between memories. **Six relation variants at v0.7.0** (was four at v0.6.x): `related_to`, `supersedes`, `contradicts`, `derived_from`, `reflects_on`, `derives_from`. Carries v0.7 temporal-validity (`valid_from`, `valid_until`, `observed_by`) and attestation (`signature`, `attest_level`, `signed_at`) columns.
 - Request types: `CreateMemory`, `UpdateMemory`, `SearchQuery`, `ListQuery`, `RecallQuery`, `RecallBody`, `LinkBody`, `ForgetQuery`, `ConsolidateBody`, `ImportBody`
 - Response types: `Stats`, `TierCount`, `NamespaceCount`
 - `TtlConfig` struct -- per-tier TTL overrides loaded from `config.toml` (`short_ttl_secs`, `mid_ttl_secs`, `long_ttl_secs`, `short_extend_secs`, `mid_extend_secs`)
@@ -69,10 +83,12 @@ When running at the `semantic` tier or higher, ai-memory loads a HuggingFace emb
 
 ### `src/mcp.rs`
 
-The MCP (Model Context Protocol) server implementation. MCP is an open standard -- this server works with any MCP-compatible AI client. Runs over stdio, processing one JSON-RPC message per line. Exposes **43 tools**.
+The MCP (Model Context Protocol) server implementation. MCP is an open standard -- this server works with any MCP-compatible AI client. Runs over stdio, processing one JSON-RPC message per line. **At v0.7.0 the registry exposes 71 advertised entries at `--profile full`** (70 callable "memory tools" + the always-on `memory_capabilities` bootstrap; both numbers are intentional, see issue [#862](https://github.com/alphaonedev/ai-memory-mcp/issues/862)). Default `--profile core` ships 7 tools (the original 5 + `memory_load_family` + `memory_smart_load`) plus the always-on bootstrap.
+
+The module is now split: `src/mcp/registry.rs` owns `tool_definitions()` and the per-profile filter; `src/mcp/tools/*.rs` host per-tool handlers; `src/mcp/mod.rs` wires the JSON-RPC dispatch loop.
 
 - `RpcRequest` / `RpcResponse` / `RpcError` -- JSON-RPC 2.0 types
-- `tool_definitions()` -- returns the 43 tool schemas for `tools/list` (includes `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, `memory_archive_list`, `memory_archive_restore`, `memory_archive_purge`, `memory_archive_stats`)
+- `tool_definitions()` (`src/mcp/registry.rs`) -- returns the full-surface tool schemas for `tools/list` (every Family — Core, Graph, Admin, Power; includes v0.7 additions `memory_reflect`, `memory_atomise`, `memory_ingest_multistep`, `memory_persona`, `memory_persona_generate`, `memory_offload`, `memory_deref`, `memory_calibrate_confidence`, the 7 L1-5 Agent Skills tools, `memory_check_agent_action`, `memory_rule_list`, `memory_export_reflection`, `memory_dependents_of_invalidated`, `memory_find_paths`, `memory_verify`, `memory_quota_status`, the original `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, the 4 archive tools, etc.). Filtered to the active `--profile` by `tool_definitions_for_profile()`. **Per issue [#864](https://github.com/alphaonedev/ai-memory-mcp/issues/864): "Family" in this codebase always refers to the MCP tool-family enum (`Family::Core` / `Family::Graph` / `Family::Admin` / `Family::Power`), NEVER to the `MemoryKind` Batman vocabulary — those are unrelated taxonomies.**
   - `memory_recall` schema includes `until` parameter and `format` parameter (enum: `"json"`, `"toon"`, `"toon_compact"`, default: `"toon_compact"`)
   - `memory_search` schema includes `format` parameter (enum: `"json"`, `"toon"`, `"toon_compact"`, default: `"toon_compact"`) and enforces `maximum: 200` on limit
   - `memory_list` schema includes `format` parameter (enum: `"json"`, `"toon"`, `"toon_compact"`, default: `"toon_compact"`) and enforces `maximum: 200` on limit
@@ -87,7 +103,7 @@ Protocol version: `2024-11-05`. All tool responses are wrapped in MCP content bl
 
 **MCP Prompts:** The server exposes 2 prompts via `prompts/list`:
 - **recall-first** -- System prompt with 8 behavioral rules for proactive memory use. Supports an optional `namespace` argument for scoped recall.
-- **memory-workflow** -- Quick reference card for all 43 tool usage patterns.
+- **memory-workflow** -- Quick reference card for the full tool surface.
 
 **MCP Error Codes:** The server uses standard JSON-RPC 2.0 error codes:
 - `-32700` -- Parse error (malformed JSON)
@@ -515,7 +531,7 @@ Base URL: `http://127.0.0.1:9077/api/v1`
 
 All responses are JSON. Error responses include `{"error": "message"}`. Database errors are sanitized -- clients receive `"Internal server error"` instead of raw SQLite error details.
 
-The HTTP API exposes **50 endpoints** in v0.6.3.1 (canonical count from `src/lib.rs:68-194` Router builder; v0.6.3 baseline of 42 is frozen on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)).
+The HTTP API exposes **72 routes** at v0.7.0 (canonical count via `grep -cE "^\s*\.route\(" src/lib.rs`; v0.6.3.1 baseline of 50 and v0.6.3 baseline of 42 are frozen on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)).
 
 ### Health Check
 
@@ -786,7 +802,7 @@ Global flags:
 
 ### `serve`
 
-Start the HTTP daemon (50 endpoints).
+Start the HTTP daemon (72 routes at v0.7.0).
 
 ```bash
 ai-memory serve --host 127.0.0.1 --port 9077
@@ -794,7 +810,7 @@ ai-memory serve --host 127.0.0.1 --port 9077
 
 ### `mcp`
 
-Run as an MCP tool server over stdio. This is the primary integration path for any MCP-compatible AI client. Exposes 43 tools.
+Run as an MCP tool server over stdio. This is the primary integration path for any MCP-compatible AI client. At v0.7.0, the `--profile full` surface advertises 71 entries (70 callable memory tools + the always-on `memory_capabilities` bootstrap); the default `--profile core` ships 7 + the bootstrap.
 
 ```bash
 ai-memory mcp

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "description": "ai-memory v0.7.0 — Claude Code project settings. Pinned 2026-05-19 alongside the v0.7.0 SHIP-RECOMMENDED memo on issue #836.",
+  "lsp": {
+    "rust": {
+      "command": "rust-analyzer",
+      "rootMarkers": ["Cargo.toml", "Cargo.lock"],
+      "fileExtensions": ["rs"],
+      "initializationOptions": {
+        "cargo": {
+          "features": "all",
+          "loadOutDirsFromCheck": true,
+          "buildScripts": {
+            "enable": true
+          }
+        },
+        "checkOnSave": false,
+        "procMacro": {
+          "enable": true
+        },
+        "diagnostics": {
+          "enable": true,
+          "experimental": {
+            "enable": false
+          }
+        }
+      },
+      "notes": [
+        "rust-analyzer must be installed: `rustup component add rust-analyzer`",
+        "Initial workspace indexing on this 200k+ LOC codebase takes 2-5 minutes; subsequent sessions are warm.",
+        "checkOnSave disabled because `cargo check` on this workspace is heavy + tests are gated separately by CI.",
+        "Memory ceiling: rust-analyzer can take 2-4 GB resident. On hosts with <16 GB free, expect index OOM under concurrent cargo/llvm-cov load."
+      ]
+    }
+  },
+  "permissions": {
+    "notes": [
+      "Per CLAUDE.md project hard rule: no agent-created files under /tmp, /var/tmp, /private/tmp.",
+      "All scratch lives under `.local-runs/` (gitignored).",
+      "These permissions are enforced by convention + the SessionStart hook; the .deny list below makes them version-controlled."
+    ],
+    "deny": [
+      "Write(/tmp/**)",
+      "Write(/var/tmp/**)",
+      "Write(/private/tmp/**)"
+    ]
+  }
+}

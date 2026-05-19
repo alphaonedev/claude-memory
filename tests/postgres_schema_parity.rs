@@ -41,31 +41,26 @@ use ai_memory::store::postgres::PostgresStore;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
-/// `SQLite` `CURRENT_SCHEMA_VERSION` as of v0.7.0.
-///
-/// Mirrors `src/db.rs::CURRENT_SCHEMA_VERSION`. We re-declare here
-/// rather than re-export because `crate::db` is gated on the `SQLite`
-/// feature surface and the parity test must run identically against
-/// either backend's `schema_version` stamp. A future bump on the
-/// `SQLite` side without the corresponding `Postgres` port will trip
-/// this test.
-const SQLITE_CURRENT_VERSION: i64 = 29;
+mod common;
+use common::postgres_url;
 
 /// `Postgres` `CURRENT_SCHEMA_VERSION` — tracks
-/// `src/store/postgres.rs::CURRENT_SCHEMA_VERSION`. Diverges from the
-/// SQLite ladder for postgres-only steps:
-///   - v29: in-place `vector(N)` conversion (no SQLite analogue).
-///   - v30: `memories_metadata_is_object` CHECK (M15; SQLite metadata
-///     column has no `jsonb_typeof` equivalent).
-///   - v31: `memories.reflection_depth` column (v0.7.0 Task 1/8 —
-///     recursive learning). Mirrors SQLite v29; the offset by two is
-///     why the ladders diverge by 2 here.
-const POSTGRES_CURRENT_VERSION: i64 = 31;
-
-/// Returns Some(url) when the live-PG fixture is configured, None otherwise.
-fn postgres_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-}
+/// `src/store/postgres.rs::CURRENT_SCHEMA_VERSION`.
+///
+/// The two ladders (SQLite + Postgres) are independent integer
+/// namespaces. Early in v0.7 the Postgres ladder ran AHEAD of SQLite
+/// because of postgres-only steps (v29 in-place `vector(N)`
+/// conversion, v30 `metadata_is_object` CHECK). The SQLite ladder has
+/// since added more steps than Postgres (v40/v41/v42 PERF/Cluster
+/// work) and the integer relationship inverted — SQLite is now at 42
+/// while Postgres is at 41, and Postgres v41 is the functional mirror
+/// of SQLite v42 (PERF-8 auto-persona `mentioned_entity_id`). The
+/// functional mapping is documented inline in each `migrate_vN` arm
+/// of `src/store/postgres.rs`; the integer relationship here is just
+/// bookkeeping for this parity test. The previous cross-ladder `>=`
+/// floor assertion was retired in #797 once the namespaces inverted —
+/// see the docstring of `schema_versions_match_across_adapters`.
+const POSTGRES_CURRENT_VERSION: i64 = 47;
 
 /// Open an out-of-band `sqlx` pool against the same URL the adapter
 /// uses. We deliberately bypass `PostgresStore` for the inspection
@@ -139,26 +134,22 @@ async fn schema_versions_match_across_adapters() {
         .expect("read schema_version");
 
     let pg_version_i64 = i64::from(pg_version.expect("schema_version row must exist"));
-    // Postgres is allowed to land postgres-only ladder steps (v29
-    // in-place vector(N) conversion, v30 M15 metadata-CHECK) so the
-    // floor is the SQLite version, the ceiling is the Postgres
-    // version. Both bounds re-trip the assertion when either side
-    // drifts.
-    assert!(
-        pg_version_i64 >= SQLITE_CURRENT_VERSION,
-        "Postgres schema_version ({pg_version_i64}) must be at least the \
-         SQLite CURRENT_SCHEMA_VERSION ({SQLITE_CURRENT_VERSION}). \
-         If you bumped the SQLite ladder, port the corresponding \
-         migrate_vN function to src/store/postgres.rs."
-    );
+    // The two ladders are independent integer namespaces (see the
+    // POSTGRES_CURRENT_VERSION docstring); a direct `>=` cross-ladder
+    // comparison is no longer meaningful now that SQLite trails Postgres
+    // numerically while still leading functionally. The equality
+    // assertion below is the load-bearing parity check — if Postgres'
+    // `migrate()` did not reach its own CURRENT_SCHEMA_VERSION constant
+    // (because a `migrate_vN` arm panicked, was skipped, or the
+    // constant was bumped without the corresponding function), this
+    // test fails.
     assert_eq!(
         pg_version_i64, POSTGRES_CURRENT_VERSION,
         "Postgres schema_version ({pg_version_i64}) must match the \
          Postgres CURRENT_SCHEMA_VERSION ({POSTGRES_CURRENT_VERSION}). \
-         A drift here means a Postgres-only ladder step (e.g. v29 \
-         in-place vector(N), v30 M15 metadata CHECK) didn't run, \
-         or the constant was bumped without the corresponding \
-         migrate_vN function."
+         A drift here means a Postgres ladder step didn't run, or the \
+         constant was bumped without the corresponding migrate_vN \
+         function in src/store/postgres.rs."
     );
 }
 

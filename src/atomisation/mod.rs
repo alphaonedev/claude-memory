@@ -599,6 +599,7 @@ fn write_atom(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
 
     let actual_id = db::insert(conn, &mem)?;

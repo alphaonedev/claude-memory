@@ -129,7 +129,10 @@ pub async fn migrate(
     namespace_filter: Option<String>,
     dry_run: bool,
 ) -> MigrationReport {
-    let ctx = CallerContext::for_agent("ai:migrate");
+    // #910 — migrate is an admin/operator surface that must round-
+    // trip every row regardless of metadata.scope; use the admin
+    // builder so the SAL-level visibility filter is bypassed.
+    let ctx = CallerContext::for_admin("ai:migrate");
     let mut report = MigrationReport {
         memories_read: 0,
         memories_written: 0,
@@ -329,7 +332,16 @@ mod tests {
             updated_at: ts,
             last_accessed_at: None,
             expires_at: None,
-            metadata: serde_json::json!({"agent_id":"ai:migrate-test"}),
+            // #910 — mark scope=collective so the SAL visibility filter
+            // doesn't drop these rows on cross-agent fetches (the test
+            // seeds as ai:migrate-test and reads back via ai:seed/ai:t).
+            // Migrate itself uses `CallerContext::for_admin` and would
+            // bypass the filter regardless; this is for the post-migrate
+            // `get(&dst_ctx, ...)` assertions.
+            metadata: serde_json::json!({
+                "agent_id": "ai:migrate-test",
+                "scope": "collective",
+            }),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
@@ -340,6 +352,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 
@@ -469,6 +482,7 @@ mod tests {
             observed_by: None,
             valid_from: None,
             valid_until: None,
+            attest_level: None,
         }
     }
 

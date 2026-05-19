@@ -123,6 +123,24 @@ pub fn handle_skill_promote_from_reflection(
     // Validate skill name against agentskills.io §3.1 BEFORE any DB work
     // so the caller sees the parse error at the boundary.
     crate::parsing::skill_md::validate_skill_name(skill_name)?;
+
+    // #913 (security-medium / SOC2, 2026-05-19) — admin/state-change
+    // audit. Skill promotion mints a new signed capability bundle from
+    // a reflection; emit the forensic-chain row BEFORE the storage write
+    // so the audit trail captures the caller + source reflection_id
+    // regardless of downstream outcome.
+    let caller = crate::identity::resolve_agent_id(params["agent_id"].as_str(), None)
+        .unwrap_or_else(|_| "anonymous:invalid".to_string());
+    crate::governance::audit::record_decision(
+        &caller,
+        "allow",
+        "skill_promote_from_reflection",
+        "",
+        serde_json::json!({
+            "reflection_id": reflection_id,
+            "skill_name": skill_name,
+        }),
+    );
     if skill_description.len() > 1024 {
         return Err(format!(
             "skill 'description' must be ≤ 1024 characters \
@@ -366,6 +384,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(conn, &m).expect("insert observation")
     }

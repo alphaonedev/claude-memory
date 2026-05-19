@@ -21,21 +21,19 @@
 //! window but is the standard pattern across Rust integration suites.
 
 use std::io::{BufRead, BufReader};
-use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
-const SPAWN_TIMEOUT: Duration = Duration::from_secs(15);
+mod common;
+use common::free_port;
 
-/// Pick a free port by binding to `127.0.0.1:0` and immediately dropping
-/// the listener. The OS won't reassign that port to another process for
-/// a brief window, which is enough for `serve` to bind it.
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
-    listener.local_addr().expect("local_addr").port()
-}
+// CI's Code Coverage job runs the test binary under `cargo llvm-cov`
+// instrumentation, which inflates startup time by 3-5x. 60s gives
+// enough headroom on every supported CI surface (Linux/macOS/Windows)
+// regardless of instrumentation overhead.
+const SPAWN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// RAII guard for the spawned daemon. Drops kill the child on test
 /// exit so leaked test processes don't accumulate on flaky failures.

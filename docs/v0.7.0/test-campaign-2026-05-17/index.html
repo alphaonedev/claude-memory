@@ -1,0 +1,134 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+  Test campaign landing — issue #835. README.md is the source of truth;
+  this page surfaces it cleanly from the GitHub Pages site nav.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>v0.7.0 test campaign &mdash; 2026-05-17 (full-spectrum)</title>
+<meta name="description" content="ai-memory v0.7.0 full-spectrum AI NHI test campaign, 2026-05-17. Tracks A (NHI playbook), B (A2A 4-domain on Docker + Grok 4.3), C (Postgres + AGE), D (cross-node). Reproducible.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/v0.7.0/test-campaign-2026-05-17/">
+<style>
+:root{--bg:#0a0a0a;--panel:#121212;--border:#262626;--border-hi:#3a3a3a;--text:#f5f5f5;--muted:#9a9a9a;--dim:#6b6b6b;--accent:#6ee7ff;--good:#7cd992;--code-bg:#161616;--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;--font-mono:"SF Mono","JetBrains Mono","Cascadia Code",Consolas,monospace;--w-mid:840px;--w-wide:1080px}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:var(--font-sans);line-height:1.65;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+code{font-family:var(--font-mono);font-size:.88rem;background:var(--code-bg);padding:.1em .35em;border-radius:3px;color:#d4d4d4}
+.wrap-mid{max-width:var(--w-mid);margin:0 auto;padding:0 1.5rem}
+.topnav{border-bottom:1px solid var(--border);position:sticky;top:0;background:rgba(10,10,10,.92);backdrop-filter:blur(8px);z-index:50}
+.topnav .row{display:flex;align-items:center;justify-content:space-between;padding:1rem 1.5rem;max-width:var(--w-wide);margin:0 auto;font-size:.9rem}
+.topnav .brand{color:var(--text);font-weight:600}
+.topnav .links{display:flex;gap:1.5rem}
+.topnav .links a{color:var(--muted)}
+.topnav .links a:hover{color:var(--text);text-decoration:none}
+.crumb{padding:1.25rem 1.5rem 0;max-width:var(--w-mid);margin:0 auto;color:var(--dim);font-size:.82rem;font-family:var(--font-mono)}
+.crumb a{color:var(--muted)}
+.hero{padding:3rem 0 2rem}
+.hero .eyebrow{font-family:var(--font-mono);font-size:.72rem;letter-spacing:.18em;color:var(--accent);text-transform:uppercase;margin-bottom:1rem}
+.hero h1{font-size:2rem;font-weight:700;letter-spacing:-.025em;line-height:1.15;margin-bottom:1.25rem}
+.hero .lede{font-size:1.05rem;color:var(--muted);max-width:680px;line-height:1.6}
+.hero .verdict{display:inline-block;margin-top:1rem;font-family:var(--font-mono);font-size:.85rem;padding:.4rem .9rem;border-radius:5px;font-weight:700;letter-spacing:.05em}
+.v-ship{background:rgba(124,217,146,.1);color:var(--good);border:1px solid rgba(124,217,146,.3)}
+section{padding:2.5rem 0;border-top:1px solid var(--border)}
+.eyebrow-h2{font-family:var(--font-mono);font-size:.7rem;letter-spacing:.18em;color:var(--dim);text-transform:uppercase;margin-bottom:.5rem}
+h2{font-size:1.4rem;font-weight:700;letter-spacing:-.015em;margin-bottom:1rem}
+p{color:var(--muted);margin-bottom:1rem;max-width:680px}
+.docs{display:grid;grid-template-columns:1fr;gap:.6rem;margin:1.25rem 0}
+.docs a{display:flex;justify-content:space-between;align-items:center;padding:1rem 1.25rem;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.95rem;transition:border-color .15s;gap:1rem}
+.docs a:hover{border-color:var(--accent);text-decoration:none}
+.docs .info{flex:1;min-width:0}
+.docs .info strong{display:block;color:var(--text);font-weight:600;margin-bottom:.15rem}
+.docs .info span{display:block;color:var(--muted);font-size:.82rem;font-weight:400}
+.docs .arrow{color:var(--accent);flex-shrink:0}
+.tracks{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.88rem}
+.tracks th,.tracks td{padding:.6rem .85rem;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
+.tracks th{background:var(--panel);color:var(--muted);font-weight:600;font-size:.72rem;text-transform:uppercase;letter-spacing:.08em}
+.tracks td:first-child{font-family:var(--font-mono);color:var(--accent);font-weight:600;width:5rem}
+.fact{display:grid;grid-template-columns:max-content 1fr;gap:.5rem 1rem;margin:1rem 0;padding:1rem 1.25rem;background:var(--panel);border:1px solid var(--border);border-radius:6px;font-size:.88rem}
+.fact dt{color:var(--accent);font-family:var(--font-mono);font-weight:600;white-space:nowrap}
+.fact dd{color:var(--muted)}
+footer{padding:3rem 0;border-top:1px solid var(--border);color:var(--dim);font-size:.82rem;text-align:center}
+footer a{color:var(--muted)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="row">
+    <a class="brand" href="../../">ai-memory</a>
+    <div class="links">
+      <a href="../../#install">Install</a>
+      <a href="../../#campaigns">Campaigns</a>
+      <a href="../release-notes.md">v0.7.0 notes</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<div class="crumb"><a href="../../">ai-memory</a> &nbsp;/&nbsp; <a href="../../#campaigns">v0.7.0</a> &nbsp;/&nbsp; test-campaign-2026-05-17</div>
+
+<header class="hero wrap-mid">
+  <div class="eyebrow">Test campaign &middot; 2026-05-17</div>
+  <h1>v0.7.0 &mdash; full-spectrum AI NHI test campaign.</h1>
+  <p class="lede">Reproducible, peer-reviewable evidence for ai-memory v0.7.0. Four substantive tracks exercised end-to-end across Node A (FROSTYi.local) and Node B (Postgres + Apache AGE).</p>
+</header>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">Tracks</div>
+  <h2>What was tested.</h2>
+  <table class="tracks">
+    <thead><tr><th>Track</th><th>Scope</th><th>Where</th></tr></thead>
+    <tbody>
+      <tr><td>A</td><td>NHI test playbook (12 phases, P0 &rarr; P11 + verdict)</td><td>Node A, local sqlite</td></tr>
+      <tr><td>B</td><td>A2A 4-domain campaign (alice / bob / charlie / dave)</td><td>Node A, IronClaw + grok-4.3</td></tr>
+      <tr><td>C</td><td>Postgres + Apache AGE backend tests</td><td>Node A binary &rarr; Node B postgres</td></tr>
+      <tr><td>D</td><td>Cross-node integration (.100 &harr; .1)</td><td>Both nodes</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">Files in this campaign</div>
+  <h2>Read in this order.</h2>
+  <div class="docs">
+    <a href="README.md"><span class="info"><strong>README.md</strong><span>Campaign index, namespaces, reproducibility contract, peer-review guide</span></span><span class="arrow">&rarr;</span></a>
+    <a href="track-a-nhi-results.md"><span class="info"><strong>track-a-nhi-results.md</strong><span>NHI playbook P0&ndash;P11 raw results + per-phase verdict</span></span><span class="arrow">&rarr;</span></a>
+  </div>
+  <p>Additional track files (B/C/D + audience summaries + final verdict) are referenced in <a href="README.md">README.md</a> and may be present in the campaign directory or under sibling track files.</p>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">Provenance</div>
+  <h2>Reproducibility contract.</h2>
+  <dl class="fact">
+    <dt>Campaign start</dt><dd>2026-05-17</dd>
+    <dt>Operator</dt><dd>binary2029@gmail.com</dd>
+    <dt>Authoring agent</dt><dd>Claude (Opus 4.7 1M context)</dd>
+    <dt>PR under test</dt><dd>#820 on <code>local/install-815-816</code> &rarr; <code>release/v0.7.0</code></dd>
+    <dt>Global rule</dt><dd>memory <code>71ecce23-611b-4984-962d-d37c4309f261</code> (track-and-fix)</dd>
+  </dl>
+  <p>Every result meets seven reproducibility criteria (pinned binary SHA, dependencies, external services, data, environment, re-runnable shell recipes, per-result commits). See README.md &sect;Reproducibility contract for the full list.</p>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">Other campaigns</div>
+  <h2>Related runs.</h2>
+  <div class="docs">
+    <a href="../test-campaign-2026-05-18/"><span class="info"><strong>2026-05-18 &mdash; Track A re-run + in-campaign fix batch</strong><span>SHIP verdict, 85 PASS / 0 FAIL, 10 issues closed in-campaign</span></span><span class="arrow">&rarr;</span></a>
+    <a href="../release-notes.md"><span class="info"><strong>v0.7.0 release notes</strong><span>What changed since v0.6.4</span></span><span class="arrow">&rarr;</span></a>
+  </div>
+</section>
+
+<footer>
+  <a href="../../">&larr; back to ai-memory</a> &middot;
+  <a href="https://github.com/alphaonedev/ai-memory-mcp">source</a> &middot;
+  Apache-2.0 &middot; &copy; 2026 AlphaOne LLC
+</footer>
+
+</body>
+</html>

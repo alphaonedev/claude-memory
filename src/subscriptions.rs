@@ -133,18 +133,52 @@ pub fn insert(conn: &Connection, req: &NewSubscription<'_>) -> Result<String> {
     Ok(id)
 }
 
-/// Delete a subscription by id. Returns true if a row was removed.
-pub fn delete(conn: &Connection, id: &str) -> Result<bool> {
-    let n = conn.execute("DELETE FROM subscriptions WHERE id = ?1", params![id])?;
+/// Delete a subscription by id, optionally scoped to its owner.
+///
+/// Cross-tenant authorization (#870, security-high, 2026-05-18):
+/// When `caller_agent_id` is `Some(aid)`, the DELETE only matches rows
+/// where `created_by = aid` — preventing tenant A from unsubscribing
+/// tenant B's webhook. When `None`, the DELETE matches by id alone
+/// (admin path: federation receive, GC, operator CLI). Callers exposed
+/// to untrusted input (MCP `memory_unsubscribe`, HTTP
+/// `DELETE /api/v1/subscriptions`) MUST pass `Some(<authenticated
+/// caller>)` — anything else is a bypass.
+///
+/// Returns true if a row was removed (i.e. it both existed AND matched
+/// the owner clause when one was supplied).
+pub fn delete(conn: &Connection, id: &str, caller_agent_id: Option<&str>) -> Result<bool> {
+    let n = if let Some(aid) = caller_agent_id {
+        conn.execute(
+            "DELETE FROM subscriptions WHERE id = ?1 AND created_by = ?2",
+            params![id, aid],
+        )?
+    } else {
+        conn.execute("DELETE FROM subscriptions WHERE id = ?1", params![id])?
+    };
     Ok(n > 0)
 }
 
-/// List all active subscriptions.
-pub fn list(conn: &Connection) -> Result<Vec<Subscription>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, url, events, namespace_filter, agent_filter, created_by, created_at, dispatch_count, failure_count, event_types FROM subscriptions ORDER BY created_at DESC",
-    )?;
-    let rows = stmt.query_map([], |row| {
+/// List active subscriptions, optionally scoped to a single owner.
+///
+/// Cross-tenant authorization (#872, security-high, 2026-05-18):
+/// When `caller_agent_id` is `Some(aid)`, only rows where
+/// `created_by = aid` are returned — preventing tenant A from
+/// enumerating tenant B's webhook fleet. When `None`, every row is
+/// returned (internal use: dispatch fan-out, federation, operator
+/// inventory). Callers exposed to untrusted input (MCP
+/// `memory_list_subscriptions`, HTTP `GET /api/v1/subscriptions`) MUST
+/// pass `Some(<authenticated caller>)`.
+pub fn list(conn: &Connection, caller_agent_id: Option<&str>) -> Result<Vec<Subscription>> {
+    let mut stmt = if caller_agent_id.is_some() {
+        conn.prepare(
+            "SELECT id, url, events, namespace_filter, agent_filter, created_by, created_at, dispatch_count, failure_count, event_types FROM subscriptions WHERE created_by = ?1 ORDER BY created_at DESC",
+        )?
+    } else {
+        conn.prepare(
+            "SELECT id, url, events, namespace_filter, agent_filter, created_by, created_at, dispatch_count, failure_count, event_types FROM subscriptions ORDER BY created_at DESC",
+        )?
+    };
+    let row_decoder = |row: &rusqlite::Row<'_>| {
         let event_types_raw: Option<String> = row.get(9)?;
         // P5: decode the JSON column. A corrupt row should not break
         // the entire list — fall back to None (= all-events) and warn.
@@ -170,9 +204,15 @@ pub fn list(conn: &Connection) -> Result<Vec<Subscription>> {
             failure_count: row.get(8)?,
             event_types,
         })
-    })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .context("subscription row decode failed")
+    };
+    let rows = if let Some(aid) = caller_agent_id {
+        stmt.query_map(params![aid], row_decoder)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+    } else {
+        stmt.query_map([], row_decoder)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+    };
+    rows.context("subscription row decode failed")
 }
 
 /// P5 (G9): list subscriptions matching a specific event type. Returns
@@ -508,7 +548,12 @@ pub fn dispatch_event_with_details(
     db_path: &std::path::Path,
     details: Option<serde_json::Value>,
 ) {
-    let subs = match list(conn) {
+    // Dispatch path needs the global view (every tenant's subscriptions
+    // for this event), so `None` here is correct — ownership scoping
+    // would silently drop matching subscribers belonging to OTHER
+    // tenants. The cross-tenant authorization gate lives at the wire
+    // surface (MCP/HTTP handlers), not here. See #870/#872/#874.
+    let subs = match list(conn, None) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("subscription list failed during dispatch: {e}");
@@ -1871,7 +1916,7 @@ mod tests {
         .unwrap();
         assert!(!id.is_empty());
 
-        let subs = list(&conn).unwrap();
+        let subs = list(&conn, None).unwrap();
         assert_eq!(subs.len(), 1);
         let s = &subs[0];
         assert_eq!(s.id, id);
@@ -1977,15 +2022,15 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(delete(&conn, &id).unwrap());
-        assert!(list(&conn).unwrap().is_empty());
+        assert!(delete(&conn, &id, None).unwrap());
+        assert!(list(&conn, None).unwrap().is_empty());
     }
 
     #[test]
     fn delete_returns_false_when_row_missing() {
         let (_keep, path) = fresh_db();
         let conn = Connection::open(&path).unwrap();
-        assert!(!delete(&conn, "nope").unwrap());
+        assert!(!delete(&conn, "nope", None).unwrap());
     }
 
     #[test]
@@ -2021,7 +2066,7 @@ mod tests {
             },
         )
         .unwrap();
-        let subs = list(&conn).unwrap();
+        let subs = list(&conn, None).unwrap();
         assert_eq!(subs.len(), 2);
         // Most recent first.
         assert_eq!(subs[0].id, id2);

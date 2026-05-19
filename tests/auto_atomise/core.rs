@@ -39,7 +39,8 @@ use ai_memory::hooks::pre_store::{
     maybe_enqueue_auto_atomise,
 };
 use ai_memory::models::{
-    ApproverType, GovernanceLevel, GovernancePolicy, Memory, MemoryKind, Tier,
+    ApproverType, AtomisationPolicy, CorePolicy, GovernanceLevel, GovernancePolicy, Memory,
+    MemoryKind, Tier,
 };
 use ai_memory::storage as db;
 
@@ -198,51 +199,43 @@ fn shared_db_conn() -> Connection {
 
 fn opt_in_policy(threshold: u32, max_atom_tokens: u32) -> GovernancePolicy {
     GovernancePolicy {
-        write: GovernanceLevel::Any,
-        promote: GovernanceLevel::Any,
-        delete: GovernanceLevel::Owner,
-        approver: ApproverType::Human,
-        inherit: true,
-        max_reflection_depth: None,
-        auto_export_reflections_to_filesystem: None,
-        auto_atomise: Some(true),
-        auto_atomise_threshold_cl100k: Some(threshold),
-        auto_atomise_max_atom_tokens: Some(max_atom_tokens),
-        auto_atomise_max_retries: None,
-        auto_persona_trigger_every_n_memories: None,
-        auto_export_personas_to_filesystem: None,
-        auto_atomise_mode: None,
-        legacy_per_pair_classifier: None,
-        auto_classify_kind: None,
-        synthesis_failure_mode: None,
-        synthesis_max_deletes_per_call: None,
-        synthesis_max_candidate_chars: None,
-        multistep_max_content_chars: None,
+        core: CorePolicy {
+            write: GovernanceLevel::Any,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Human,
+            inherit: true,
+            max_reflection_depth: None,
+        },
+        atomisation: AtomisationPolicy {
+            auto_atomise: Some(true),
+            auto_atomise_threshold_cl100k: Some(threshold),
+            auto_atomise_max_atom_tokens: Some(max_atom_tokens),
+            auto_atomise_max_retries: None,
+            auto_atomise_mode: None,
+        },
+        ..Default::default()
     }
 }
 
 fn opt_out_policy() -> GovernancePolicy {
     GovernancePolicy {
-        write: GovernanceLevel::Any,
-        promote: GovernanceLevel::Any,
-        delete: GovernanceLevel::Owner,
-        approver: ApproverType::Human,
-        inherit: true,
-        max_reflection_depth: None,
-        auto_export_reflections_to_filesystem: None,
-        auto_atomise: Some(false),
-        auto_atomise_threshold_cl100k: None,
-        auto_atomise_max_atom_tokens: None,
-        auto_atomise_max_retries: None,
-        auto_persona_trigger_every_n_memories: None,
-        auto_export_personas_to_filesystem: None,
-        auto_atomise_mode: None,
-        legacy_per_pair_classifier: None,
-        auto_classify_kind: None,
-        synthesis_failure_mode: None,
-        synthesis_max_deletes_per_call: None,
-        synthesis_max_candidate_chars: None,
-        multistep_max_content_chars: None,
+        core: CorePolicy {
+            write: GovernanceLevel::Any,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Human,
+            inherit: true,
+            max_reflection_depth: None,
+        },
+        atomisation: AtomisationPolicy {
+            auto_atomise: Some(false),
+            auto_atomise_threshold_cl100k: None,
+            auto_atomise_max_atom_tokens: None,
+            auto_atomise_max_retries: None,
+            auto_atomise_mode: None,
+        },
+        ..Default::default()
     }
 }
 
@@ -311,6 +304,7 @@ fn insert_memory(conn: &Connection, ns: &str, content: &str) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let id = db::insert(conn, &mem).expect("insert");
     Memory { id, ..mem }
@@ -741,6 +735,7 @@ fn test_auto_atomise_refused_memory_not_atomised() {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
 
     let insert_result = db::insert(&conn, &mem);

@@ -39,6 +39,11 @@ pub mod peer_attestation;
 pub mod quorum;
 pub mod receive;
 pub mod reflection_bookkeeping;
+// v0.7.0 #791 — per-message Ed25519 signing of federation POSTs.
+// Outbound POSTs (`broadcast_*_quorum`) attach an `X-Memory-Sig`
+// header; inbound `/sync/push` rejects missing / invalid sigs with
+// `401 Unauthorized` when `AI_MEMORY_FED_REQUIRE_SIG=1` (default).
+pub mod signing;
 pub mod sync;
 pub mod vector_clock;
 
@@ -67,6 +72,11 @@ pub struct FederationConfig {
     /// stay unmodified (backwards-compatible with mTLS-only deployments
     /// and the v0.6.x default-off auth posture).
     pub api_key: Option<String>,
+    /// v0.7.0 #791 — Ed25519 signing key the outbound `post_once` uses
+    /// to compute the `X-Memory-Sig: ed25519=<base64>` header. `None`
+    /// = no header attached (legacy peers + receivers that opted out
+    /// via `AI_MEMORY_FED_REQUIRE_SIG=0` keep working).
+    pub signing_key: Option<std::sync::Arc<ed25519_dalek::SigningKey>>,
 }
 
 /// A single peer in the quorum mesh. The `id` is what we record in
@@ -122,6 +132,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 
@@ -219,6 +230,7 @@ mod tests {
             client,
             sender_agent_id: "ai:fed-test".to_string(),
             api_key: None,
+            signing_key: None,
         }
     }
 
@@ -609,6 +621,7 @@ mod tests {
             observed_by: None,
             valid_from: None,
             valid_until: None,
+            attest_level: None,
         }
     }
 
@@ -1318,6 +1331,7 @@ mod tests {
             client,
             sender_agent_id: "ai:catchup-test".to_string(),
             api_key: None,
+            signing_key: None,
         }
     }
 
@@ -1346,7 +1360,16 @@ mod tests {
             updated_at: updated_at.to_string(),
             last_accessed_at: None,
             expires_at: None,
-            metadata: serde_json::json!({"agent_id":"ai:peer-0"}),
+            // #910 — mark scope=collective so the test's post-catchup
+            // `store.get(&CallerContext::for_agent("test"), ...)` round-
+            // trip doesn't trip the SAL-level scope=private filter.
+            // Real-world catchup uses `for_admin` and bypasses the
+            // filter; the test fixtures need `scope=collective` to
+            // round-trip via tenant-scoped reads.
+            metadata: serde_json::json!({
+                "agent_id": "ai:peer-0",
+                "scope": "collective",
+            }),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
@@ -1357,6 +1380,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 
@@ -1745,7 +1769,7 @@ mod tests {
         let target = format!("{url}/api/v1/sync/push");
 
         let outcome =
-            post_and_classify(&client, &target, &body, "mem-x", Some("mem-x"), None).await;
+            post_and_classify(&client, &target, &body, "mem-x", Some("mem-x"), None, None).await;
         match outcome {
             AckOutcome::Fail(reason) => {
                 assert!(
@@ -1802,7 +1826,8 @@ mod tests {
             .build()
             .unwrap();
         let body = serde_json::json!({"sender_agent_id":"ai:test","memories":[]});
-        let outcome = post_and_classify(&client, &url, &body, "mem-x", Some("mem-x"), None).await;
+        let outcome =
+            post_and_classify(&client, &url, &body, "mem-x", Some("mem-x"), None, None).await;
         assert!(
             matches!(outcome, AckOutcome::IdDrift),
             "expected IdDrift, got {outcome:?}"
@@ -1832,6 +1857,7 @@ mod tests {
             client,
             sender_agent_id: "ai:no-peers".to_string(),
             api_key: None,
+            signing_key: None,
         };
         // Non-empty memories list — the shortcut should still fire because
         // the peer list is empty.
@@ -2096,6 +2122,7 @@ mod tests {
             client,
             sender_agent_id: "ai:no-suffix".to_string(),
             api_key: None,
+            signing_key: None,
         };
         let db = build_test_db();
         catchup_once(&cfg, &db).await;

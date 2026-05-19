@@ -4,7 +4,12 @@
 # The single source of truth is `Profile::full().expected_tool_count()`
 # in `src/profile.rs` (and the per-family `Family::expected_tool_count`
 # match arm at `src/profile.rs:279-318`). At v0.7.0 the canonical
-# answer is 71 tools at `--profile full` and 7 at `--profile core`.
+# answer is 73 entries at `--profile full` (72 callable + memory_capabilities
+# bootstrap) and 7 at `--profile core`.
+#
+# The grep counts `"memory_*"` LITERALS which include 73 tool-name strings
+# plus 1 field-name reference (`memory_id` in an input schema) = 74 literals
+# at v0.7.0. Range 73±1 covers both noise + the tool-vs-literal off-by-one.
 #
 # This workflow is a CI grep gate — fast, cheap, deterministic. It
 # catches the most common drift modes:
@@ -36,14 +41,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 'registry-vs-profile parity (71 unique memory_* literals)'
+      - name: 'registry-vs-profile parity (74 unique memory_* literals at v0.7.0)'
         shell: bash
         run: |
           count=$(grep -oE '"memory_[a-z_]+"' src/mcp/registry.rs | sort -u | wc -l | tr -d ' ')
           echo "registry has $count unique memory_* tool literals"
-          # 71 at v0.7.0 — bump in lockstep with Family::expected_tool_count.
-          if [ "$count" -lt 70 ] || [ "$count" -gt 72 ]; then
-            echo "::error::registry memory_* literal count ($count) drifted from 71±1"
+          # 74 at v0.7.0 (73 tool definitions + 1 `memory_id` field reference
+          # in input schema) — bump in lockstep with Family::expected_tool_count.
+          if [ "$count" -lt 73 ] || [ "$count" -gt 75 ]; then
+            echo "::error::registry memory_* literal count ($count) drifted from 74±1"
             echo "::error::either update Family::expected_tool_count in src/profile.rs"
             echo "::error::and this CI gate, or remove the stray tool literal"
             exit 1
@@ -54,7 +60,7 @@ jobs:
         run: |
           if grep -nE 'profile full.*43 tools|43 tools.*profile full|surface 1:1 \(43 tools\)' src/daemon_runtime.rs; then
             echo "::error::src/daemon_runtime.rs --profile full help text claims 43 tools"
-            echo "::error::v0.7.0 ceiling is Profile::full().expected_tool_count() == 71"
+            echo "::error::v0.7.0 ceiling is Profile::full().expected_tool_count() == 73"
             exit 1
           fi
 
@@ -62,15 +68,15 @@ jobs:
         shell: bash
         run: |
           # The README badge MUST advertise the v0.7.0 default + full counts.
-          if ! grep -qE 'MCP-7_default.*71_full|MCP-7.*71' README.md; then
-            echo "::error::README MCP badge missing '7_default • 71_full' (v0.7.0)"
+          if ! grep -qE 'MCP-7_default.*73_full|MCP-7.*73' README.md; then
+            echo "::error::README MCP badge missing '7_default • 73_full' (v0.7.0)"
             exit 1
           fi
 
-      - name: 'release-notes 60 -> N includes 71 at v0.7.0'
+      - name: 'release-notes 60 -> N includes 73 at v0.7.0'
         shell: bash
         run: |
-          if ! grep -qE '60.*(→|->).*71' docs/v0.7.0/release-notes.md; then
-            echo "::error::docs/v0.7.0/release-notes.md missing '60 → 71' tool count delta"
+          if ! grep -qE '60.*(→|->).*73' docs/v0.7.0/release-notes.md; then
+            echo "::error::docs/v0.7.0/release-notes.md missing '60 → 73' tool count delta"
             exit 1
           fi

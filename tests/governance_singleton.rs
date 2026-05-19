@@ -11,6 +11,19 @@ use std::thread;
 
 use ai_memory::governance::agent_action::{AgentAction, Decision, check_agent_action};
 use ai_memory::governance::rules_store::{self, Rule};
+use ed25519_dalek::Signer;
+
+mod common;
+use common::*;
+
+// Hermetic-test pattern: production `enforced_rule_passes` drops
+// unsigned rules when an operator pubkey resolves (env or on-disk
+// `operator.key.pub`). `install_test_operator_key()` (in `common`)
+// generates a per-test keypair and installs it in
+// `AI_MEMORY_OPERATOR_PUBKEY` so the assertion below sees the rule
+// as enforced regardless of host state. The returned `EnvVarGuard`
+// holds the shared `ENV_LOCK` for its lifetime so parallel tests
+// don't race on the env var.
 
 fn fresh_conn() -> rusqlite::Connection {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -47,26 +60,27 @@ fn fresh_conn() -> rusqlite::Connection {
 
 #[test]
 fn hundred_concurrent_checks_against_same_rule_return_consistent_decisions() {
+    let (signing, _env_guard) = install_test_operator_key();
     let conn = Arc::new(Mutex::new(fresh_conn()));
     {
         let c = conn.lock().unwrap();
-        rules_store::insert(
-            &c,
-            &Rule {
-                id: "R001".into(),
-                kind: "filesystem_write".into(),
-                matcher: r#"{"glob":"/tmp/**"}"#.into(),
-                severity: "refuse".into(),
-                reason: "no /tmp".into(),
-                namespace: "_global".into(),
-                created_by: "test".into(),
-                created_at: 0,
-                enabled: true,
-                signature: None,
-                attest_level: "unsigned".into(),
-            },
-        )
-        .unwrap();
+        let mut rule = Rule {
+            id: "R001".into(),
+            kind: "filesystem_write".into(),
+            matcher: r#"{"glob":"/tmp/**"}"#.into(),
+            severity: "refuse".into(),
+            reason: "no /tmp".into(),
+            namespace: "_global".into(),
+            created_by: "test".into(),
+            created_at: 0,
+            enabled: true,
+            signature: None,
+            attest_level: "operator_signed".into(),
+        };
+        let canonical =
+            rules_store::canonical_bytes_for_signing(&rule).expect("canonical_bytes_for_signing");
+        rule.signature = Some(signing.sign(&canonical).to_bytes().to_vec());
+        rules_store::insert(&c, &rule).unwrap();
     }
 
     let mut handles = Vec::new();

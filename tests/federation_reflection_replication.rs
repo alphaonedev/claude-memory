@@ -70,7 +70,8 @@ use ai_memory::db::{ReflectError, ReflectInput};
 use ai_memory::federation::reflection_bookkeeping;
 use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{
-    ApproverType, GovernanceLevel, GovernancePolicy, Memory, MemoryKind, Tier, default_metadata,
+    ApproverType, CorePolicy, GovernanceLevel, GovernancePolicy, Memory, MemoryKind, Tier,
+    default_metadata,
 };
 use ai_memory::signed_events::list_signed_events;
 use ai_memory::storage as db;
@@ -145,6 +146,7 @@ fn seed_policy(conn: &Connection, namespace: &str, policy: &GovernancePolicy) {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let standard_id = db::insert(conn, &standard).expect("insert standard");
     db::set_namespace_standard(conn, namespace, &standard_id, None).expect("set standard");
@@ -182,6 +184,7 @@ fn observation(namespace: &str, title: &str, depth: i32, agent_id: &str) -> Memo
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 
@@ -236,26 +239,15 @@ fn three_peer_federation_depth_replication_and_cross_peer_refusal() {
     // Peer B tightens its cap to 2 via a namespace standard. Peers A
     // and C run with the compiled default of 3 — no standard needed.
     let tight = GovernancePolicy {
-        write: GovernanceLevel::Any,
-        promote: GovernanceLevel::Any,
-        delete: GovernanceLevel::Owner,
-        approver: ApproverType::Human,
-        inherit: true,
-        max_reflection_depth: Some(2),
-        auto_export_reflections_to_filesystem: None,
-        auto_atomise: None,
-        auto_atomise_threshold_cl100k: None,
-        auto_atomise_max_atom_tokens: None,
-        auto_atomise_max_retries: None,
-        auto_persona_trigger_every_n_memories: None,
-        auto_export_personas_to_filesystem: None,
-        auto_atomise_mode: None,
-        legacy_per_pair_classifier: None,
-        auto_classify_kind: None,
-        synthesis_failure_mode: None,
-        synthesis_max_deletes_per_call: None,
-        synthesis_max_candidate_chars: None,
-        multistep_max_content_chars: None,
+        core: CorePolicy {
+            write: GovernanceLevel::Any,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Human,
+            inherit: true,
+            max_reflection_depth: Some(2),
+        },
+        ..Default::default()
     };
     seed_policy(&peer_b.conn, NAMESPACE, &tight);
 

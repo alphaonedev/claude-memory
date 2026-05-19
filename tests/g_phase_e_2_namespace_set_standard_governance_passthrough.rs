@@ -38,11 +38,9 @@ use ai_memory::storage as db;
 use chrono::Utc;
 use rusqlite::Connection;
 use serde_json::json;
-use std::path::Path;
 
-fn fresh_conn() -> Connection {
-    db::open(Path::new(":memory:")).expect("open in-memory DB")
-}
+mod common;
+use common::fresh_conn;
 
 /// Insert a memory pre-populated with the given metadata; returns the id.
 fn insert_with_metadata(
@@ -78,6 +76,7 @@ fn insert_with_metadata(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(conn, &mem).expect("insert memory")
 }

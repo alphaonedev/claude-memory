@@ -26,13 +26,15 @@
 //! convention.
 
 use std::io::{BufRead, BufReader};
-use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Child, Command as StdCommand, Stdio};
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+
+mod common;
+use common::free_port;
 use rusqlite::params;
 use tempfile::TempDir;
 
@@ -231,14 +233,9 @@ fn doctor_remote_queries_capabilities_endpoint() {
 }
 
 // ---------------------------------------------------------------------------
-// Local serve helper (lifted from tests/serve_integration.rs to keep this
-// file self-contained — the helper there is private and not exported).
+// Local serve helper. `free_port` consolidated into `tests/common/mod.rs`
+// by issue #854.
 // ---------------------------------------------------------------------------
-
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
-    listener.local_addr().expect("local_addr").port()
-}
 
 struct ServeChild {
     child: Option<Child>,

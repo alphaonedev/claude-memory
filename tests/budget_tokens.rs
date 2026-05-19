@@ -62,7 +62,12 @@ use serde_json::json;
 /// `--ignored` so the gate remains enforced at the merge boundary while
 /// local `cargo test` runs stay green on branches that haven't yet
 /// rebased over the C2-C4 merge.
-const FULL_PROFILE_TOKEN_CEILING: usize = 3_500;
+// Post-#859 update (was: 3500). #859 restored every property entry to
+// the wire `tools/list` payload for NHI runtime discovery — pre-fix the
+// trim dropped optional property keys entirely, which let the wire sit
+// at ~3456 tokens. The fully-discoverable wire form is ~4500-4700
+// tokens; this ceiling pins it with ~300 tokens of headroom.
+const FULL_PROFILE_TOKEN_CEILING: usize = 5_000;
 
 fn mem_with_content(id: &str, content: &str) -> Memory {
     Memory {
@@ -91,6 +96,7 @@ fn mem_with_content(id: &str, content: &str) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 
@@ -268,26 +274,25 @@ fn cl100k_tokenizer_is_deterministic() {
 }
 
 // ---------------------------------------------------------------------------
-// v0.7 C5 — full-profile tools/list ceiling (3500 cl100k_base tokens).
+// v0.7 C5 + #859 — full-profile tools/list ceiling (5000 cl100k_base tokens
+// post-#859, was 3500 pre-fix when the trim hid optional property keys).
 // ---------------------------------------------------------------------------
 
 #[test]
 #[ignore = "v0.7 C5 — opt-in gate, run via `cargo test -- --ignored` or the \
             `.github/workflows/token-budget.yml` C5 step. Depends on C2-C4 \
             having landed on the branch."]
-fn full_profile_tools_list_under_3500_tokens() {
+fn full_profile_tools_list_under_post_859_ceiling() {
     let total = trimmed_full_profile_total_tokens();
     assert!(
         total <= FULL_PROFILE_TOKEN_CEILING,
-        "v0.7 C5 CI gate: full-profile tools/list payload is {total} cl100k_base \
-         tokens (ceiling: {FULL_PROFILE_TOKEN_CEILING}). C2 (split docs field), \
-         C3 (collapse schema boilerplate), and C4 (hide rare optional params) \
-         together drove the bare wire payload from ~7.4K to ~2.3K post-trim; \
-         this assertion locks in the win. Inspect \
-         `cargo run --release -- doctor --tokens --raw-table` to find the \
-         tool whose trimmed schema grew (look at the per-tool `tokens` column \
-         which already reflects the trim), and either trim it back or claw \
-         back budget elsewhere."
+        "v0.7 C5 + #859 CI gate: full-profile tools/list payload is {total} cl100k_base \
+         tokens (ceiling: {FULL_PROFILE_TOKEN_CEILING}). #859 restored every property \
+         entry to the wire for NHI runtime discovery; the trim now only strips \
+         per-property `description` prose + compacts the top-level tool description. \
+         Inspect `cargo run --release -- doctor --tokens --raw-table` to find the \
+         tool whose schema grew, or audit `wire_compact_descriptions` in \
+         `src/mcp/registry.rs` for the prose-strip step."
     );
 }
 

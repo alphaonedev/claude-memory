@@ -41,7 +41,7 @@ use ai_memory::db::{
 };
 use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{
-    ApproverType, GovernanceLevel, GovernancePolicy, Memory, Tier, default_metadata,
+    ApproverType, CorePolicy, GovernanceLevel, GovernancePolicy, Memory, Tier, default_metadata,
 };
 use ai_memory::signed_events::{SignedEvent, list_signed_events};
 use chrono::Utc;
@@ -81,6 +81,7 @@ fn make_memory(namespace: &str, title: &str, reflection_depth: i32) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 
@@ -146,6 +147,7 @@ fn seed_policy(conn: &Connection, namespace: &str, policy: &GovernancePolicy) {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let standard_id = db::insert(conn, &standard).unwrap();
     db::set_namespace_standard(conn, namespace, &standard_id, None).unwrap();
@@ -421,26 +423,15 @@ fn cap_zero_disables_every_reflection_with_audit_row() {
     // refused. Audit row lands per refusal.
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
     let policy = GovernancePolicy {
-        write: GovernanceLevel::Any,
-        promote: GovernanceLevel::Any,
-        delete: GovernanceLevel::Owner,
-        approver: ApproverType::Human,
-        inherit: true,
-        max_reflection_depth: Some(0),
-        auto_export_reflections_to_filesystem: None,
-        auto_atomise: None,
-        auto_atomise_threshold_cl100k: None,
-        auto_atomise_max_atom_tokens: None,
-        auto_atomise_max_retries: None,
-        auto_persona_trigger_every_n_memories: None,
-        auto_export_personas_to_filesystem: None,
-        auto_atomise_mode: None,
-        legacy_per_pair_classifier: None,
-        auto_classify_kind: None,
-        synthesis_failure_mode: None,
-        synthesis_max_deletes_per_call: None,
-        synthesis_max_candidate_chars: None,
-        multistep_max_content_chars: None,
+        core: CorePolicy {
+            write: GovernanceLevel::Any,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Human,
+            inherit: true,
+            max_reflection_depth: Some(0),
+        },
+        ..Default::default()
     };
     seed_policy(&conn, "task7-disabled", &policy);
     let src = make_memory("task7-disabled", "depth0-src", 0);
@@ -489,6 +480,7 @@ fn hook_veto_refuses_reflection_without_depth_cap_audit() {
             code: 451,
         })),
         post_reflect: None,
+        active_keypair: None,
     };
     let err = db::reflect_with_hooks(&conn, &input, &hooks).expect_err("veto refuses");
     match err {
@@ -541,6 +533,7 @@ fn post_reflect_fires_after_commit_observable_on_same_connection() {
         post_reflect: Some(Box::new(move |o: &ReflectOutcome| {
             *captured_id_clone.lock().unwrap() = Some(o.id.clone());
         })),
+        active_keypair: None,
     };
     let outcome = db::reflect_with_hooks(&conn, &input, &hooks).expect("reflect ok");
     let captured = captured_id.lock().unwrap().clone();
@@ -593,6 +586,7 @@ fn both_pre_and_post_reflect_fire_on_successful_reflect() {
                 Ordering::SeqCst,
             );
         })),
+        active_keypair: None,
     };
     let _ = db::reflect_with_hooks(&conn, &input, &hooks).expect("reflect ok");
 

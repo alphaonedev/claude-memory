@@ -34,6 +34,9 @@ use rusqlite::Connection;
 use serde_json::Value;
 use tokio::sync::{Mutex, Notify, RwLock};
 
+mod common;
+use common::free_port;
+
 // -------------------------------------------------------------------
 // Helpers
 // -------------------------------------------------------------------
@@ -69,12 +72,6 @@ fn fresh_db_via_open() -> (Connection, tempfile::NamedTempFile) {
     let tmp = tempfile::NamedTempFile::new().expect("tempfile");
     let conn = ai_memory::db::open(tmp.path()).expect("db::open applies migrations");
     (conn, tmp)
-}
-
-/// Free-port helper — same shape as s75_capabilities_db_schema_version.
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    listener.local_addr().expect("local_addr").port()
 }
 
 // -------------------------------------------------------------------
@@ -152,12 +149,17 @@ fn test_migration_v36_applies_cleanly() {
     //   → v39 (Form 5 confidence calibration shadow table)
     //   → v40 (Cluster C signed-events DLQ, issue #767 SEC-3)
     //   → v41 (Cluster G shadow-retention denormalised column + compound index)
-    //   → v42 (Polish #781 PERF-8 auto_persona mentioned_entity_id column).
+    //   → v42 (Polish #781 PERF-8 auto_persona mentioned_entity_id column)
+    //   → v43 (Persona Signing Pipeline #813 atomicity triggers on
+    //          memory_links.(attest_level, signature))
+    //   → v44 (#228 — E2E content encryption: additive
+    //          memories.encrypted_envelope BLOB NULL column).
     // When CURRENT_SCHEMA_VERSION bumps, update this assertion in lockstep.
     assert_eq!(
-        v, 42,
-        "v36→v42: schema_version must be stamped at CURRENT_SCHEMA_VERSION \
-         (migration ladder passes through v36 on its way to v42)"
+        v,
+        ai_memory::db::current_schema_version_for_tests(),
+        "v36→current: schema_version must be stamped at CURRENT_SCHEMA_VERSION \
+         (migration ladder passes through v36 on its way to the current head)"
     );
 }
 
@@ -187,11 +189,13 @@ fn test_migration_v36_idempotent() {
         )
         .expect("read v2");
 
-    // The migration ladder reaches v42 (Polish #781 PERF-8 mentioned_entity_id);
-    // pass-through v36 still exercises WT-1-A's atomisation migration.
-    // Tracks `CURRENT_SCHEMA_VERSION` in src/storage/migrations.rs.
-    assert_eq!(v1, 42);
-    assert_eq!(v1, v2, "v42: migrate is not idempotent — version drifted");
+    // The migration ladder reaches v47 (Gap 3 recall_observations tier
+    // #886); pass-through v36 still exercises WT-1-A's atomisation
+    // migration. Tracks `CURRENT_SCHEMA_VERSION` in
+    // src/storage/migrations.rs — bump this assertion when the const
+    // moves so schema bumps stay explicit.
+    assert_eq!(v1, 47);
+    assert_eq!(v1, v2, "v47: migrate is not idempotent — version drifted");
 
     // Columns + indexes still present after replay.
     assert!(column_exists(&conn2, "memories", "atomised_into"));
@@ -397,6 +401,9 @@ fn build_sqlite_app_state() -> (AppState, tempfile::NamedTempFile) {
         replay_cache: std::sync::Arc::new(ai_memory::identity::replay::ReplayCache::default()),
 
         verify_require_nonce: false,
+        federation_nonce_cache: std::sync::Arc::new(
+            ai_memory::identity::replay::FederationNonceCache::default(),
+        ),
         autonomous_hooks: false,
         recall_scope: Arc::new(None),
         deferred_audit_queue: Arc::new(None),
@@ -454,18 +461,17 @@ async fn test_capabilities_db_schema_version_reports_36() {
         .and_then(Value::as_i64)
         .expect("WT-1-A: db_schema_version must be a JSON integer");
 
+    // v0.7.0 refactor PR-1 (#793) — schema-pins SSOT. Pin against the
+    // canonical constant (re-exported as
+    // `ai_memory::db::current_schema_version_for_tests()`) so the next
+    // schema bump touches ONE constant instead of N test fixtures.
+    let expected = ai_memory::db::current_schema_version_for_tests();
     assert_eq!(
-        v, 42,
-        "WT-1-A+QW-2+Form 4+Form 5+Cluster-C+Cluster-G+PERF-8: \
-         capabilities.db_schema_version must be 42 after the \
-         atomisation-foundation bump (35→36), persona-as-artifact \
-         bump (36→37), Form 4 source-uri provenance bump (37→38), \
-         Form 5 confidence calibration bump (38→39), Cluster-C \
-         signed-events DLQ bump (39→40), Cluster-G shadow-retention \
-         denormalised source column bump (40→41), and polish PERF-8 \
-         auto_persona mentioned_entity_id bump (41→42). Drift here \
-         means the migrate ladder skipped one of those steps or the \
-         SAL `schema_version()` lookup is reading the wrong source."
+        v, expected,
+        "WT-1-A capabilities.db_schema_version must equal the canonical \
+         CURRENT_SCHEMA_VERSION ({expected}); drift here means the \
+         migrate ladder skipped a step or the SAL `schema_version()` \
+         lookup is reading the wrong source."
     );
 
     shutdown.notify_one();

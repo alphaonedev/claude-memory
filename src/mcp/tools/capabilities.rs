@@ -276,17 +276,19 @@ fn build_capabilities_overlay(
 #[must_use]
 pub fn format_rule_summary(namespace: &str, policy: &crate::models::GovernancePolicy) -> String {
     use crate::models::ApproverType;
-    let approver = match &policy.approver {
+    // #880 — `approver` / `write` / `promote` / `delete` / `inherit`
+    // live on `policy.core` after the governance decomposition.
+    let approver = match &policy.core.approver {
         ApproverType::Human => "human".to_string(),
         ApproverType::Agent(id) => format!("agent:{id}"),
         ApproverType::Consensus(n) => format!("consensus:{n}"),
     };
     format!(
         "{namespace} — write={write}, promote={promote}, delete={delete}, approver={approver}, inherit={inherit}",
-        write = policy.write.as_str(),
-        promote = policy.promote.as_str(),
-        delete = policy.delete.as_str(),
-        inherit = policy.inherit,
+        write = policy.core.write.as_str(),
+        promote = policy.core.promote.as_str(),
+        delete = policy.core.delete.as_str(),
+        inherit = policy.core.inherit,
     )
 }
 
@@ -479,16 +481,13 @@ pub fn build_capabilities_tools(
                 family: family_name.to_string(),
                 loaded,
                 callable_now: loaded && allowed,
+                // v0.7.0 issue #803 — per-tool worked examples.
+                examples: tool_examples(name),
             });
         }
     }
 
-    // Always-on bootstraps that are NOT counted via a normal family
-    // walk (in v0.6.4, ALWAYS_ON_TOOLS only contains
-    // `memory_capabilities` which already lives in `Family::Meta`, so
-    // it's already in `entries`. Future bootstraps that don't sit in a
-    // family at all would be appended here with family="always_on" and
-    // unconditionally loaded/callable.)
+    // Always-on bootstraps not in a normal family walk.
     for name in ALWAYS_ON_TOOLS {
         if !entries.iter().any(|e| e.name == *name) {
             entries.push(ToolEntry {
@@ -496,11 +495,101 @@ pub fn build_capabilities_tools(
                 family: "always_on".to_string(),
                 loaded: true,
                 callable_now: true,
+                examples: tool_examples(name),
             });
         }
     }
 
     entries
+}
+
+/// v0.7.0 issue #803 — per-tool worked example catalog.
+///
+/// Returns 0-2 [`crate::config::ToolExample`] entries for a given
+/// tool name. Only a curated subset of high-leverage tools carry
+/// examples; the rest return empty, which `skip_serializing_if`
+/// drops from the wire so the payload stays compact.
+#[must_use]
+pub fn tool_examples(name: &str) -> Vec<crate::config::ToolExample> {
+    use crate::config::ToolExample;
+    use serde_json::json;
+    let ex = |call: serde_json::Value, desc: &str| ToolExample {
+        call,
+        description: desc.to_string(),
+    };
+    match name {
+        "memory_store" => vec![ex(
+            json!({"title": "design", "content": "wt-1 atomisation", "tier": "long", "namespace": "ai-memory"}),
+            "Persists a long-tier memory; returns {id, status}.",
+        )],
+        "memory_recall" => vec![ex(
+            json!({"query": "atomisation gates", "namespace": "ai-memory", "limit": 5}),
+            "Hybrid FTS+semantic recall; returns top-K ranked memories.",
+        )],
+        "memory_search" => vec![ex(
+            json!({"query": "L1-6 governance", "limit": 10}),
+            "FTS5 keyword search across namespaces.",
+        )],
+        "memory_link" => vec![ex(
+            json!({"from_id": "<uuid-a>", "to_id": "<uuid-b>", "relation": "derives_from"}),
+            "Signed directional edge; returns {link_id, attest_level}.",
+        )],
+        "memory_reflect" => vec![ex(
+            json!({"memory_ids": ["<uuid-1>", "<uuid-2>"], "depth": 1}),
+            "Curator synthesises a Reflection; returns {reflection_id}.",
+        )],
+        "memory_persona_generate" => vec![
+            ex(
+                json!({"entity_id": "alice", "namespace": "team/alpha"}),
+                "Single-namespace scope.",
+            ),
+            ex(
+                json!({"entity_id": "alice"}),
+                "#848 cross-namespace; persona lands in 'global'.",
+            ),
+        ],
+        "memory_consolidate" => vec![ex(
+            json!({"namespace": "raw/notes", "into_namespace": "team/alpha", "limit": 20}),
+            "Curator distils notes into one consolidated memory.",
+        )],
+        "memory_atomise" => vec![ex(
+            json!({"memory_id": "<long-uuid>", "max_atom_tokens": 200}),
+            "WT-1 decomposition; archives parent.",
+        )],
+        "memory_find_paths" => vec![ex(
+            json!({"from_id": "<uuid-a>", "to_id": "<uuid-b>", "max_depth": 4}),
+            "BFS over KG; returns path arrays of memory ids.",
+        )],
+        "memory_kg_query" => vec![ex(
+            json!({"start_id": "<uuid>", "relation": "derives_from", "direction": "out", "depth": 2}),
+            "Typed KG walk; returns nodes+edges.",
+        )],
+        "memory_export_reflection" => vec![ex(
+            json!({"memory_id": "<reflection-uuid>", "format": "md"}),
+            "QW-1 export; returns {content, suggested_filename}.",
+        )],
+        "memory_smart_load" => vec![ex(
+            json!({"intent": "inspect the knowledge graph", "include_schema": true}),
+            "B2 intent routing.",
+        )],
+        "memory_load_family" => vec![ex(
+            json!({"family": "graph", "include_schema": true}),
+            "B1 explicit family load.",
+        )],
+        "memory_session_start" => vec![ex(
+            json!({"topic": "v0.7.0 ship"}),
+            "SessionStart bootstrap; returns memories+persona+rules.",
+        )],
+        "memory_verify" => vec![ex(
+            json!({"memory_id": "<uuid>"}),
+            "H4 signature replay; returns {verified, attest_level}.",
+        )],
+        "memory_notify" => vec![ex(
+            json!({"event_type": "deploy.completed", "payload": {"env": "prod"}, "ttl_seconds": 3600}),
+            "Fan-out to active subscribers.",
+        )],
+        _ => Vec::new(),
+    }
 }
 
 /// v0.7.0 A4 — compute the optional `agent_permitted_families` field

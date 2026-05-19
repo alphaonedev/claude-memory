@@ -290,9 +290,20 @@ fn install_rejects_hook_flag_on_non_claude_code() {
 /// same code path the JSON-RPC dispatch lands on after argument
 /// parsing.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn installed_hook_smoke_test_invokes_check_action() {
+    use std::sync::Mutex;
+
     use ai_memory::governance::rules_store::{self, Rule};
     use ai_memory::mcp::handle_check_agent_action;
+    use base64::Engine;
+    use ed25519_dalek::{Signer, SigningKey};
+    use rand_core::OsRng;
+
+    // Module-scope mutex so any future test in this crate that also
+    // mutates `AI_MEMORY_OPERATOR_PUBKEY` can share it. Static so it
+    // survives across `cargo test`'s parallel test threads.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     // Minimal schema for governance_rules + signed_events (mirrors
@@ -347,25 +358,58 @@ fn installed_hook_smoke_test_invokes_check_action() {
     // but applied to the bash kind so the rm dispatch is caught.
     // For `bash` kind the matcher uses `command_regex` (treated as a
     // literal substring, see `match_bash` in agent_action.rs).
-    rules_store::insert(
-        &conn,
-        &Rule {
-            id: "R001-test".into(),
-            kind: "bash".into(),
-            matcher: r#"{"command_regex":"rm -rf /tmp"}"#.into(),
-            severity: "refuse".into(),
-            reason: "no /tmp destruction".into(),
-            namespace: "_global".into(),
-            created_by: "test-operator".into(),
-            created_at: 0,
-            enabled: true,
-            signature: None,
-            attest_level: "unsigned".into(),
-        },
-    )
-    .unwrap();
+    //
+    // L1-6 hermeticity: when the host has an operator pubkey on disk
+    // (`~/Library/Application Support/ai-memory/operator.key.pub`) or
+    // sets `AI_MEMORY_OPERATOR_PUBKEY`, `enforced_rule_passes` skips
+    // any rule whose `attest_level != "operator_signed"`. To make this
+    // test pass deterministically regardless of host state, we
+    // generate a one-off test keypair, point the env var at its
+    // pubkey under a mutex (so parallel tests in this crate don't
+    // race), and sign the rule with the corresponding signing key
+    // before insert. The whole pubkey-resolution path is then
+    // satisfied by the in-test key, not the host's.
+    let signing = SigningKey::generate(&mut OsRng);
+    let pub_b64 =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signing.verifying_key().to_bytes());
+    let env_guard = ENV_LOCK.lock().unwrap();
+    let prev_pubkey = std::env::var("AI_MEMORY_OPERATOR_PUBKEY").ok();
+    // SAFETY: serialized across tests in this crate by `ENV_LOCK`;
+    // restored at the end of the test scope.
+    unsafe {
+        std::env::set_var("AI_MEMORY_OPERATOR_PUBKEY", &pub_b64);
+    }
+
+    let mut rule = Rule {
+        id: "R001-test".into(),
+        kind: "bash".into(),
+        matcher: r#"{"command_regex":"rm -rf /tmp"}"#.into(),
+        severity: "refuse".into(),
+        reason: "no /tmp destruction".into(),
+        namespace: "_global".into(),
+        created_by: "test-operator".into(),
+        created_at: 0,
+        enabled: true,
+        signature: None,
+        attest_level: "operator_signed".into(),
+    };
+    let canonical = rules_store::canonical_bytes_for_signing(&rule).unwrap();
+    rule.signature = Some(signing.sign(&canonical).to_bytes().to_vec());
+    rules_store::insert(&conn, &rule).unwrap();
 
     let r = handle_check_agent_action(&conn, &bash_payload).unwrap();
+
+    // Restore prior env var before the assertion so a failure leaves
+    // the process env clean for the next test slotted on this thread.
+    // SAFETY: serialized by `_env_guard`.
+    unsafe {
+        match prev_pubkey {
+            Some(v) => std::env::set_var("AI_MEMORY_OPERATOR_PUBKEY", v),
+            None => std::env::remove_var("AI_MEMORY_OPERATOR_PUBKEY"),
+        }
+    }
+    drop(env_guard);
+
     assert_eq!(
         r["decision"]["decision"], "refuse",
         "after the rule is enabled, the same payload is refused"

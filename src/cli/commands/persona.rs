@@ -52,6 +52,14 @@ pub struct PersonaArgs {
 
 /// Dispatch entry-point called from `daemon_runtime::run`.
 ///
+/// `active_keypair` carries the daemon signing keypair when available;
+/// the CLI dispatch at `daemon_runtime` currently passes `None`
+/// (matching the documented "CLI runs unsigned by design" posture,
+/// see #809 comment in `daemon_runtime::run`). The parameter is here
+/// so a future operator-driven "ai-memory persona --regenerate
+/// --sign" flag can drop a keypair in without changing the function
+/// surface again.
+///
 /// # Errors
 ///
 /// Propagates DB errors. Returns `Ok(0)` on success, `Ok(1)` when no
@@ -61,6 +69,7 @@ pub fn run(
     db_path: &Path,
     args: &PersonaArgs,
     llm: Option<&dyn AutonomyLlm>,
+    active_keypair: Option<&crate::identity::keypair::AgentKeypair>,
     out: &mut CliOutput<'_>,
 ) -> Result<i32> {
     let conn = db::open(db_path)?;
@@ -74,7 +83,11 @@ pub fn run(
             )?;
             return Ok(2);
         };
-        let generator = PersonaGenerator::new(&conn, llm, None, PersonaConfig::default());
+        // v0.7.0 issue #811 / #813 — when a keypair is wired the link
+        // path + the persona body get signed; when it's `None` the
+        // behaviour matches v0.7.0.x (unsigned), which is what the
+        // CLI dispatch sends today.
+        let generator = PersonaGenerator::new(&conn, llm, active_keypair, PersonaConfig::default());
         match generator.generate(&args.entity_id, &args.namespace) {
             Ok(persona) => {
                 render_to_stdout(out, &persona, args.json)?;
@@ -188,6 +201,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(conn, &mem).unwrap()
     }
@@ -204,7 +218,7 @@ mod tests {
             regenerate: false,
             json: false,
         };
-        let res = run(&db_path, &args, None, &mut out);
+        let res = run(&db_path, &args, None, None, &mut out);
         assert!(res.is_err());
     }
 
@@ -222,7 +236,7 @@ mod tests {
             regenerate: true,
             json: false,
         };
-        let code = run(&db_path, &args, Some(&llm), &mut out).unwrap();
+        let code = run(&db_path, &args, Some(&llm), None, &mut out).unwrap();
         assert_eq!(code, 0);
         drop(out);
         let text = String::from_utf8(stdout).unwrap();
@@ -242,7 +256,7 @@ mod tests {
             regenerate: true,
             json: false,
         };
-        let code = run(&db_path, &args, None, &mut out).unwrap();
+        let code = run(&db_path, &args, None, None, &mut out).unwrap();
         assert_eq!(code, 2);
         drop(out);
         let text = String::from_utf8(stderr).unwrap();
@@ -263,7 +277,7 @@ mod tests {
             regenerate: true,
             json: true,
         };
-        let code = run(&db_path, &args, Some(&llm), &mut out).unwrap();
+        let code = run(&db_path, &args, Some(&llm), None, &mut out).unwrap();
         assert_eq!(code, 0);
         drop(out);
         let text = String::from_utf8(stdout).unwrap();

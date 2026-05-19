@@ -12,9 +12,9 @@
 //! - `CrossEncoder::Neural` — BERT-based cross-encoder loaded via candle
 //!   from `cross-encoder/ms-marco-MiniLM-L-6-v2` (~80 MB, ONNX-free).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{Sender, sync_channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -26,6 +26,164 @@ use hf_hub::{Repo, RepoType, api::sync::Api};
 use tokenizers::Tokenizer;
 
 use crate::models::Memory;
+
+// ---------------------------------------------------------------------------
+// v0.7.0 (issue #518) — session-aware recall recency boost
+// ---------------------------------------------------------------------------
+
+/// Additive boost applied to a recall candidate that appears in the
+/// session's recently-accessed set. Sits at +0.05 — small enough that
+/// a low-relevance candidate cannot leapfrog a substantially-better
+/// match, large enough to break ties in favour of memories the agent
+/// just touched in the same session.
+pub const SESSION_RECENCY_BOOST: f64 = 0.05;
+
+/// Per-session cap on the recently-accessed ring buffer. When the
+/// buffer is at the cap, the oldest entry is evicted (FIFO) before the
+/// newest entry is appended. Keeps the substrate memory cost bounded
+/// at `O(SESSIONS * 50)` ids regardless of recall traffic.
+pub const SESSION_RECENT_CAP: usize = 50;
+
+/// v0.7.0 (issue #518) — process-global tracker mapping `session_id`
+/// to its FIFO ring buffer of recently-accessed memory ids.
+///
+/// The tracker is consulted by [`apply_session_recency_boost`] after
+/// the rerank stage of `handle_recall` (MCP) and `recall_response`
+/// (HTTP). Each call:
+///
+/// 1. Reads the per-session set BEFORE assembling the boost so the
+///    candidates already touched in this session lift in rank.
+/// 2. Appends every recall hit's id INTO the per-session ring (FIFO
+///    eviction past [`SESSION_RECENT_CAP`]) so subsequent recalls in
+///    the same session reuse the new context.
+///
+/// The tracker uses a single `Mutex` because contention is dominated
+/// by the per-recall work itself (FTS + semantic + rerank), making
+/// the lock-acquire/-release cost noise; the implementation can swap
+/// to per-shard locking if a future profile shows otherwise.
+#[derive(Debug, Default)]
+pub struct SessionRecallTracker {
+    inner: Mutex<HashMap<String, VecDeque<String>>>,
+}
+
+impl SessionRecallTracker {
+    /// Construct an empty tracker. Test code uses this directly; the
+    /// production code path goes through the process-global
+    /// [`global_session_recall_tracker`] accessor below.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the set of recently-accessed memory ids for `session_id`,
+    /// or an empty set if the session is unknown. Used by the rerank
+    /// boost to decide which candidates to lift.
+    #[must_use]
+    pub fn recent_ids(&self, session_id: &str) -> HashSet<String> {
+        let Ok(guard) = self.inner.lock() else {
+            // Poisoned mutex (a panic happened while the lock was
+            // held by another thread). Surface an empty set so the
+            // recall path stays infallible — the boost just doesn't
+            // fire this call.
+            return HashSet::new();
+        };
+        guard
+            .get(session_id)
+            .map(|ring| ring.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Record the ids of memories returned by the just-completed
+    /// recall into the per-session ring. FIFO eviction past
+    /// [`SESSION_RECENT_CAP`] keeps the per-session set bounded.
+    ///
+    /// Duplicate ids (a memory recalled twice in the same session)
+    /// move to the front of the ring so the eviction rule keeps the
+    /// most-recently-touched ids in the set.
+    pub fn record(&self, session_id: &str, ids: impl IntoIterator<Item = String>) {
+        let Ok(mut guard) = self.inner.lock() else {
+            return;
+        };
+        let ring = guard.entry(session_id.to_string()).or_default();
+        for id in ids {
+            // De-dupe by removing any existing occurrence so the
+            // newest landing position wins.
+            ring.retain(|existing| existing != &id);
+            ring.push_back(id);
+            while ring.len() > SESSION_RECENT_CAP {
+                ring.pop_front();
+            }
+        }
+    }
+
+    /// Diagnostic: number of tracked sessions. Used by tests and the
+    /// `/metrics` surface (future).
+    #[must_use]
+    pub fn session_count(&self) -> usize {
+        self.inner.lock().map(|g| g.len()).unwrap_or(0)
+    }
+}
+
+/// Process-global [`SessionRecallTracker`] used by every recall hot
+/// path. Lazily initialised on first access; never reset within a
+/// process lifetime (per-process state by design — operator restart
+/// clears every session's recent set).
+#[must_use]
+pub fn global_session_recall_tracker() -> &'static SessionRecallTracker {
+    static TRACKER: OnceLock<SessionRecallTracker> = OnceLock::new();
+    TRACKER.get_or_init(SessionRecallTracker::new)
+}
+
+/// v0.7.0 (issue #518) — apply the per-session recently-accessed boost
+/// to a scored recall result vector AND record the post-boost hit set
+/// back into the session's ring buffer.
+///
+/// `session_id` is the caller-supplied per-session identifier. When
+/// `None` or empty, the function is a no-op (returns the input
+/// unchanged). When set:
+///
+/// 1. Every candidate whose id is in the tracker's per-session set
+///    gets `SESSION_RECENCY_BOOST` ADDED to its score.
+/// 2. The vector is re-sorted descending by the boosted score.
+/// 3. The post-boost id list is appended into the session ring (FIFO
+///    eviction past [`SESSION_RECENT_CAP`]).
+///
+/// The boost is *additive* (not multiplicative) so its effect is
+/// independent of the absolute score magnitude — the +0.05 always
+/// breaks ties at the same delta regardless of whether scores are on
+/// the 0..1 cosine band or the 0..2 blended hybrid band.
+pub fn apply_session_recency_boost(
+    results: Vec<(Memory, f64)>,
+    session_id: Option<&str>,
+    tracker: &SessionRecallTracker,
+) -> Vec<(Memory, f64)> {
+    let Some(sid) = session_id else {
+        return results;
+    };
+    if sid.is_empty() {
+        return results;
+    }
+    let recent: HashSet<String> = tracker.recent_ids(sid);
+    let mut boosted: Vec<(Memory, f64)> = results
+        .into_iter()
+        .map(|(mem, score)| {
+            let bumped = if recent.contains(&mem.id) {
+                score + SESSION_RECENCY_BOOST
+            } else {
+                score
+            };
+            (mem, bumped)
+        })
+        .collect();
+    // Re-sort descending — boosted candidates may move past their
+    // pre-boost neighbours.
+    boosted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Record the post-boost id list into the session ring so the next
+    // recall in this session reuses the new context.
+    let ids: Vec<String> = boosted.iter().map(|(m, _)| m.id.clone()).collect();
+    tracker.record(sid, ids);
+    boosted
+}
 
 /// Blend weight applied to the original (embedding/FTS) score.
 const ORIGINAL_WEIGHT: f64 = 0.6;
@@ -1125,6 +1283,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 
@@ -1680,6 +1839,7 @@ mod tests {
                     confidence_source: crate::models::ConfidenceSource::CallerProvided,
                     confidence_signals: None,
                     confidence_decayed_at: None,
+                    version: 1,
                 },
                 0.6,
             ),
@@ -1710,6 +1870,7 @@ mod tests {
                     confidence_source: crate::models::ConfidenceSource::CallerProvided,
                     confidence_signals: None,
                     confidence_decayed_at: None,
+                    version: 1,
                 },
                 0.4,
             ),
@@ -1840,6 +2001,7 @@ mod mock_tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 

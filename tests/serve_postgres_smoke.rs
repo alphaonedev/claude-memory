@@ -48,17 +48,8 @@ use ai_memory::store::postgres::PostgresStore;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, RwLock};
 
-/// Returns Some(url) when the live-PG fixture is configured, None otherwise.
-fn postgres_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-}
-
-/// Pick a free local port. Mirrors the helper used by
-/// `tests/integration.rs::test_daemon_cmd_serve_responds_to_health_then_terminates`.
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    listener.local_addr().expect("local_addr").port()
-}
+mod common;
+use common::{free_port, postgres_url};
 
 /// Build the `AppState` for a postgres-backed in-process daemon.
 ///
@@ -94,6 +85,9 @@ async fn build_postgres_app_state(url: &str) -> AppState {
         replay_cache: std::sync::Arc::new(ai_memory::identity::replay::ReplayCache::default()),
 
         verify_require_nonce: false,
+        federation_nonce_cache: std::sync::Arc::new(
+            ai_memory::identity::replay::FederationNonceCache::default(),
+        ),
         autonomous_hooks: false,
         recall_scope: Arc::new(None),
         deferred_audit_queue: Arc::new(None),
@@ -183,7 +177,7 @@ async fn serve_postgres_smoke_round_trip() {
             "tags": ["smoke", "wave3"],
             "priority": 7,
             "confidence": 0.95,
-            "source": "smoke-test",
+            "source": "import",
             "metadata": {}
         }))
         .send()
@@ -278,7 +272,7 @@ async fn serve_postgres_smoke_round_trip() {
             "tags": [],
             "priority": 5,
             "confidence": 1.0,
-            "source": "smoke-test",
+            "source": "import",
             "metadata": {}
         }))
         .send()
@@ -306,8 +300,13 @@ async fn serve_postgres_smoke_round_trip() {
         Some("unsigned" | "self_signed")
     ));
 
+    // The route is `/api/v1/links/{id}` (src/lib.rs:294) — there's no
+    // `/api/v1/memories/{id}/links` nested route. Earlier versions of
+    // this test called the nested form and silently 404'd before the
+    // sal-postgres CI gate started exercising this path; bringing the
+    // path back to the actual route.
     let edges: Value = client
-        .get(format!("{base}/api/v1/memories/{mem_id}/links"))
+        .get(format!("{base}/api/v1/links/{mem_id}"))
         .send()
         .await
         .expect("links GET")

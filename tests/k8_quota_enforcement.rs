@@ -17,16 +17,9 @@ use ai_memory::quotas::{
     QuotaCheckError, QuotaLimit, QuotaOp,
 };
 use rusqlite::{Connection, params};
-use tempfile::NamedTempFile;
 
-/// Stand up a fresh on-disk SQLite at a tempfile path with the
-/// production schema applied (incl. the K8 `agent_quotas` migration).
-fn fresh_db() -> (NamedTempFile, std::path::PathBuf) {
-    let f = NamedTempFile::new().expect("tempfile");
-    let p = f.path().to_path_buf();
-    let _ = ai_memory::db::open(&p).expect("db::open");
-    (f, p)
-}
+mod common;
+use common::fresh_db_tempfile_path as fresh_db;
 
 /// Tighten a row's caps so the test can hit the wall in O(1) calls.
 fn tighten_caps(

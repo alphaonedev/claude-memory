@@ -36,7 +36,8 @@ use ai_memory::storage;
 use ai_memory::storage::GovernanceRefusal;
 
 use rusqlite::Connection;
-use tempfile::NamedTempFile;
+
+use super::common::fresh_db_tempfile_conn as fresh_db;
 
 // ---------------------------------------------------------------------------
 // Mock curator — deterministic, programmable, no network.
@@ -170,15 +171,6 @@ fn set_mode(mode: HookMode) {
 // Fixture helpers
 // ---------------------------------------------------------------------------
 
-/// Open a fresh on-disk SQLite DB. We use a tempfile (not `:memory:`)
-/// because some of the substrate's pragmas behave differently on
-/// memory connections — the production path is always on-disk.
-fn fresh_db() -> (NamedTempFile, Connection) {
-    let tmp = NamedTempFile::new().expect("tempfile");
-    let conn = db::open(tmp.path()).expect("db::open");
-    (tmp, conn)
-}
-
 /// Insert a parent memory with a long body. Returns its id.
 fn insert_long_source(conn: &Connection, ns: &str, n_paras: usize) -> String {
     let now = chrono::Utc::now().to_rfc3339();
@@ -221,6 +213,7 @@ fn insert_long_source(conn: &Connection, ns: &str, n_paras: usize) -> String {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(conn, &mem).expect("seed long source")
 }
@@ -254,6 +247,7 @@ fn insert_short_source(conn: &Connection, ns: &str) -> String {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(conn, &mem).expect("seed short source")
 }

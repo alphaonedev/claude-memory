@@ -145,6 +145,7 @@ fn sample_memory() -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 
@@ -178,6 +179,7 @@ fn fed_cfg(
         client,
         sender_agent_id: "ai:fanout-leader".to_string(),
         api_key,
+        signing_key: None,
     }
 }
 

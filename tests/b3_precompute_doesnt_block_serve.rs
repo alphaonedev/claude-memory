@@ -36,19 +36,11 @@
 //! no shell, no Unix-only signals.
 
 use assert_cmd::cargo::CommandCargoExt;
-use std::net::TcpListener;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Bind a port, drop the listener, return the now-free port. Mirrors
-/// the `free_port` helper in `tests/integration.rs` so this test
-/// behaves identically to the suite it protects.
-fn free_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = l.local_addr().unwrap().port();
-    drop(l);
-    port
-}
+mod common;
+use common::free_port;
 
 /// Poll `GET /api/v1/health` until it returns `200` or `budget`
 /// elapses. Returns `Some(elapsed)` on success, `None` on timeout.

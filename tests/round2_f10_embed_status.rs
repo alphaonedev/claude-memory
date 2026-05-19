@@ -83,6 +83,9 @@ fn build_router_with_embedder(embedder: Option<Embedder>) -> (axum::Router, Name
         replay_cache: std::sync::Arc::new(ai_memory::identity::replay::ReplayCache::default()),
 
         verify_require_nonce: false,
+        federation_nonce_cache: std::sync::Arc::new(
+            ai_memory::identity::replay::FederationNonceCache::default(),
+        ),
         autonomous_hooks: false,
         recall_scope: Arc::new(None),
         deferred_audit_queue: Arc::new(None),
@@ -96,10 +99,21 @@ fn build_router_with_embedder(embedder: Option<Embedder>) -> (axum::Router, Name
 }
 
 async fn post(router: &axum::Router, body: Value) -> (StatusCode, Value) {
-    let req = Request::builder()
+    // #907/#910 — auto-derive X-Agent-Id from body.agent_id so the
+    // spoof-match check + SAL visibility filter both see the same
+    // caller. Otherwise the post 403s on the spoof guard.
+    let body_agent_id = body
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let mut req = Request::builder()
         .method("POST")
         .uri("/api/v1/memories")
-        .header("content-type", "application/json")
+        .header("content-type", "application/json");
+    if let Some(aid) = body_agent_id.as_deref() {
+        req = req.header("x-agent-id", aid);
+    }
+    let req = req
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
     let resp = router.clone().oneshot(req).await.unwrap();

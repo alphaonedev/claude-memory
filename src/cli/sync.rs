@@ -587,6 +587,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         restamp_agent_id(&mut mem, "local-agent");
         assert_eq!(mem.metadata["agent_id"].as_str().unwrap(), "local-agent");
@@ -624,6 +625,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         restamp_agent_id(&mut mem, "same-agent");
         assert_eq!(mem.metadata["agent_id"].as_str().unwrap(), "same-agent");
@@ -865,6 +867,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&conn, &mem).unwrap();
         drop(conn);
@@ -906,6 +909,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         restamp_agent_id(&mut mem, "caller-agent");
         assert_eq!(mem.metadata["agent_id"].as_str().unwrap(), "caller-agent");

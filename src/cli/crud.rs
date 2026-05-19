@@ -535,33 +535,22 @@ mod tests {
             crate::config::PermissionsMode::Enforce,
         );
 
-        use crate::models::{ApproverType, GovernanceLevel, GovernancePolicy};
+        use crate::models::{ApproverType, CorePolicy, GovernanceLevel, GovernancePolicy};
         let mut env = TestEnv::fresh();
         let db = env.db_path.clone();
         // Seed a memory in 'gov-ns' first so resolve_id finds something.
         let id = seed_memory(&db, "gov-ns", "tt", "cc");
         // Now seed a governance policy that gates delete behind Approve.
         let policy = GovernancePolicy {
-            write: GovernanceLevel::Any,
-            promote: GovernanceLevel::Any,
-            delete: GovernanceLevel::Approve,
-            approver: ApproverType::Human,
-            inherit: true,
-            max_reflection_depth: None,
-            auto_export_reflections_to_filesystem: None,
-            auto_atomise: None,
-            auto_atomise_threshold_cl100k: None,
-            auto_atomise_max_atom_tokens: None,
-            auto_atomise_max_retries: None,
-            auto_persona_trigger_every_n_memories: None,
-            auto_export_personas_to_filesystem: None,
-            auto_atomise_mode: None,
-            legacy_per_pair_classifier: None,
-            auto_classify_kind: None,
-            synthesis_failure_mode: None,
-            synthesis_max_deletes_per_call: None,
-            synthesis_max_candidate_chars: None,
-            multistep_max_content_chars: None,
+            core: CorePolicy {
+                write: GovernanceLevel::Any,
+                promote: GovernanceLevel::Any,
+                delete: GovernanceLevel::Approve,
+                approver: ApproverType::Human,
+                inherit: true,
+                max_reflection_depth: None,
+            },
+            ..Default::default()
         };
         let conn = db::open(&db).unwrap();
         let now = chrono::Utc::now().to_rfc3339();
@@ -602,6 +591,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let standard_id = db::insert(&conn, &standard).unwrap();
         db::set_namespace_standard(&conn, "gov-ns", &standard_id, None).unwrap();

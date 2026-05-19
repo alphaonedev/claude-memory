@@ -98,6 +98,7 @@ fn insert_observation(conn: &rusqlite::Connection, title: &str, ns: &str, body: 
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(conn, &m).expect("insert observation")
 }

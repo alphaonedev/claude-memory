@@ -110,6 +110,9 @@ fn build_router_fixture() -> (axum::Router, NamedTempFile) {
         llm_call_timeout: std::time::Duration::from_secs(30),
         replay_cache: Arc::new(ai_memory::identity::replay::ReplayCache::default()),
         verify_require_nonce: false,
+        federation_nonce_cache: std::sync::Arc::new(
+            ai_memory::identity::replay::FederationNonceCache::default(),
+        ),
         autonomous_hooks: false,
         recall_scope: Arc::new(None),
         deferred_audit_queue: Arc::new(None),
@@ -123,10 +126,28 @@ fn build_router_fixture() -> (axum::Router, NamedTempFile) {
 }
 
 async fn post_json(router: &axum::Router, uri: &str, body: Value) -> (StatusCode, Value) {
-    let req = Request::builder()
+    // #907 — if body carries `agent_id` (or `metadata.agent_id`) the
+    // spoof guard requires a matching X-Agent-Id header. Auto-derive
+    // the header from the body so the existing test bodies don't all
+    // need rewriting. #910 — also ensures the SAL visibility filter
+    // sees the same principal on subsequent reads.
+    let body_agent_id = body
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            body.get("metadata")
+                .and_then(|m| m.get("agent_id"))
+                .and_then(|v| v.as_str())
+        })
+        .map(str::to_string);
+    let mut req = Request::builder()
         .method("POST")
         .uri(uri)
-        .header("content-type", "application/json")
+        .header("content-type", "application/json");
+    if let Some(aid) = body_agent_id.as_deref() {
+        req = req.header("x-agent-id", aid);
+    }
+    let req = req
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
     let resp = router.clone().oneshot(req).await.unwrap();
@@ -178,10 +199,50 @@ async fn get_uri(router: &axum::Router, uri: &str) -> (StatusCode, Value) {
     (status, parsed)
 }
 
+async fn get_uri_with_agent(
+    router: &axum::Router,
+    uri: &str,
+    agent_id: &str,
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("X-Agent-Id", agent_id)
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 8 * 1024 * 1024)
+        .await
+        .unwrap();
+    let parsed: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, parsed)
+}
+
 async fn delete_uri(router: &axum::Router, uri: &str) -> (StatusCode, Value) {
     let req = Request::builder()
         .method("DELETE")
         .uri(uri)
+        .body(Body::empty())
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let parsed: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, parsed)
+}
+
+async fn delete_uri_with_agent(
+    router: &axum::Router,
+    uri: &str,
+    agent_id: &str,
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .header("X-Agent-Id", agent_id)
         .body(Body::empty())
         .unwrap();
     let resp = router.clone().oneshot(req).await.unwrap();
@@ -551,7 +612,13 @@ async fn http_list_memories_returns_array() {
     let (router, _f) = build_router_fixture();
     let _ = create_basic(&router, "chunk-d/list", "l1").await;
     let _ = create_basic(&router, "chunk-d/list", "l2").await;
-    let (status, payload) = get_uri(&router, "/api/v1/memories?namespace=chunk-d/list").await;
+    // #910 SAL — read as the same principal that wrote.
+    let (status, payload) = get_uri_with_agent(
+        &router,
+        "/api/v1/memories?namespace=chunk-d/list",
+        "ai:test",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(payload["memories"].is_array());
     let mems = payload["memories"].as_array().unwrap();
@@ -1835,7 +1902,12 @@ async fn http_list_subscriptions_with_agent_filter() {
     let _g = lock_hmac();
     ai_memory::config::set_active_hooks_hmac_secret(Some("global-secret".to_string()));
     let (router, _f) = build_router_fixture();
-    let (status, _payload) = get_uri(&router, "/api/v1/subscriptions?agent_id=ai:nobody").await;
+    let (status, _payload) = get_uri_with_agent(
+        &router,
+        "/api/v1/subscriptions?agent_id=ai:nobody",
+        "ai:nobody",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     ai_memory::config::set_active_hooks_hmac_secret(None);
 }
@@ -1864,9 +1936,10 @@ async fn http_unsubscribe_by_namespace_returns_removed_false_on_miss() {
     let _g = lock_hmac();
     ai_memory::config::set_active_hooks_hmac_secret(None);
     let (router, _f) = build_router_fixture();
-    let (status, payload) = delete_uri(
+    let (status, payload) = delete_uri_with_agent(
         &router,
         "/api/v1/subscriptions?agent_id=ai:none&namespace=chunk-d/unmatched",
+        "ai:none",
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -1969,7 +2042,13 @@ async fn http_notify_invalid_agent_id_400() {
 #[tokio::test]
 async fn http_inbox_returns_array() {
     let (router, _f) = build_router_fixture();
-    let (status, payload) = get_uri(&router, "/api/v1/inbox?agent_id=ai:inbox-test").await;
+    // #901/#910 — X-Agent-Id must match the query ?agent_id= owner.
+    let (status, payload) = get_uri_with_agent(
+        &router,
+        "/api/v1/inbox?agent_id=ai:inbox-test",
+        "ai:inbox-test",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(payload.get("messages").is_some());
 }
@@ -1977,16 +2056,20 @@ async fn http_inbox_returns_array() {
 #[tokio::test]
 async fn http_inbox_invalid_agent_id_400() {
     let (router, _f) = build_router_fixture();
-    let (status, _payload) = get_uri(&router, "/api/v1/inbox?agent_id=has%20space").await;
+    // The X-Agent-Id header itself carries the malformed id; the
+    // identity resolver returns 400 from `resolve_caller_agent_id`
+    // before the spoof-match check runs.
+    let (status, _payload) = get_uri_with_agent(&router, "/api/v1/inbox", "has space").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn http_inbox_with_unread_only_filter() {
     let (router, _f) = build_router_fixture();
-    let (status, _payload) = get_uri(
+    let (status, _payload) = get_uri_with_agent(
         &router,
         "/api/v1/inbox?agent_id=ai:inbox2&unread_only=true&limit=5",
+        "ai:inbox2",
     )
     .await;
     assert_eq!(status, StatusCode::OK);

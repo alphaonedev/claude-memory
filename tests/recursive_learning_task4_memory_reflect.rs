@@ -62,11 +62,15 @@
 use ai_memory::db::{self, ReflectError, ReflectInput};
 use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{
-    ApproverType, GovernanceLevel, GovernancePolicy, Memory, Tier, default_metadata,
+    ApproverType, CorePolicy, GovernanceLevel, GovernancePolicy, Memory, Tier, default_metadata,
 };
 use chrono::Utc;
 use rusqlite::Connection;
 use serde_json::Value;
+
+mod common;
+#[cfg(feature = "sal-postgres")]
+use common::postgres_url;
 
 // ─────────────────────────────────────────────────────────────────────
 // Fixture helpers.
@@ -100,6 +104,7 @@ fn make_memory(namespace: &str, title: &str, reflection_depth: i32) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 
@@ -161,6 +166,7 @@ fn seed_policy(conn: &Connection, namespace: &str, policy: &GovernancePolicy) {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let standard_id = db::insert(conn, &standard).unwrap();
     db::set_namespace_standard(conn, namespace, &standard_id, None).unwrap();
@@ -284,26 +290,15 @@ fn refuses_when_depth_would_exceed_default_cap_three() {
 fn explicit_cap_one_refuses_depth_two_reflection() {
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
     let policy = GovernancePolicy {
-        write: GovernanceLevel::Any,
-        promote: GovernanceLevel::Any,
-        delete: GovernanceLevel::Owner,
-        approver: ApproverType::Human,
-        inherit: true,
-        max_reflection_depth: Some(1),
-        auto_export_reflections_to_filesystem: None,
-        auto_atomise: None,
-        auto_atomise_threshold_cl100k: None,
-        auto_atomise_max_atom_tokens: None,
-        auto_atomise_max_retries: None,
-        auto_persona_trigger_every_n_memories: None,
-        auto_export_personas_to_filesystem: None,
-        auto_atomise_mode: None,
-        legacy_per_pair_classifier: None,
-        auto_classify_kind: None,
-        synthesis_failure_mode: None,
-        synthesis_max_deletes_per_call: None,
-        synthesis_max_candidate_chars: None,
-        multistep_max_content_chars: None,
+        core: CorePolicy {
+            write: GovernanceLevel::Any,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Human,
+            inherit: true,
+            max_reflection_depth: Some(1),
+        },
+        ..Default::default()
     };
     seed_policy(&conn, "task4-cap-one", &policy);
 
@@ -339,26 +334,15 @@ fn explicit_cap_one_refuses_depth_two_reflection() {
 fn cap_zero_disables_every_reflection() {
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
     let policy = GovernancePolicy {
-        write: GovernanceLevel::Any,
-        promote: GovernanceLevel::Any,
-        delete: GovernanceLevel::Owner,
-        approver: ApproverType::Human,
-        inherit: true,
-        max_reflection_depth: Some(0),
-        auto_export_reflections_to_filesystem: None,
-        auto_atomise: None,
-        auto_atomise_threshold_cl100k: None,
-        auto_atomise_max_atom_tokens: None,
-        auto_atomise_max_retries: None,
-        auto_persona_trigger_every_n_memories: None,
-        auto_export_personas_to_filesystem: None,
-        auto_atomise_mode: None,
-        legacy_per_pair_classifier: None,
-        auto_classify_kind: None,
-        synthesis_failure_mode: None,
-        synthesis_max_deletes_per_call: None,
-        synthesis_max_candidate_chars: None,
-        multistep_max_content_chars: None,
+        core: CorePolicy {
+            write: GovernanceLevel::Any,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Human,
+            inherit: true,
+            max_reflection_depth: Some(0),
+        },
+        ..Default::default()
     };
     seed_policy(&conn, "task4-cap-zero", &policy);
 
@@ -603,11 +587,6 @@ fn caller_supplied_reflection_metadata_wins_on_collision() {
 // ─────────────────────────────────────────────────────────────────────
 
 #[cfg(feature = "sal-postgres")]
-fn postgres_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-}
-
-#[cfg(feature = "sal-postgres")]
 #[tokio::test]
 async fn postgres_reflect_roundtrips_memory_and_reflects_on_edge() {
     use ai_memory::store::CallerContext;
@@ -620,7 +599,12 @@ async fn postgres_reflect_roundtrips_memory_and_reflects_on_edge() {
     };
 
     let store = PostgresStore::connect(&url).await.expect("connect");
-    let ctx = CallerContext::for_agent("test-agent-task4-pg");
+    // Admin ctx: this test exercises the reflect machinery (memory + reflects_on
+    // edge), not the SAL-level scope=private visibility filter (#910). The
+    // source row, reflection row, and caller would otherwise need 3-way
+    // identity alignment — admin bypass is the right tool for primitive
+    // mechanics tests that span owners.
+    let ctx = CallerContext::for_admin("test-agent-task4-pg");
     let suffix = uuid::Uuid::new_v4();
     let ns = format!("task4-reflect-pg-{suffix}");
 

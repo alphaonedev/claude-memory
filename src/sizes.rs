@@ -63,19 +63,21 @@ pub fn tool_sizes() -> &'static [ToolSize] {
     TABLE.get_or_init(|| compute_table(false)).as_slice()
 }
 
-/// v0.7 C4 — runtime-computed table of every tool's tokenized schema
-/// cost **as actually shipped on `tools/list`**. Optional params are
-/// stripped (per [`crate::mcp::trim_optional_params`]); only required
-/// params + the C4 keep-list (`namespace`, `format`) remain. This is
-/// what an MCP host pays per request on the default code path.
+/// v0.7 C4 + #859 — runtime-computed table of every tool's tokenized
+/// schema cost **as actually shipped on `tools/list`**. Per-property
+/// `description` prose is stripped, the top-level tool `description`
+/// is compacted to the first sentence, the `docs` field is dropped,
+/// but every property entry survives so MCP clients can discover the
+/// call surface (per [`crate::mcp::trim_optional_params`] +
+/// [`crate::mcp::strip_docs_from_tools`] + `wire_compact_descriptions`).
+/// This is what an MCP host pays per request on the default code path.
 ///
-/// v0.7 C2 rebase note (2026-05-06): the wire payload also strips the
-/// per-tool `docs` field (long-form prose) and per-property
-/// `description` strings via [`crate::mcp::strip_docs_from_tools`],
-/// so this table mirrors that double-strip. Keeping the model in
-/// lockstep with `tool_definitions_for_profile` is the only way the
-/// `trimmed_full_profile_total_tokens()` reading agrees with the C5
-/// budget gate (`tests/c2_tool_docs_field.rs::c2_tools_list_token_budget_is_under_3500`).
+/// **Wire-form invariant.** This table is computed by feeding the
+/// output of [`crate::mcp::tool_definitions_for_profile`] (full
+/// profile) into the cl100k_base tokenizer; the budget gate at
+/// `tests/c2_tool_docs_field.rs::c2_tools_list_token_budget_is_under_post_859_ceiling`
+/// pins the sum at ≤ 5000 cl100k tokens (post-#859 floor; was 3500
+/// pre-#859 when the trim hid optional property keys entirely).
 pub fn trimmed_tool_sizes() -> &'static [ToolSize] {
     static TABLE: OnceLock<Vec<ToolSize>> = OnceLock::new();
     TABLE.get_or_init(|| compute_table(true)).as_slice()
@@ -113,26 +115,23 @@ pub fn tool_size(name: &str) -> Option<&'static ToolSize> {
 
 fn compute_table(trimmed: bool) -> Vec<ToolSize> {
     let bpe = bpe();
-    let mut defs = crate::mcp::tool_definitions();
-    if trimmed {
-        // v0.7 C4 — drop optional inputSchema properties (keep required +
-        // C4 allow-list).
-        crate::mcp::trim_optional_params(&mut defs);
-    }
-    let mut tools = defs
+    // #859 — to keep the budget model in lockstep with the actually-
+    // shipped wire payload, delegate to `tool_definitions_for_profile`
+    // for the trimmed case (which now performs the full wire shape:
+    // properties preserved, per-property prose stripped, top-level
+    // description compacted). For the verbose case we measure the raw
+    // `tool_definitions()` table as it would appear on the
+    // `memory_capabilities { verbose=true }` opt-in path.
+    let defs = if trimmed {
+        crate::mcp::tool_definitions_for_profile(&crate::profile::Profile::full())
+    } else {
+        crate::mcp::tool_definitions()
+    };
+    let tools = defs
         .get("tools")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    if trimmed {
-        // v0.7 C2 rebase — also drop the per-tool `docs` field and the
-        // per-property `description` prose, matching the bare
-        // `tools/list` payload produced by
-        // `crate::mcp::tool_definitions_for_profile`. Without this the
-        // trimmed total double-counts the long-form prose that the wire
-        // never actually carries on the default path.
-        crate::mcp::strip_docs_from_tools(&mut tools);
-    }
 
     tools
         .into_iter()
@@ -188,10 +187,16 @@ mod tests {
     /// failures.
     #[test]
     fn table_has_51_entries_matching_tool_definitions_count() {
+        // v0.7.0 refactor PR-2 (#793) — tool-count SSOT. Anchor the
+        // assertion on `Profile::full().expected_tool_count()` rather
+        // than a hardcoded literal so adding a new MCP tool touches
+        // ONE site (the per-Family `expected_tool_count` arm) instead
+        // of N hardcoded assertions across the codebase.
         let n = tool_sizes().len();
+        let expected = crate::profile::Profile::full().expected_tool_count();
         assert_eq!(
-            n, 71,
-            "expected exactly 71 tools (v0.6.3.1 baseline 43 + v0.7.0 I4 \
+            n, expected,
+            "expected exactly {expected} tools (v0.6.3.1 baseline 43 + v0.7.0 I4 \
              `memory_replay` + v0.7 H4 `memory_verify` + v0.7 B1 \
              `memory_load_family` + v0.7 B2 `memory_smart_load` + v0.7 K7 \
              `memory_subscription_replay` + `memory_subscription_dlq_list` \
@@ -246,31 +251,27 @@ mod tests {
     /// in this table reflect the **source of truth** (verbose +
     /// short), not the wire payload. The bare-wire C5 budget is
     /// pinned separately at ≤ 3500 tokens by
-    /// `tests/c2_tool_docs_field.rs::c2_tools_list_token_budget_is_under_3500`.
+    /// `tests/c2_tool_docs_field.rs::c2_tools_list_token_budget_is_under_post_859_ceiling`.
     /// The savings *percentage* from `core` is unchanged; the
     /// always-on payload is now ~85% smaller than the source.
     #[test]
     fn full_profile_total_in_honest_measured_range() {
         let total = full_profile_total_tokens();
-        // v0.7.0 L1-5 adds 5 skill tools with docs strings, bumping the
-        // verbose total past 10K. Updated bound to 12K to accommodate the
-        // new surface without invalidating the honest-range contract.
-        // v0.7.0 QW-1 + QW-3 follow-up add 3 more docs-bearing tools
-        // (`memory_export_reflection` + `memory_offload` + `memory_deref`),
-        // pushing the verbose source-of-truth total past 13K. Upper bound
-        // widened to 14K.
-        // v0.7.0 WT-1-C adds memory_atomise with a long docs string
-        // (curator-pass error envelope spec); 14K bound still holds.
+        // **v0.7.0 #829 update.** Prior bound was 5K..=16K to soak the
+        // multi-paragraph `docs` prose that every tool carried. After
+        // the #829 trim every `docs` field is a single condensed
+        // sentence with issue refs + tier annotations preserved, so
+        // the verbose total settles at ~9500 tokens. The hard ceiling
+        // is pinned at 10K by `tests/token_budget_guard.rs`; this
+        // honest-range assertion tracks the same number, with a 5K
+        // floor to catch a wiring break that drops the catalog
+        // entirely.
         assert!(
-            (5_000..=16_000).contains(&total),
+            (5_000..=10_000).contains(&total),
             "full-profile total {total} tokens is outside the measured \
-             cl100k_base range (5K–16K, source-of-truth incl. v0.7 C2 \
-             `docs` fields + v0.7.0 L2-2 memory_reflection_origin + \
-             v0.7.0 issue #691 2 rule tools + v0.7.0 L1-5 5 skill tools + \
-             v0.7.0 QW-1 memory_export_reflection + v0.7.0 QW-3 follow-up \
-             memory_offload + memory_deref + v0.7.0 WT-1-C memory_atomise + \
-             v0.7.0 QW-2 2 persona tools). If the schema grew, update the \
-             public claim in RFC/README/roadmap and adjust this bound."
+             cl100k_base range (5K-10K, post-#829 trim). If the schema \
+             grew intentionally, update `tests/token_budget_guard.rs::\
+             VERBOSE_FULL_PROFILE_CEILING_TOKENS` AND this bound together."
         );
     }
 
@@ -288,29 +289,29 @@ mod tests {
         assert!(tool_size("memory_does_not_exist_42").is_none());
     }
 
-    /// v0.7 C4 acceptance gate: the trimmed `tools/list` payload (the
-    /// shape an MCP host actually receives by default) must be
-    /// materially smaller than the verbose ceiling AND must save at
-    /// least ~30% of the bytes the host used to pay. Original v0.7 C4
-    /// baseline (pre-C2): verbose ≈ 7416 tokens, trimmed ≈ 4545
-    /// tokens (~39% saved). After the v0.7 C2 rebase (2026-05-06)
-    /// added per-tool `docs` strings and the trim model in
-    /// `compute_table(true)` was extended to also call
-    /// `strip_docs_from_tools` — matching what
-    /// `tool_definitions_for_profile` ships on the wire — the verbose
-    /// ceiling rises (docs is now part of the source of truth) while
-    /// the trimmed figure shrinks (docs + per-property prose is
-    /// dropped on the wire). The pinned C5 budget gate
-    /// (`tests/c2_tool_docs_field.rs::c2_tools_list_token_budget_is_under_3500`)
-    /// keeps the wire payload itself ≤ 3500 cl100k tokens, so the
-    /// per-tool sum here lands well under the 5_000 soft ceiling.
+    /// v0.7 C4 + #859 acceptance gate: the trimmed `tools/list`
+    /// payload (the shape an MCP host actually receives by default)
+    /// must be materially smaller than the verbose ceiling AND must
+    /// stay under the post-#859 5000-token wire-form budget.
     ///
-    /// The bound is set at ≤ 5_000 so a few prose-heavy required-param
-    /// descriptions can grow before this trips, but tight enough that
-    /// doubling the keep-list lands red. The aspirational ~2500-token
-    /// target from the v0.7 C4 spec lives further down the C-track.
+    /// **History.** Pre-#859 baseline: trimmed ≈ 3456 tokens,
+    /// verbose ≈ 7416 tokens (~53% saved). The trim dropped every
+    /// optional property entry from the wire, hiding the call
+    /// surface from MCP clients. #859 (v0.7.0 fix) restored every
+    /// property entry on the wire (keeping per-property `description`
+    /// prose stripped + the top-level tool description compacted to
+    /// the first sentence) so NHI agents can discover what knobs
+    /// exist. Post-#859: trimmed ≈ 4500-4700 tokens, verbose ≈ 9500.
+    ///
+    /// The savings now sit at ~50% (down from ~53%) because the
+    /// property metadata that pre-fix lived only in the verbose
+    /// catalog now also appears on the wire. The 5000 ceiling pins
+    /// the post-#859 floor with ~300 tokens of headroom for future
+    /// tool additions; the 25% lower bound on `saved_pct` keeps the
+    /// trim itself honest (a regression that re-bloated the wire
+    /// path with docs / per-property prose would still trip).
     #[test]
-    fn trimmed_full_profile_total_under_c4_target() {
+    fn trimmed_full_profile_total_under_post_859_ceiling() {
         let trimmed = trimmed_full_profile_total_tokens();
         let verbose = full_profile_total_tokens();
         assert!(
@@ -319,15 +320,18 @@ mod tests {
         );
         let saved_pct = (verbose - trimmed) as f64 / verbose as f64 * 100.0;
         assert!(
-            saved_pct >= 30.0,
-            "v0.7 C4 trim should save >=30% of full-profile tokens; got {saved_pct:.1}% \
-             (verbose={verbose}, trimmed={trimmed}). Audit C4_KEEP_OPTIONAL_PARAMS."
+            saved_pct >= 25.0,
+            "trim should save >=25% of full-profile tokens; got {saved_pct:.1}% \
+             (verbose={verbose}, trimmed={trimmed}). Audit `strip_docs_from_tools` and \
+             `wire_compact_descriptions` — if those broke the trim itself regressed."
         );
         assert!(
             trimmed <= 5_000,
-            "v0.7 C4 trimmed full-profile total {trimmed} > 5000-token soft ceiling. \
-             If a tool genuinely needs more required params, update the bound; \
-             if not, audit C4_KEEP_OPTIONAL_PARAMS for unintended growth."
+            "post-#859 trimmed full-profile total {trimmed} > 5000-token ceiling. \
+             The #859 fix preserves every property entry on the wire — if a tool's \
+             schema grew, audit per-property `description` prose (must be stripped) \
+             and consider routing the new tool to `family=power` instead of the \
+             always-on core."
         );
     }
 

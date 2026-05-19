@@ -33,6 +33,11 @@ pub mod export;
 pub mod forget;
 pub mod gc;
 pub mod governance;
+/// v0.7.0 issue #863 — `ai-memory governance check-action` subcommand.
+/// Shell-side parity for the MCP tool `memory_check_agent_action` so
+/// operators can dry-run a substrate rule from a terminal without
+/// driving JSON-RPC over stdio.
+pub mod governance_check_action;
 /// v0.7.0 7th-form (issue #760) — `ai-memory governance install-defaults`
 /// subcommand. Bulk-flip seed rules R001-R004 to `enabled = 1` after
 /// operator confirmation (interactive prompt; `--yes` overrides).
@@ -45,6 +50,12 @@ pub mod io;
 pub mod io_writer;
 pub mod link;
 pub mod logs;
+/// v0.7.0 (issue #800) — `ai-memory namespace` subcommand. CRUD over
+/// the per-namespace standard policy memory pointer. Closes Crack 1
+/// from the Batman Mode acceptance review by giving operators a
+/// first-class CLI verb instead of forcing them into an MCP-stdio
+/// JSON-RPC dance just to bind a `GovernancePolicy` to a namespace.
+pub mod namespace;
 /// v0.7.0 QW-3 — `ai-memory offload` / `ai-memory deref` subcommands.
 /// Substrate-only wrappers over `crate::offload::ContextOffloader`.
 pub mod offload;

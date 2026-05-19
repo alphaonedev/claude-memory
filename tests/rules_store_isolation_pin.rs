@@ -27,10 +27,22 @@
 //!
 //! This test pins all three.
 
+use std::path::PathBuf;
+
 use ai_memory::governance::agent_action::{AgentAction, Decision, check_agent_action_no_audit};
 use ai_memory::governance::rules_store::{self, Rule};
+use ed25519_dalek::Signer;
 use rusqlite::Connection;
-use std::path::PathBuf;
+
+mod common;
+use common::*;
+
+// Hermetic-test pattern: production `enforced_rule_passes` drops
+// `operator_signed` rules whose signature fails verification against
+// the resolved operator pubkey. `install_test_operator_key()` (in
+// `common`) installs a per-test keypair in `AI_MEMORY_OPERATOR_PUBKEY`
+// and the rule below is signed with the matching signing key so
+// assertions hold regardless of host state.
 
 fn fresh_conn() -> Connection {
     let conn = Connection::open_in_memory().expect("open in-memory db");
@@ -85,12 +97,23 @@ fn mcp_dispatch_does_not_register_rule_mutation_tools() {
     }
 
     // The two READ tools that ARE registered, as a positive control.
+    // The dispatch table now uses the `register_mcp_tool!` macro
+    // (post-refactor) rather than a flat `"name" => handler(...)` match
+    // arm; the positive control accepts either spelling.
     assert!(
-        body.contains("\"memory_check_agent_action\" => handle_check_agent_action"),
+        body.contains("\"memory_check_agent_action\" => handle_check_agent_action")
+            || body.contains(
+                "register_mcp_tool!(\n        \"memory_check_agent_action\",\n        \
+                 dispatch_memory_check_agent_action\n    )"
+            )
+            || body.contains("\"memory_check_agent_action\",")
+                && body.contains("dispatch_memory_check_agent_action"),
         "expected memory_check_agent_action read tool to be registered"
     );
     assert!(
-        body.contains("\"memory_rule_list\" => handle_rule_list"),
+        body.contains("\"memory_rule_list\" => handle_rule_list")
+            || body.contains("register_mcp_tool!(\"memory_rule_list\", dispatch_memory_rule_list)")
+            || body.contains("\"memory_rule_list\",") && body.contains("dispatch_memory_rule_list"),
         "expected memory_rule_list read tool to be registered"
     );
 }
@@ -154,26 +177,30 @@ fn agent_controlled_matcher_string_does_not_redirect_rule_lookup() {
     // a matcher JSON, the rules engine doesn't read memories — it
     // queries `governance_rules`. We pin that the rules engine's
     // lookup is keyed on `kind`, not on agent-supplied data.
+    let (signing, _env_guard) = install_test_operator_key();
     let conn = fresh_conn();
 
-    // Insert a fresh REFUSE rule for filesystem_write.
-    rules_store::insert(
-        &conn,
-        &Rule {
-            id: "TEST_R".into(),
-            kind: "filesystem_write".into(),
-            matcher: r#"{"glob":"/secret/**"}"#.into(),
-            severity: "refuse".into(),
-            reason: "test refusal".into(),
-            namespace: "_global".into(),
-            created_by: "test".into(),
-            created_at: 0,
-            enabled: true,
-            signature: None,
-            attest_level: "operator_signed".into(),
-        },
-    )
-    .expect("insert TEST_R");
+    // Insert a fresh REFUSE rule for filesystem_write. Signed with
+    // the in-test operator key so `enforced_rule_passes` accepts it
+    // under L1-6 (signed-rules-required when an operator pubkey
+    // resolves).
+    let mut rule = Rule {
+        id: "TEST_R".into(),
+        kind: "filesystem_write".into(),
+        matcher: r#"{"glob":"/secret/**"}"#.into(),
+        severity: "refuse".into(),
+        reason: "test refusal".into(),
+        namespace: "_global".into(),
+        created_by: "test".into(),
+        created_at: 0,
+        enabled: true,
+        signature: None,
+        attest_level: "operator_signed".into(),
+    };
+    let canonical =
+        rules_store::canonical_bytes_for_signing(&rule).expect("canonical_bytes_for_signing");
+    rule.signature = Some(signing.sign(&canonical).to_bytes().to_vec());
+    rules_store::insert(&conn, &rule).expect("insert TEST_R");
 
     // Action whose path matches the matcher → must refuse.
     let action = AgentAction::FilesystemWrite {

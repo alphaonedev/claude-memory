@@ -192,29 +192,79 @@ pub fn resolve_agent_id(explicit: Option<&str>, mcp_client: Option<&str>) -> Res
 
 /// Resolve `agent_id` for a single HTTP request.
 ///
-/// `body` is the `agent_id` field from `CreateMemory`; `header` is the value
-/// of the `X-Agent-Id` request header. If neither is present a per-request
-/// `anonymous:req-<uuid8>` id is synthesized and a `WARN` is logged so
-/// operators notice unauthenticated writes.
+/// `body` is the (optional) `agent_id` field from `CreateMemory`;
+/// `header` is the value of the `X-Agent-Id` request header. If neither
+/// is present a per-request `anonymous:req-<uuid8>` id is synthesized
+/// and a `WARN` is logged so operators notice unauthenticated writes.
+///
+/// # SECURITY (v0.7.0 — header-first; body must match)
+///
+/// This primitive is **safe by default**: the request header
+/// `X-Agent-Id` is the AUTHORITATIVE identity slot, and any body-side
+/// `agent_id` is a REFINEMENT that MUST agree with the header. The
+/// body slot is caller-controlled — historically it had PRECEDENCE
+/// over the header, which was the cross-tenant spoof vector closed by
+/// the v0.7.0 #874/#901/#905-#910 issue series (#874 unsubscribe +
+/// list_subscriptions, #901 notify + subscribe + get_inbox, #905
+/// power_consolidation, #907 create_memory, #909 quota_status, #910
+/// list_memories + kg_query visibility filter). Those per-handler
+/// patches each had to pass `body: None` as a workaround because the
+/// primitive itself trusted body-first. This fn now closes the
+/// underlying primitive so ANY future caller is structurally safe
+/// regardless of what they pass for `body`.
+///
+/// Resolution rules:
+///
+/// 1. The header is resolved first (or the per-request anonymous
+///    fallback is synthesized when no header is present).
+/// 2. If `body` is `Some(non-empty)` it is validated and compared
+///    against the header-resolved id. A MISMATCH returns an error
+///    tagged `agent_id_body_header_mismatch` so handlers can map it
+///    to `403 Forbidden`. An empty `body` is treated as "no claim"
+///    (same as `None`).
+/// 3. Validation errors on either side surface unchanged.
+///
+/// New callers SHOULD pass `body: None` and rely on header-only
+/// authentication; the body-refinement slot is preserved only for
+/// the existing federation receiver path (where the body carries an
+/// envelope-attributed identity, gated by
+/// `AI_MEMORY_FED_TRUST_BODY_AGENT_ID`) and for backwards-compatible
+/// callers that want defense-in-depth checks at this layer.
 pub fn resolve_http_agent_id(body: Option<&str>, header: Option<&str>) -> Result<String> {
-    if let Some(id) = body
+    // 1. Header is authoritative — resolve it first (validate if
+    //    present; synthesize anonymous fallback otherwise).
+    let resolved = if let Some(id) = header
         && !id.is_empty()
     {
         validate::validate_agent_id(id)?;
-        return Ok(id.to_string());
-    }
-    if let Some(id) = header
-        && !id.is_empty()
+        id.to_string()
+    } else {
+        let anon = format!("anonymous:req-{}", short_uuid());
+        tracing::warn!(
+            "HTTP memory write without agent_id body field or X-Agent-Id header; assigned {anon}"
+        );
+        validate::validate_agent_id(&anon)?;
+        anon
+    };
+
+    // 2. Body, when non-empty, is a refinement that MUST match the
+    //    authoritative header-resolved id. Validate the body shape
+    //    first so a malformed claim surfaces as a 400 rather than a
+    //    403 mismatch (the validation error is the more informative
+    //    diagnostic).
+    if let Some(claim) = body
+        && !claim.is_empty()
     {
-        validate::validate_agent_id(id)?;
-        return Ok(id.to_string());
+        validate::validate_agent_id(claim)?;
+        if claim != resolved {
+            anyhow::bail!(
+                "agent_id_body_header_mismatch: body-supplied agent_id {claim:?} disagrees \
+                 with authenticated header-resolved id {resolved:?}"
+            );
+        }
     }
-    let id = format!("anonymous:req-{}", short_uuid());
-    tracing::warn!(
-        "HTTP memory write without agent_id body field or X-Agent-Id header; assigned {id}"
-    );
-    validate::validate_agent_id(&id)?;
-    Ok(id)
+
+    Ok(resolved)
 }
 
 /// Preserve `existing.agent_id` through update/dedup.
@@ -361,10 +411,56 @@ mod tests {
         );
     }
 
+    /// v0.7.0 SECURITY regression — primitive-level closure of the
+    /// #874-class agent_id spoof. Previously `body` had PRECEDENCE
+    /// over `header`, so a caller authenticated as `bob` (via
+    /// `X-Agent-Id`) could pass `body=Some("alice")` and the resolver
+    /// would return `"alice"`. Post-fix the header is authoritative
+    /// and a body-vs-header mismatch is a typed error so handlers
+    /// can map to `403 Forbidden`.
     #[test]
-    fn resolve_http_body_wins() {
-        let id = resolve_http_agent_id(Some("alice"), Some("bob")).unwrap();
+    fn resolve_http_body_mismatch_is_err() {
+        let r = resolve_http_agent_id(Some("alice"), Some("bob"));
+        assert!(r.is_err(), "mismatch must be Err, got Ok({r:?})");
+        let msg = r.unwrap_err().to_string();
+        assert!(
+            msg.contains("agent_id_body_header_mismatch"),
+            "error must carry tag agent_id_body_header_mismatch, got: {msg}"
+        );
+        // Header value MUST NOT leak into the resolver's return on
+        // mismatch — the contract is "error, not silent override".
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn resolve_http_body_matching_header_is_ok() {
+        // Body is a defense-in-depth refinement — when it matches the
+        // header the resolver returns the agreed id.
+        let id = resolve_http_agent_id(Some("alice"), Some("alice")).unwrap();
         assert_eq!(id, "alice");
+    }
+
+    #[test]
+    fn resolve_http_empty_body_is_no_claim() {
+        // Empty body MUST be treated as "no body-side claim" — same
+        // contract as None. Header wins, no mismatch error.
+        let id = resolve_http_agent_id(Some(""), Some("bob")).unwrap();
+        assert_eq!(id, "bob");
+    }
+
+    #[test]
+    fn resolve_http_body_without_header_uses_anonymous_and_mismatches() {
+        // No header → anonymous fallback id is synthesized. A body
+        // claim then mismatches the anonymous id → typed error.
+        // This is the strict posture: a caller cannot launder a body
+        // claim through an absent-header request.
+        let r = resolve_http_agent_id(Some("alice"), None);
+        assert!(r.is_err(), "body without header must be Err, got Ok({r:?})");
+        let msg = r.unwrap_err().to_string();
+        assert!(
+            msg.contains("agent_id_body_header_mismatch"),
+            "error must carry tag agent_id_body_header_mismatch, got: {msg}"
+        );
     }
 
     #[test]

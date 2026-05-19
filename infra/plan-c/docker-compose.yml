@@ -1,0 +1,168 @@
+name: ai-memory-plan-c
+# Issue #878 — canonical Plan-C fleet recipe.
+#
+# Long-term fix for the peer-mesh URL collision bug: each container
+# resolves its peers via the user-defined `ic-mesh` bridge network's
+# embedded DNS, so peer URLs look like `http://ic-bob:19077` rather
+# than `http://host.docker.internal:<port>`. The bridge isolates the
+# fleet's traffic from host-port collisions (SSH forwards, stray
+# python servers, stale docker proxies after `colima delete`, etc.)
+# that previously silent-shadowed peer reach.
+#
+# The entrypoint's #878 peer-reach preflight (entrypoint.plan-c.sh)
+# stays on as a safety net — when bridge DNS resolves to a peer that
+# is still booting, the preflight aborts with EX_CONFIG (78) and
+# `restart: on-failure` brings the container back when the peer is
+# up. `depends_on` orders the initial boot.
+#
+# Operator quick-start (assumes you have a Postgres reachable at
+# AI_MEMORY_STORE_URL and Ollama at OLLAMA_BASE_URL — both required):
+#
+#   export AI_MEMORY_STORE_URL=postgres://...
+#   export OLLAMA_BASE_URL=http://host.docker.internal:11434
+#   docker compose -f infra/plan-c/docker-compose.yml up -d --build
+#
+# Operator recreate (after binary rebuild or schema migration):
+#
+#   docker compose -f infra/plan-c/docker-compose.yml down -v
+#   docker compose -f infra/plan-c/docker-compose.yml up -d --build
+#
+# Healthcheck: each container probes its own `/api/v1/capabilities`
+# every 10s; once all three are healthy the mesh is ready for write
+# traffic.
+
+services:
+  ic-alice:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.plan-c
+      args:
+        CARGO_FEATURES: sal-postgres
+    image: ai-memory-plan-c:bridge-net
+    container_name: ic-alice
+    hostname: ic-alice
+    restart: on-failure
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      AI_MEMORY_AGENT_ID: "ai:ic-alice@plan-c"
+      AI_MEMORY_TIER: autonomous
+      AI_MEMORY_LISTEN_HOST: "0.0.0.0"
+      AI_MEMORY_LISTEN_PORT: "19077"
+      AI_MEMORY_STORE_URL: "${AI_MEMORY_STORE_URL}"
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://host.docker.internal:11434}"
+      AI_MEMORY_LLM_MODEL: "gemma4:e4b"
+      AI_MEMORY_EMBED_MODEL: "nomic-embed-text"
+      # Container-DNS peer URLs — resolved on the ic-mesh bridge
+      # without touching the host network. This is the load-bearing
+      # change for #878.
+      AI_MEMORY_PEER_URLS: "http://ic-bob:19077,http://ic-carol:19077"
+      AI_MEMORY_API_KEY: "${AI_MEMORY_API_KEY:-}"
+      RUST_LOG: "${RUST_LOG:-ai_memory=info}"
+    volumes:
+      - ic-alice-keys:/root/.config/ai-memory/keys
+      - ic-alice-audit:/var/log/ai-memory/audit
+    ports:
+      - "19077:19077"
+    networks:
+      - ic-mesh
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-sS", "--max-time", "3", "http://127.0.0.1:19077/api/v1/capabilities"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  ic-bob:
+    image: ai-memory-plan-c:bridge-net
+    container_name: ic-bob
+    hostname: ic-bob
+    restart: on-failure
+    depends_on:
+      - ic-alice
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      AI_MEMORY_AGENT_ID: "ai:ic-bob@plan-c"
+      AI_MEMORY_TIER: autonomous
+      AI_MEMORY_LISTEN_HOST: "0.0.0.0"
+      AI_MEMORY_LISTEN_PORT: "19077"
+      AI_MEMORY_STORE_URL: "${AI_MEMORY_STORE_URL}"
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://host.docker.internal:11434}"
+      AI_MEMORY_LLM_MODEL: "gemma4:e4b"
+      AI_MEMORY_EMBED_MODEL: "nomic-embed-text"
+      AI_MEMORY_PEER_URLS: "http://ic-alice:19077,http://ic-carol:19077"
+      AI_MEMORY_API_KEY: "${AI_MEMORY_API_KEY:-}"
+      RUST_LOG: "${RUST_LOG:-ai_memory=info}"
+    volumes:
+      - ic-bob-keys:/root/.config/ai-memory/keys
+      - ic-bob-audit:/var/log/ai-memory/audit
+    ports:
+      - "19078:19077"
+    networks:
+      - ic-mesh
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-sS", "--max-time", "3", "http://127.0.0.1:19077/api/v1/capabilities"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  ic-carol:
+    image: ai-memory-plan-c:bridge-net
+    container_name: ic-carol
+    hostname: ic-carol
+    restart: on-failure
+    depends_on:
+      - ic-alice
+      - ic-bob
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      AI_MEMORY_AGENT_ID: "ai:ic-carol@plan-c"
+      AI_MEMORY_TIER: autonomous
+      AI_MEMORY_LISTEN_HOST: "0.0.0.0"
+      AI_MEMORY_LISTEN_PORT: "19077"
+      AI_MEMORY_STORE_URL: "${AI_MEMORY_STORE_URL}"
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://host.docker.internal:11434}"
+      AI_MEMORY_LLM_MODEL: "gemma4:e4b"
+      AI_MEMORY_EMBED_MODEL: "nomic-embed-text"
+      AI_MEMORY_PEER_URLS: "http://ic-alice:19077,http://ic-bob:19077"
+      AI_MEMORY_API_KEY: "${AI_MEMORY_API_KEY:-}"
+      RUST_LOG: "${RUST_LOG:-ai_memory=info}"
+    volumes:
+      - ic-carol-keys:/root/.config/ai-memory/keys
+      - ic-carol-audit:/var/log/ai-memory/audit
+    ports:
+      - "19079:19077"
+    networks:
+      - ic-mesh
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-sS", "--max-time", "3", "http://127.0.0.1:19077/api/v1/capabilities"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+networks:
+  # Issue #878 — user-defined bridge with explicit subnet so docker's
+  # embedded DNS can resolve `ic-alice` / `ic-bob` / `ic-carol` to the
+  # container's eth0 address on the bridge. The subnet is private and
+  # local to docker; it does NOT collide with host networks even when
+  # the host has its own 172.x.x.x routes (docker assigns the next
+  # free /24 from its pool by default; pinning it here makes
+  # `iptables` / `ip route` diagnostics deterministic across restarts).
+  ic-mesh:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.31.78.0/24
+
+volumes:
+  ic-alice-keys:
+  ic-alice-audit:
+  ic-bob-keys:
+  ic-bob-audit:
+  ic-carol-keys:
+  ic-carol-audit:

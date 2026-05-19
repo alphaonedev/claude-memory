@@ -659,4 +659,253 @@ mod tests {
         // returns body and an empty reflections list — pin that.
         assert!(text.contains(&id) || text.contains("\"body\""));
     }
+
+    // ------------------------------------------------------------------
+    // Coverage-uplift block (2026-05-19): exercise the non-JSON (human-
+    // render) paths for every skill verb so the `if args.json { ... }
+    // else { ... writeln!(...) }` else-arms are not dead from a test-
+    // coverage standpoint.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn cli_skill_register_human_render_emits_summary_line() {
+        let (_dir, db_path) = fresh_db();
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let args = SkillArgs {
+            action: SkillAction::Register(RegisterArgs {
+                manifest: None,
+                inline: Some(minimal_skill_md("cli-register-human")),
+                json: false,
+            }),
+        };
+        let code = run(&db_path, &args, None, &mut out).unwrap();
+        assert_eq!(code, 0);
+        drop(out);
+        let text = String::from_utf8(stdout).unwrap();
+        // The human-render path emits "registered skill {ns}/{name} ..."
+        assert!(
+            text.starts_with("registered skill "),
+            "expected human-render summary line, got: {text}"
+        );
+        assert!(text.contains("cli-register-human"));
+        assert!(text.contains("digest="));
+        assert!(text.contains("signed="));
+    }
+
+    #[test]
+    fn cli_skill_list_human_render_emits_table() {
+        let (_dir, db_path) = fresh_db();
+        let conn = db::open(&db_path).unwrap();
+        let _ = crate::mcp::handle_skill_register(
+            &conn,
+            &json!({"inline_skill": minimal_skill_md("cli-list-human")}),
+            None,
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let args = SkillArgs {
+            action: SkillAction::List(ListArgs {
+                namespace: Some("testns".to_string()),
+                filter: Some("cli-list-human".to_string()),
+                json: false,
+            }),
+        };
+        let code = run(&db_path, &args, None, &mut out).unwrap();
+        assert_eq!(code, 0);
+        drop(out);
+        let text = String::from_utf8(stdout).unwrap();
+        // Human render prints "{N} skills" + per-skill indented lines.
+        assert!(
+            text.contains(" skills"),
+            "expected count header, got: {text}"
+        );
+        assert!(text.contains("cli-list-human"));
+    }
+
+    #[test]
+    fn cli_skill_get_human_render_emits_markdown_header_and_body() {
+        let (_dir, db_path) = fresh_db();
+        let conn = db::open(&db_path).unwrap();
+        let reg = crate::mcp::handle_skill_register(
+            &conn,
+            &json!({"inline_skill": minimal_skill_md("cli-get-human")}),
+            None,
+        )
+        .unwrap();
+        let id = reg["id"].as_str().unwrap().to_string();
+        drop(conn);
+
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let args = SkillArgs {
+            action: SkillAction::Get(GetArgs { id, json: false }),
+        };
+        let code = run(&db_path, &args, None, &mut out).unwrap();
+        assert_eq!(code, 0);
+        drop(out);
+        let text = String::from_utf8(stdout).unwrap();
+        // Human render prints "# {ns}/{name}\n\n{body}"
+        assert!(text.starts_with("# testns/cli-get-human"));
+        assert!(text.contains("Body."));
+    }
+
+    #[test]
+    fn cli_skill_export_human_render_emits_path_line() {
+        let (dir, db_path) = fresh_db();
+        let conn = db::open(&db_path).unwrap();
+        let reg = crate::mcp::handle_skill_register(
+            &conn,
+            &json!({"inline_skill": minimal_skill_md("cli-export-human")}),
+            None,
+        )
+        .unwrap();
+        let id = reg["id"].as_str().unwrap().to_string();
+        drop(conn);
+
+        let target = dir.path().join("export-human-out");
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let args = SkillArgs {
+            action: SkillAction::Export(ExportArgs {
+                id: id.clone(),
+                output: target.clone(),
+                json: false,
+            }),
+        };
+        let code = run(&db_path, &args, None, &mut out).unwrap();
+        assert_eq!(code, 0);
+        assert!(target.join("SKILL.md").exists());
+        drop(out);
+        let text = String::from_utf8(stdout).unwrap();
+        // Human render prints "exported skill {id} → {folder}"
+        assert!(text.starts_with("exported skill "));
+        assert!(text.contains(&id));
+    }
+
+    #[test]
+    fn cli_skill_register_handler_error_writes_to_stderr_and_returns_2() {
+        let (_dir, db_path) = fresh_db();
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        // Pass neither --manifest nor --inline — substrate returns the
+        // "either/or" error string. Exits 2 with stderr text.
+        let args = SkillArgs {
+            action: SkillAction::Register(RegisterArgs {
+                manifest: None,
+                inline: None,
+                json: true,
+            }),
+        };
+        let code = run(&db_path, &args, None, &mut out).unwrap();
+        assert_eq!(code, 2);
+        drop(out);
+        let err = String::from_utf8(stderr).unwrap();
+        assert!(
+            err.starts_with("ai-memory skill register:"),
+            "expected stderr prefix, got: {err}"
+        );
+    }
+
+    #[test]
+    fn cli_skill_resource_returns_2_on_missing_skill() {
+        let (_dir, db_path) = fresh_db();
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let args = SkillArgs {
+            action: SkillAction::Resource(ResourceArgs {
+                id: "no-such-skill-id".to_string(),
+                path: "doesnt-matter.txt".to_string(),
+                json: false,
+            }),
+        };
+        let code = run(&db_path, &args, None, &mut out).unwrap();
+        assert_eq!(code, 2);
+        drop(out);
+        let err = String::from_utf8(stderr).unwrap();
+        assert!(err.starts_with("ai-memory skill resource:"));
+    }
+
+    #[test]
+    fn cli_skill_promote_returns_2_on_missing_reflection() {
+        let (_dir, db_path) = fresh_db();
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let args = SkillArgs {
+            action: SkillAction::Promote(PromoteArgs {
+                id: "no-such-reflection".to_string(),
+                name: "demo-skill".to_string(),
+                description: "Promoted from missing reflection.".to_string(),
+                parameters_schema: None,
+                json: true,
+            }),
+        };
+        let code = run(&db_path, &args, None, &mut out).unwrap();
+        assert_eq!(code, 2);
+        drop(out);
+        let err = String::from_utf8(stderr).unwrap();
+        assert!(err.starts_with("ai-memory skill promote:"));
+    }
+
+    #[test]
+    fn cli_skill_compose_returns_2_on_missing_skill() {
+        let (_dir, db_path) = fresh_db();
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let args = SkillArgs {
+            action: SkillAction::Compose(ComposeArgs {
+                id: "no-such-skill".to_string(),
+                budget_tokens: None,
+                json: true,
+            }),
+        };
+        let code = run(&db_path, &args, None, &mut out).unwrap();
+        assert_eq!(code, 2);
+        drop(out);
+        let err = String::from_utf8(stderr).unwrap();
+        assert!(err.starts_with("ai-memory skill compose:"));
+    }
+
+    #[test]
+    fn cli_skill_register_manifest_file_path_normalised_to_parent_dir() {
+        // The run_register branch at lines 260-269: if --manifest points
+        // to a FILE (not a directory), the parent dir is handed to the
+        // substrate. Build a real folder with SKILL.md and pass the file
+        // path to exercise the is_file() → parent-dir branch.
+        let (dir, db_path) = fresh_db();
+        let folder = dir.path().join("skill-folder");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("SKILL.md"),
+            minimal_skill_md("cli-manifest-file"),
+        )
+        .unwrap();
+
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let args = SkillArgs {
+            action: SkillAction::Register(RegisterArgs {
+                manifest: Some(folder.join("SKILL.md")),
+                inline: None,
+                json: true,
+            }),
+        };
+        let code = run(&db_path, &args, None, &mut out).unwrap();
+        assert_eq!(code, 0);
+        drop(out);
+        let text = String::from_utf8(stdout).unwrap();
+        assert!(text.contains("cli-manifest-file"));
+    }
 }

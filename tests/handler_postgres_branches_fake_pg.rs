@@ -10,7 +10,7 @@
 //! `#[cfg(feature = "sal")] if matches!(StorageBackend::Postgres) {…}`
 //! branch in `handlers/http.rs`, `handlers/hook_subscribers.rs`, and
 //! `handlers/federation_receive.rs` while the underlying calls land on
-//! the SqliteStore impls (which exist for every method used on the
+//! the `SqliteStore` impls (which exist for every method used on the
 //! "happy" postgres branch). Branches that route through
 //! `crate::store::postgres::*_via_store` helpers exercise the
 //! `downcast_postgres` → `BackendUnavailable` error path → `503
@@ -18,7 +18,7 @@
 //! `store_err_to_response`.
 //!
 //! The `cov_18_offload_ttl_postgres` baseline tested a similar
-//! "Postgres flag with SqliteStore" pattern for the offload TTL
+//! "Postgres flag with `SqliteStore`" pattern for the offload TTL
 //! plumbing. This file generalises it across the handler surface.
 
 #![cfg(feature = "sal")]
@@ -73,6 +73,9 @@ fn build_fake_pg_router() -> (axum::Router, NamedTempFile) {
         llm_call_timeout: std::time::Duration::from_secs(30),
         replay_cache: Arc::new(ai_memory::identity::replay::ReplayCache::default()),
         verify_require_nonce: false,
+        federation_nonce_cache: std::sync::Arc::new(
+            ai_memory::identity::replay::FederationNonceCache::default(),
+        ),
         autonomous_hooks: false,
         recall_scope: Arc::new(None),
         deferred_audit_queue: Arc::new(None),
@@ -83,6 +86,33 @@ fn build_fake_pg_router() -> (axum::Router, NamedTempFile) {
     };
     let router = ai_memory::build_router(api_key_state, app_state);
     (router, f)
+}
+
+/// #901/#905/#907/#909 — handlers that accept a body-side `agent_id`
+/// now require the `X-Agent-Id` header for authentication and 403
+/// when the body claim disagrees. Use `post_json_as` for any POST that
+/// carries `body.agent_id` or `metadata.agent_id`; plain `post_json`
+/// is reserved for body-shape-only tests.
+async fn post_json_as(
+    router: &axum::Router,
+    uri: &str,
+    body: Value,
+    caller_agent_id: &str,
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("x-agent-id", caller_agent_id)
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, v)
 }
 
 async fn post_json(router: &axum::Router, uri: &str, body: Value) -> (StatusCode, Value) {
@@ -116,12 +146,52 @@ async fn get_uri(router: &axum::Router, uri: &str) -> (StatusCode, Value) {
     (status, v)
 }
 
-async fn delete_uri(router: &axum::Router, uri: &str) -> (StatusCode, Value) {
+/// #901/#910 — GET handlers with `?agent_id=` query params now require
+/// a matching `X-Agent-Id` header (or the body authorisation flow).
+/// Use this helper for any test that asserts a happy-path on such a
+/// route.
+async fn get_uri_as(
+    router: &axum::Router,
+    uri: &str,
+    caller_agent_id: &str,
+) -> (StatusCode, Value) {
     let req = Request::builder()
-        .method("DELETE")
+        .method("GET")
         .uri(uri)
+        .header("x-agent-id", caller_agent_id)
         .body(Body::empty())
         .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, v)
+}
+
+async fn delete_uri(router: &axum::Router, uri: &str) -> (StatusCode, Value) {
+    delete_uri_as(router, uri, None).await
+}
+
+/// Per #874 (security-medium, 2026-05-18) the unsubscribe handler
+/// REQUIRES authenticated identity via `X-Agent-Id` header (or body),
+/// and refuses the request with 403 if the `agent_id=` query param
+/// does not match the authenticated caller. Tests that pass an
+/// `agent_id=…` query param MUST therefore also set the matching
+/// `X-Agent-Id` header through this helper to exercise the
+/// happy-path branches; otherwise the handler returns 403 instead
+/// of the asserted 200/400.
+async fn delete_uri_as(
+    router: &axum::Router,
+    uri: &str,
+    caller_agent_id: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder().method("DELETE").uri(uri);
+    if let Some(caller) = caller_agent_id {
+        builder = builder.header("x-agent-id", caller);
+    }
+    let req = builder.body(Body::empty()).unwrap();
     let resp = router.clone().oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
@@ -217,9 +287,15 @@ async fn pg_get_memory_after_create_roundtrip() {
         "source": "user",
         "metadata": {},
     });
-    let (_status, v) = post_json(&router, "/api/v1/memories", body).await;
+    // #910 SAL-level visibility — anonymous callers get a fresh
+    // `anonymous:req-<uuid>` per request, so the GET caller cannot
+    // see the POST caller's scope=private row. Use a stable
+    // X-Agent-Id across both legs so the create-then-get round-trip
+    // sees the same principal.
+    let (_status, v) = post_json_as(&router, "/api/v1/memories", body, "pg-roundtrip").await;
     let id = v["id"].as_str().expect("id").to_string();
-    let (status, got) = get_uri(&router, &format!("/api/v1/memories/{id}")).await;
+    let (status, got) =
+        get_uri_as(&router, &format!("/api/v1/memories/{id}"), "pg-roundtrip").await;
     assert_eq!(status, StatusCode::OK, "{got}");
     // The pg path's get_memory returns `{memory: ..., links: ...}` so the
     // id is nested under `memory`.
@@ -321,12 +397,16 @@ async fn pg_promote_memory_after_create() {
         "source": "user",
         "metadata": {},
     });
-    let (_status, v) = post_json(&router, "/api/v1/memories", body).await;
+    // #910 SAL-level visibility — keep the same caller across both
+    // legs so the promote handler's pre-fetch (`store.get`) sees the
+    // row it just created.
+    let (_status, v) = post_json_as(&router, "/api/v1/memories", body, "pg-promote").await;
     let id = v["id"].as_str().unwrap().to_string();
-    let (status, got) = post_json(
+    let (status, got) = post_json_as(
         &router,
         &format!("/api/v1/memories/{id}/promote"),
         json!({}),
+        "pg-promote",
     )
     .await;
     assert!(status == StatusCode::OK, "pg promote: {status} body={got}");
@@ -747,7 +827,13 @@ async fn pg_list_pending_via_store_envelope() {
 #[tokio::test]
 async fn pg_inbox_returns_envelope() {
     let (router, _f) = build_fake_pg_router();
-    let (status, v) = get_uri(&router, "/api/v1/inbox?agent_id=pg-recipient").await;
+    // #901: query agent_id must match the authenticated caller via header.
+    let (status, v) = get_uri_as(
+        &router,
+        "/api/v1/inbox?agent_id=pg-recipient",
+        "pg-recipient",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{v}");
     assert!(v.get("messages").is_some() || v.is_array(), "{v}");
 }
@@ -755,9 +841,11 @@ async fn pg_inbox_returns_envelope() {
 #[tokio::test]
 async fn pg_inbox_with_unread_only() {
     let (router, _f) = build_fake_pg_router();
-    let (status, _v) = get_uri(
+    // #901: matching X-Agent-Id required for the query agent_id.
+    let (status, _v) = get_uri_as(
         &router,
         "/api/v1/inbox?agent_id=pg-recipient&unread_only=true",
+        "pg-recipient",
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -766,7 +854,11 @@ async fn pg_inbox_with_unread_only() {
 #[tokio::test]
 async fn pg_inbox_invalid_agent_id_400() {
     let (router, _f) = build_fake_pg_router();
-    let (status, _v) = get_uri(&router, "/api/v1/inbox?agent_id=!bad!").await;
+    // #901: send the invalid agent_id in BOTH the header and the query.
+    // The handler's first authentication step calls
+    // `resolve_http_agent_id` on the header, whose `validate_agent_id`
+    // returns the 400 BAD REQUEST before the query-match check runs.
+    let (status, _v) = get_uri_as(&router, "/api/v1/inbox?agent_id=!bad!", "!bad!").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -777,7 +869,8 @@ async fn pg_inbox_invalid_agent_id_400() {
 #[tokio::test]
 async fn pg_notify_happy_path() {
     let (router, _f) = build_fake_pg_router();
-    let (status, v) = post_json(
+    // #901: matching X-Agent-Id required for the body agent_id.
+    let (status, v) = post_json_as(
         &router,
         "/api/v1/notify",
         json!({
@@ -787,6 +880,7 @@ async fn pg_notify_happy_path() {
             "agent_id": "pg-sender",
             "priority": 5,
         }),
+        "pg-sender",
     )
     .await;
     assert!(
@@ -800,7 +894,8 @@ async fn pg_notify_missing_payload_400() {
     let (router, _f) = build_fake_pg_router();
     // target_agent_id + title present; payload + content both missing →
     // handler returns 400 explicitly (not axum's 422 deserialization fail).
-    let (status, _v) = post_json(
+    // #901: matching X-Agent-Id required for the body agent_id.
+    let (status, _v) = post_json_as(
         &router,
         "/api/v1/notify",
         json!({
@@ -808,6 +903,7 @@ async fn pg_notify_missing_payload_400() {
             "title": "no-body",
             "agent_id": "pg-sender",
         }),
+        "pg-sender",
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -822,8 +918,9 @@ async fn pg_subscribe_namespace_form_synthesizes_url_pg() {
     // The namespace-form subscribe synthesizes a loopback URL internally
     // and bypasses SSRF — exercises the pg subscribe branch without
     // needing a routable URL.
+    // #901: matching X-Agent-Id required for the body agent_id.
     let (router, _f) = build_fake_pg_router();
-    let (status, v) = post_json(
+    let (status, v) = post_json_as(
         &router,
         "/api/v1/subscriptions",
         json!({
@@ -832,6 +929,7 @@ async fn pg_subscribe_namespace_form_synthesizes_url_pg() {
             "events": "memory.created",
             "secret": "test-secret",
         }),
+        "pg-sub-agent",
     )
     .await;
     assert!(
@@ -843,10 +941,12 @@ async fn pg_subscribe_namespace_form_synthesizes_url_pg() {
 #[tokio::test]
 async fn pg_subscribe_missing_url_and_namespace_400() {
     let (router, _f) = build_fake_pg_router();
-    let (status, _v) = post_json(
+    // #901: matching X-Agent-Id required for the body agent_id.
+    let (status, _v) = post_json_as(
         &router,
         "/api/v1/subscriptions",
         json!({"agent_id": "pg-sub-agent"}),
+        "pg-sub-agent",
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -862,16 +962,25 @@ async fn pg_unsubscribe_by_id_when_missing_returns_ok_envelope() {
 #[tokio::test]
 async fn pg_unsubscribe_no_id_no_ns_400() {
     let (router, _f) = build_fake_pg_router();
-    let (status, _v) = delete_uri(&router, "/api/v1/subscriptions?agent_id=pg-agent").await;
+    // Per #874: must send X-Agent-Id matching the query agent_id, else
+    // the handler returns 403 before reaching the missing-(id,ns) gate.
+    let (status, _v) = delete_uri_as(
+        &router,
+        "/api/v1/subscriptions?agent_id=pg-agent",
+        Some("pg-agent"),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn pg_unsubscribe_by_namespace_missing_returns_removed_false() {
     let (router, _f) = build_fake_pg_router();
-    let (status, _v) = delete_uri(
+    // Per #874: matching X-Agent-Id required to clear the auth gate.
+    let (status, _v) = delete_uri_as(
         &router,
         "/api/v1/subscriptions?agent_id=pg-agent&namespace=nonexistent",
+        Some("pg-agent"),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -1172,8 +1281,14 @@ async fn pg_bulk_create_over_limit_400() {
 #[tokio::test]
 async fn pg_quota_status_no_writes_returns_zero() {
     let (router, _f) = build_fake_pg_router();
-    let (status, _v) =
-        post_json(&router, "/api/v1/quota/status", json!({"agent_id": "pg-q"})).await;
+    // #909: body.agent_id must match X-Agent-Id of authenticated caller.
+    let (status, _v) = post_json_as(
+        &router,
+        "/api/v1/quota/status",
+        json!({"agent_id": "pg-q"}),
+        "pg-q",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -1771,4 +1886,110 @@ async fn pg_recall_get_invalid_as_agent_400() {
     // `validate::validate_namespace(as_agent)` rejection.
     let (status, _v) = get_uri(&router, "/api/v1/recall?q=foo&as_agent=..").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// #905 / #907 / #909 / #910 — agent_id-spoof regression suite
+// ---------------------------------------------------------------------------
+// Sibling pin for the v0.7.0 final-review pass that found four more
+// callsites of the #874-class vulnerability after #901 had closed the
+// notify + subscribe + get_inbox surface. Every fix landed at the
+// handler boundary; the underlying `resolve_http_agent_id` primitive's
+// body-preferred precedence is unchanged (see `src/identity/mod.rs`
+// SECURITY note). Each test below asserts the FORBIDDEN branch fires
+// when `body.agent_id` (or `metadata.agent_id`) disagrees with the
+// authenticated `X-Agent-Id` caller.
+
+#[tokio::test]
+async fn pg_consolidate_rejects_spoofed_agent_id_905() {
+    // #905: power_consolidation.rs. `body.agent_id="alice"` while
+    // authenticated as `bob` → 403, even when the rest of the body is
+    // shaped right enough that the pre-#905 code path would have
+    // stamped the new row's `consolidator_agent_id="alice"`.
+    // Use 2+ ids so the validate_consolidate gate (min-2 requirement)
+    // does not fire before the agent_id match check.
+    let (router, _f) = build_fake_pg_router();
+    let (status, v) = post_json_as(
+        &router,
+        "/api/v1/consolidate",
+        json!({
+            "ids": [
+                "00000000-0000-0000-0000-000000000001",
+                "00000000-0000-0000-0000-000000000002",
+            ],
+            "title": "spoof-test",
+            "summary": "anything-above-the-S51-len-floor-twenty-chars",
+            "namespace": "pgfake-cons",
+            "agent_id": "alice",
+        }),
+        "bob",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "got {status} body={v}");
+}
+
+#[tokio::test]
+async fn pg_create_memory_rejects_spoofed_body_agent_id_907() {
+    // #907: create_memory body.agent_id spoof.
+    let (router, _f) = build_fake_pg_router();
+    let (status, v) = post_json_as(
+        &router,
+        "/api/v1/memories",
+        json!({
+            "tier": "long",
+            "namespace": "pgfake-spoof",
+            "title": "spoof-907",
+            "content": "stored body-agent-id spoof attempt",
+            "agent_id": "alice",
+            "tags": [],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "user",
+            "metadata": {},
+        }),
+        "bob",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "got {status} body={v}");
+}
+
+#[tokio::test]
+async fn pg_create_memory_rejects_spoofed_metadata_agent_id_907() {
+    // #907: create_memory metadata.agent_id spoof — same vector via the
+    // embedded shape that L11 (NHI-D-fed-agentid-mutation) made load-bearing.
+    let (router, _f) = build_fake_pg_router();
+    let (status, v) = post_json_as(
+        &router,
+        "/api/v1/memories",
+        json!({
+            "tier": "long",
+            "namespace": "pgfake-spoof",
+            "title": "spoof-907-md",
+            "content": "stored metadata.agent_id spoof attempt",
+            "tags": [],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "user",
+            "metadata": {"agent_id": "alice"},
+        }),
+        "bob",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "got {status} body={v}");
+}
+
+#[tokio::test]
+async fn pg_quota_status_rejects_cross_tenant_agent_id_909() {
+    // #909: quota_status accepted body.agent_id with no authn binding —
+    // any caller could read alice's quota row. Now requires
+    // body.agent_id == header X-Agent-Id else 403.
+    let (router, _f) = build_fake_pg_router();
+    let (status, v) = post_json_as(
+        &router,
+        "/api/v1/quota/status",
+        json!({"agent_id": "alice"}),
+        "bob",
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "got {status} body={v}");
 }

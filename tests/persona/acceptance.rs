@@ -23,7 +23,8 @@ use ai_memory::config::FeatureTier;
 use ai_memory::hooks::post_reflect::auto_persona::{AutoPersonaConfig, run_auto_persona};
 use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{
-    ApproverType, GovernanceLevel, GovernancePolicy, Memory, MemoryKind, Tier,
+    ApproverType, CorePolicy, GovernanceLevel, GovernancePolicy, Memory, MemoryKind, PersonaPolicy,
+    Tier,
 };
 use ai_memory::persona::{PersonaConfig, PersonaGenerator, get_latest_persona};
 use ai_memory::signed_events::list_signed_events;
@@ -103,6 +104,7 @@ fn seed_reflection_for_entity(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(conn, &mem).unwrap()
 }
@@ -114,26 +116,19 @@ fn install_namespace_policy(
     file_export: bool,
 ) {
     let policy = GovernancePolicy {
-        write: GovernanceLevel::Any,
-        promote: GovernanceLevel::Any,
-        delete: GovernanceLevel::Owner,
-        approver: ApproverType::Human,
-        inherit: true,
-        max_reflection_depth: None,
-        auto_export_reflections_to_filesystem: None,
-        auto_atomise: None,
-        auto_atomise_threshold_cl100k: None,
-        auto_atomise_max_atom_tokens: None,
-        auto_atomise_max_retries: None,
-        auto_persona_trigger_every_n_memories: cadence,
-        auto_export_personas_to_filesystem: if file_export { Some(true) } else { None },
-        auto_atomise_mode: None,
-        legacy_per_pair_classifier: None,
-        auto_classify_kind: None,
-        synthesis_failure_mode: None,
-        synthesis_max_deletes_per_call: None,
-        synthesis_max_candidate_chars: None,
-        multistep_max_content_chars: None,
+        core: CorePolicy {
+            write: GovernanceLevel::Any,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Human,
+            inherit: true,
+            max_reflection_depth: None,
+        },
+        persona: PersonaPolicy {
+            auto_persona_trigger_every_n_memories: cadence,
+            auto_export_personas_to_filesystem: if file_export { Some(true) } else { None },
+        },
+        ..Default::default()
     };
     let now = Utc::now().to_rfc3339();
     let metadata = serde_json::json!({
@@ -256,7 +251,7 @@ fn test_persona_namespace_inheritance() {
     let id = seed_reflection_for_entity(&conn, "team/alpha", "alice", "obs");
     let cfg = AutoPersonaConfig::default();
     let llm = StubLlm;
-    run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm).unwrap();
+    run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm, None).unwrap();
 
     let cnt: i64 = conn
         .query_row(
@@ -280,7 +275,7 @@ fn test_persona_auto_trigger_cadence() {
     // Seed two reflections — neither triggers (count 1 and 2).
     let _r1 = seed_reflection_for_entity(&conn, "team/alpha", "alice", "obs 1");
     let r2 = seed_reflection_for_entity(&conn, "team/alpha", "alice", "obs 2");
-    run_auto_persona(&db_path, &r2, "team/alpha", &cfg, &llm).unwrap();
+    run_auto_persona(&db_path, &r2, "team/alpha", &cfg, &llm, None).unwrap();
     let cnt: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM memories WHERE memory_kind = 'persona'",
@@ -292,7 +287,7 @@ fn test_persona_auto_trigger_cadence() {
 
     // Third reflection triggers (3 % 3 == 0).
     let r3 = seed_reflection_for_entity(&conn, "team/alpha", "alice", "obs 3");
-    run_auto_persona(&db_path, &r3, "team/alpha", &cfg, &llm).unwrap();
+    run_auto_persona(&db_path, &r3, "team/alpha", &cfg, &llm, None).unwrap();
     let cnt2: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM memories WHERE memory_kind = 'persona'",
@@ -376,7 +371,7 @@ fn test_persona_file_backed_export() {
         out_dir: out.clone(),
     };
     let llm = StubLlm;
-    run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm).unwrap();
+    run_auto_persona(&db_path, &id, "team/alpha", &cfg, &llm, None).unwrap();
     let f = out.join("team_alpha").join("alice.md");
     assert!(f.exists(), "expected persona file at {}", f.display());
     let body = std::fs::read_to_string(&f).unwrap();

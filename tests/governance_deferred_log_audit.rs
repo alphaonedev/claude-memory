@@ -40,6 +40,18 @@ use ai_memory::governance::deferred_audit::{
     install_deferred_audit_drainer, spawn_drainer_task, spawn_supervised_drainer,
 };
 use ai_memory::governance::rules_store::{self, Rule};
+use ed25519_dalek::{Signer, SigningKey};
+
+mod common;
+use common::*;
+
+// Same pattern as `tests/governance_a2a_rules.rs` /
+// `tests/governance_agent_action.rs`: production `enforced_rule_passes`
+// drops any rule whose `attest_level != "operator_signed"` when an
+// operator pubkey resolves (env OR on-disk `operator.key.pub`). Each
+// test calls `install_test_operator_key()` (in `common`) which installs
+// the keypair in the env, holds the shared `ENV_LOCK` for its lifetime,
+// and restores prior env state on drop.
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -53,26 +65,33 @@ fn fresh_tempdir() -> tempfile::TempDir {
 /// Seed a `memory_write` refuse rule into the `governance_rules` table
 /// at `db_path`. The hook consults this rule via
 /// `check_agent_action_deferred` on every storage insert.
-fn seed_refuse_rule(db_path: &std::path::Path, rule_id: &str, reason: &str) {
+///
+/// Signs the rule with the test `signing` key so L1-6's
+/// `enforced_rule_passes` (which requires `attest_level =
+/// "operator_signed"` when an operator pubkey resolves) accepts it.
+/// The caller pairs this with `install_test_operator_key()` to set
+/// `AI_MEMORY_OPERATOR_PUBKEY` to the matching verifying key for the
+/// lifetime of the test.
+fn seed_refuse_rule(db_path: &std::path::Path, signing: &SigningKey, rule_id: &str, reason: &str) {
     let conn = db::open(db_path).expect("open seed db");
     let now = chrono::Utc::now().timestamp();
-    rules_store::insert(
-        &conn,
-        &Rule {
-            id: rule_id.to_string(),
-            kind: "custom".to_string(),
-            matcher: r#"{"kind":"memory_write"}"#.to_string(),
-            severity: "refuse".to_string(),
-            reason: reason.to_string(),
-            namespace: "_global".to_string(),
-            created_by: "test".to_string(),
-            created_at: now,
-            enabled: true,
-            signature: None,
-            attest_level: "unsigned".to_string(),
-        },
-    )
-    .expect("seed rule");
+    let mut rule = Rule {
+        id: rule_id.to_string(),
+        kind: "custom".to_string(),
+        matcher: r#"{"kind":"memory_write"}"#.to_string(),
+        severity: "refuse".to_string(),
+        reason: reason.to_string(),
+        namespace: "_global".to_string(),
+        created_by: "test".to_string(),
+        created_at: now,
+        enabled: true,
+        signature: None,
+        attest_level: "operator_signed".to_string(),
+    };
+    let canonical =
+        rules_store::canonical_bytes_for_signing(&rule).expect("canonical_bytes_for_signing");
+    rule.signature = Some(signing.sign(&canonical).to_bytes().to_vec());
+    rules_store::insert(&conn, &rule).expect("seed rule");
 }
 
 fn refusal_action() -> AgentAction {
@@ -95,13 +114,14 @@ fn refusal_decision(rule_id: &str, reason: &str) -> Decision {
 
 #[tokio::test]
 async fn refused_storage_insert_lands_in_signed_events_chain() {
+    let (signing, _env_guard) = install_test_operator_key();
     let dir = fresh_tempdir();
     let db_path = dir.path().join("refusal-chain.db");
     // Initialize the schema (signed_events + governance_rules).
     {
         let _ = db::open(&db_path).expect("init schema");
     }
-    seed_refuse_rule(&db_path, "R-chain-1", "no writes to test ns");
+    seed_refuse_rule(&db_path, &signing, "R-chain-1", "no writes to test ns");
 
     // Spawn the drainer + queue. In the daemon path this happens
     // inside bootstrap_serve before the storage hook installs; we
@@ -139,12 +159,18 @@ async fn refused_storage_insert_lands_in_signed_events_chain() {
 
 #[tokio::test]
 async fn drainer_does_not_block_inserts() {
+    let (signing, _env_guard) = install_test_operator_key();
     let dir = fresh_tempdir();
     let db_path = dir.path().join("no-block.db");
     {
         let _ = db::open(&db_path).expect("init schema");
     }
-    seed_refuse_rule(&db_path, "R-no-block", "refuse for the no-block test");
+    seed_refuse_rule(
+        &db_path,
+        &signing,
+        "R-no-block",
+        "refuse for the no-block test",
+    );
 
     let (queue, supervisor) = install_deferred_audit_drainer(&db_path);
 
@@ -250,12 +276,13 @@ async fn drainer_restarts_after_panic() {
 
 #[tokio::test]
 async fn shutdown_drains_pending_events() {
+    let (signing, _env_guard) = install_test_operator_key();
     let dir = fresh_tempdir();
     let db_path = dir.path().join("shutdown-drain.db");
     {
         let _ = db::open(&db_path).expect("init schema");
     }
-    seed_refuse_rule(&db_path, "R-drain", "drain test rule");
+    seed_refuse_rule(&db_path, &signing, "R-drain", "drain test rule");
 
     let (queue, supervisor) = install_deferred_audit_drainer(&db_path);
 
@@ -292,12 +319,13 @@ async fn shutdown_drains_pending_events() {
 
 #[tokio::test]
 async fn chain_log_includes_rule_id_and_severity() {
+    let (signing, _env_guard) = install_test_operator_key();
     let dir = fresh_tempdir();
     let db_path = dir.path().join("payload-shape.db");
     {
         let _ = db::open(&db_path).expect("init schema");
     }
-    seed_refuse_rule(&db_path, "R-payload", "payload test reason");
+    seed_refuse_rule(&db_path, &signing, "R-payload", "payload test reason");
 
     let (queue, supervisor) = install_deferred_audit_drainer(&db_path);
     let conn = db::open(&db_path).expect("open consult conn");
@@ -349,12 +377,13 @@ async fn chain_log_includes_rule_id_and_severity() {
 
 #[tokio::test]
 async fn concurrent_callers_no_event_loss() {
+    let (signing, _env_guard) = install_test_operator_key();
     let dir = fresh_tempdir();
     let db_path = dir.path().join("concurrent.db");
     {
         let _ = db::open(&db_path).expect("init schema");
     }
-    seed_refuse_rule(&db_path, "R-conc", "concurrency test rule");
+    seed_refuse_rule(&db_path, &signing, "R-conc", "concurrency test rule");
 
     let (queue, supervisor) = install_deferred_audit_drainer(&db_path);
 

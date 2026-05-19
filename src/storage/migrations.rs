@@ -7,7 +7,9 @@
 //! constant, and the `migrate` function out of `src/db.rs` into
 //! this sub-module. Pure refactor — semantics unchanged. The
 //! `MAX_SUPPORTED_SCHEMA` constant in `cli::boot` must still bump
-//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 42).
+//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 47).
+//! Versions 45/46 are reserved for sibling provenance-write landings
+//! (Gaps 1+2, #884/#885); this crate jumps 44 → 47 for Gap 3 (#886).
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
@@ -98,7 +100,27 @@ CREATE TABLE IF NOT EXISTS memories (
     -- / reflection mentions). Legacy rows default to NULL; the
     -- migration ladder backfills from metadata+title at v42 apply
     -- time.
-    mentioned_entity_id   TEXT
+    mentioned_entity_id   TEXT,
+    -- v0.7.0 (issue #228, schema v44) — E2E memory content encryption
+    -- at rest. When non-NULL, this BLOB carries the
+    -- `src/encryption::Envelope::to_bytes()` payload (X25519 ephemeral
+    -- pubkey + ChaCha20-Poly1305 nonce + AEAD-sealed ciphertext) for
+    -- the memory's plaintext `content`. The `content` column then
+    -- carries a placeholder marker rather than plaintext. NULL on
+    -- every legacy row and on every row written under the default
+    -- (encryption disabled) configuration. Gated on
+    -- `[encryption].at_rest = true` or
+    -- `AI_MEMORY_ENCRYPT_AT_REST=1`.
+    encrypted_envelope    BLOB,
+    -- v0.7.0 Provenance Gap 1 (issue #884, schema v45) — optimistic-
+    -- concurrency counter. Every mutation through `storage::update`
+    -- bumps `version`. MCP `memory_update` accepts
+    -- `expected_version: Option<i64>` and HTTP `PUT /memories/:id`
+    -- honors `If-Match: <version>`; both surfaces return a typed
+    -- CONFLICT envelope when the stored value has drifted from the
+    -- caller's expected. Legacy rows land at `version = 1` via the
+    -- SQL DEFAULT clause; subsequent updates bump monotonically.
+    version               BIGINT NOT NULL DEFAULT 1
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_tier ON memories(tier);
@@ -106,42 +128,29 @@ CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace);
 CREATE INDEX IF NOT EXISTS idx_memories_priority ON memories(priority DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_title_ns ON memories(title, namespace);
--- v36 partial indexes on the atomisation columns. Restricted predicates
--- keep legacy-DB index footprint at zero until WT-1-B starts minting
--- atoms.
-CREATE INDEX IF NOT EXISTS idx_memories_atom_of
-    ON memories(atom_of) WHERE atom_of IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_memories_atomised_into
-    ON memories(atomised_into) WHERE atomised_into > 0;
--- v37 (QW-2) partial index covering per-entity persona lookups lives
--- in `migrations/sqlite/0031_v07_persona.sql` and runs from the
--- migrate step's `if version < 37` arm — NOT in this bootstrap
--- SCHEMA, because `db::open` applies SCHEMA before `migrate`, and
--- the index references `entity_id` (a column only present after the
--- v37 ALTER fires on a legacy DB). Fresh installs land the column
--- via the CREATE TABLE above, then the migrate step's v37 arm
--- creates the index a few statements later.
--- v38 (Form 4) partial index covering the `--source-uri-prefix`
--- recall filter. Mirrors the persona pattern: legacy rows have NULL
--- `source_uri`, the partial predicate keeps the index footprint at
--- zero until callers start writing URIs.
-CREATE INDEX IF NOT EXISTS idx_memories_source_uri
-    ON memories(source_uri) WHERE source_uri IS NOT NULL;
--- v39 (Form 5) partial index covering rows whose `confidence_source`
--- is NOT the (overwhelming-majority) `caller_provided` bucket. The
--- calibration CLI scans this slice to enumerate derived / calibrated /
--- decayed rows; the partial predicate keeps the index footprint on
--- legacy DBs at zero until the auto-confidence engine starts writing.
-CREATE INDEX IF NOT EXISTS idx_memories_confidence_source
-    ON memories(confidence_source) WHERE confidence_source != 'caller_provided';
--- v39 (Form 5) — per-recall shadow-mode telemetry. Populated when
--- AI_MEMORY_CONFIDENCE_SHADOW=1 and sampled at
--- AI_MEMORY_CONFIDENCE_SHADOW_SAMPLE_RATE. The calibration CLI reads
--- this table to compute per-(namespace, source) baselines.
--- v40 (Cluster G) added the denormalised `source` column + compound
--- `(namespace, source, observed_at)` index so the calibration scan
--- streams a single-table SQL aggregation (was: full-window Vec materialise
--- + Rust grouping, PERF-12).
+-- Partial indexes referencing v36+ columns (`atom_of`, `atomised_into`,
+-- `source_uri`, `confidence_source`, `mentioned_entity_id`) and the v41
+-- compound shadow-observations index are NOT in this bootstrap SCHEMA
+-- (issue #797). They live exclusively in their migration .sql files
+-- (`migrations/sqlite/0030_v07_atomisation.sql`,
+-- `0032_v07_form4_provenance.sql`,
+-- `0033_v07_form5_confidence_calibration.sql`,
+-- `0035_v07_shadow_retention.sql`,
+-- `0036_v07_auto_persona_entity_id.sql`) and run from the matching
+-- `if version < N` arms of `migrate()` AFTER the ALTER TABLE that adds
+-- the column.
+--
+-- `db::open` applies SCHEMA before `migrate`, so any `CREATE INDEX` here
+-- that references a v36+ column crashes on a legacy DB whose pre-v36
+-- `memories` row leaves the `CREATE TABLE IF NOT EXISTS` as a no-op
+-- (the new columns never land). The maintainers caught this for the v37
+-- `entity_id` index from the start; v36/v38/v39/v41/v42 were brought
+-- under the same discipline in #797.
+--
+-- Fresh installs are unaffected: the `CREATE TABLE` above lands every
+-- v42-era column, then every `if version < N` arm runs its .sql file
+-- (idempotent `CREATE INDEX IF NOT EXISTS`) to attach the partial
+-- indexes.
 CREATE TABLE IF NOT EXISTS confidence_shadow_observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     memory_id TEXT NOT NULL,
@@ -160,18 +169,9 @@ CREATE INDEX IF NOT EXISTS idx_shadow_obs_observed_at
     ON confidence_shadow_observations(observed_at);
 CREATE INDEX IF NOT EXISTS idx_shadow_obs_memory
     ON confidence_shadow_observations(memory_id);
-CREATE INDEX IF NOT EXISTS idx_shadow_obs_namespace_source_observed
-    ON confidence_shadow_observations(namespace, source, observed_at);
--- v42 (PERF-8 #781) — partial index covering the auto-persona matcher's
--- `WHERE memory_kind = 'reflection' AND mentioned_entity_id = ?
--- AND namespace = ?` lookup. The partial predicate matches the literal
--- `memory_kind = 'reflection'` constraint in the matcher SQL so the
--- SQLite planner reliably picks this index over a sequential scan
--- (the `mentioned_entity_id = ?` equality predicate prunes NULL rows
--- from the result set; the partial predicate just keeps the index
--- narrow). Non-reflection rows contribute zero index pages.
-CREATE INDEX IF NOT EXISTS idx_memories_mentioned_entity
-    ON memories(mentioned_entity_id, namespace) WHERE memory_kind = 'reflection';
+-- `idx_shadow_obs_namespace_source_observed` references the v41
+-- `confidence_shadow_observations.source` column and lives in
+-- `migrations/sqlite/0035_v07_shadow_retention.sql` (see comment above).
 
 CREATE TABLE IF NOT EXISTS memory_links (
     source_id    TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
@@ -457,7 +457,39 @@ CREATE INDEX IF NOT EXISTS idx_signed_events_dlq_agent
 //       column (which is reserved for Persona-row attribution); PERF-8
 //       reads the OPPOSITE direction (the entity an observation /
 //       reflection MENTIONS).
-const CURRENT_SCHEMA_VERSION: i64 = 42;
+// v45 = v0.7.0 Provenance Gap 1 (issue #884) — optimistic-concurrency
+//       `memories.version BIGINT NOT NULL DEFAULT 1` column. ALTER
+//       TABLE emitted from Rust (SQLite has no `ADD COLUMN IF NOT
+//       EXISTS`). Every mutation through `storage::update` bumps
+//       `version`; concurrent updates pass `expected_version` (MCP
+//       `memory_update` param) or `If-Match: <version>` (HTTP) and
+//       receive a typed CONFLICT envelope when stored value has
+//       drifted. Pure additive on legacy rows.
+// v46 = v0.7.0 Provenance Gap 2 (issue #885) — backfill of the
+//       first-class `memories.source_uri` column from
+//       `metadata.source_uri` and `citations[0].uri`. The column
+//       itself + the partial `idx_memories_source_uri` index shipped
+//       at v38 (`0032_v07_form4_provenance.sql`); this arm only
+//       promotes the URI from legacy storage so reciprocal queries
+//       hit the index. Pure additive on rows that already populated
+//       the column.
+// v47 = v0.7.0 Provenance Gap 3 (issue #886) — recall-consumption
+//       observation tier (sibling-agent landing).
+const CURRENT_SCHEMA_VERSION: i64 = 47;
+
+/// v0.7.0 refactor PR-1 (#793) — schema-pins SSOT.
+///
+/// Test-facing helper exposing the SAME constant the migration ladder
+/// is anchored to (`CURRENT_SCHEMA_VERSION`). Integration tests that
+/// previously embedded the literal `43` should call this helper instead,
+/// so the next schema bump touches ONE constant and the test fixtures
+/// pick the new value up automatically. The function deliberately
+/// returns `i64` to match the constant type and the value bound by
+/// the migration query.
+#[must_use]
+pub const fn current_schema_version_for_tests() -> i64 {
+    CURRENT_SCHEMA_VERSION
+}
 
 const MIGRATION_V15_SQLITE: &str =
     include_str!("../../migrations/sqlite/0010_v063_hierarchy_kg.sql");
@@ -724,6 +756,44 @@ const MIGRATION_V41_SQLITE: &str =
 // markers also runs from Rust so the column-existence probe gates it.
 const MIGRATION_V42_SQLITE: &str =
     include_str!("../../migrations/sqlite/0036_v07_auto_persona_entity_id.sql");
+// v0.7.0 issue #810 / #813 — schema v43 sqlite. Atomic
+// `(attest_level, signature)` invariant on `memory_links`: a phantom
+// row that claims `self_signed` or `peer_attested` without a
+// 64-byte signature blob is refused at the substrate layer by a
+// pair of BEFORE INSERT/UPDATE triggers. The migration also
+// backfills any pre-existing phantom row back to `unsigned`. See
+// the migration file's docstring + the upstream issue for the full
+// motivation.
+const MIGRATION_V43_SQLITE: &str =
+    include_str!("../../migrations/sqlite/0037_v07_persona_signing_atomicity.sql");
+// v0.7.0 Provenance Gap 1 (issue #884, schema v45 sqlite) — optimistic-
+// concurrency `version` column on `memories`. The ALTER adding the
+// column is emitted from Rust (SQLite has no `ADD COLUMN IF NOT
+// EXISTS`); this SQL file holds the supporting documentation. The
+// column defaults to `1` for legacy rows; subsequent updates bump
+// monotonically via `storage::update`.
+const MIGRATION_V45_SQLITE: &str =
+    include_str!("../../migrations/sqlite/0039_v07_provenance_version.sql");
+// v0.7.0 Provenance Gap 2 (issue #885, schema v46 sqlite) — first-class
+// `source_uri` column backfill. The column itself + the partial
+// `idx_memories_source_uri` index shipped at v38
+// (`0032_v07_form4_provenance.sql`); this arm runs the backfill that
+// promotes `metadata.source_uri` and `citations[0].uri` into the
+// column for pre-Form-4 rows so the reciprocal "from this document"
+// query (`memory_search --source-uri X`,
+// `memory_kg_query --by-source-uri X`) hits the index.
+const MIGRATION_V46_SQLITE: &str =
+    include_str!("../../migrations/sqlite/0040_v07_source_uri_backfill.sql");
+// v0.7.0 Gap 3 (issue #886) — recall-consumption observation tier.
+// `recall_observations` ledger keyed by (recall_id, memory_id),
+// carrying retriever / rank / score plus the consumed_at +
+// consumed_by_memory_id columns set when a memory_store or
+// memory_link request cites a prior recall_id. CASCADE-deletes
+// alongside the referenced memory rows. The migration file is a
+// single idempotent `CREATE TABLE IF NOT EXISTS` + three index
+// `CREATE INDEX IF NOT EXISTS` statements — fully replay-safe.
+const MIGRATION_V47_SQLITE: &str =
+    include_str!("../../migrations/sqlite/0038_v07_recall_observations.sql");
 
 // COVERAGE: per-version ALTER/CREATE branches inside this function
 // are guarded by `has_X` column-existence probes and `IF NOT EXISTS`
@@ -1763,6 +1833,101 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             conn.execute_batch(MIGRATION_V42_SQLITE)?;
         }
 
+        if version < 43 {
+            // v0.7.0 issue #810 / #813 — atomic `(attest_level,
+            // signature)` invariant on `memory_links`. The migration
+            // file is a single idempotent batch: a backfill UPDATE
+            // flipping any legacy phantom row to `unsigned`, then a
+            // BEFORE INSERT/UPDATE trigger pair refusing future
+            // writes that assert `self_signed` / `peer_attested`
+            // without a 64-byte signature blob. SQLite has no
+            // ADD COLUMN-style trigger-existence probe, so the SQL
+            // uses `DROP TRIGGER IF EXISTS` followed by `CREATE
+            // TRIGGER` — fully replay-safe.
+            conn.execute_batch(MIGRATION_V43_SQLITE)?;
+        }
+
+        if version < 44 {
+            // v0.7.0 (issue #228) — E2E memory content encryption
+            // at rest. Adds the `encrypted_envelope BLOB NULL`
+            // column on `memories`. When set, the column carries the
+            // `src/encryption::Envelope::to_bytes()` payload (X25519
+            // ephemeral pubkey + ChaCha20-Poly1305 nonce +
+            // AEAD-sealed ciphertext); `content` then stores a
+            // placeholder marker rather than plaintext. Pure
+            // additive — non-encrypted memories leave the column at
+            // NULL and read back exactly as before.
+            //
+            // ALTER TABLE done inline (SQLite has no
+            // `ADD COLUMN IF NOT EXISTS`). The column-existence
+            // probe gates the ALTER so replay on a database that
+            // already ran this migration is a no-op.
+            let mut has_envelope = false;
+            let mut stmt = conn.prepare("PRAGMA table_info(memories)")?;
+            let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            for col in cols {
+                if col?.as_str() == "encrypted_envelope" {
+                    has_envelope = true;
+                }
+            }
+            drop(stmt);
+            if !has_envelope {
+                conn.execute(
+                    "ALTER TABLE memories ADD COLUMN encrypted_envelope BLOB",
+                    [],
+                )?;
+            }
+        }
+
+        if version < 45 {
+            // v0.7.0 Provenance Gap 1 (issue #884) — optimistic-
+            // concurrency `version` column on `memories`. ADD COLUMN
+            // is emitted from Rust (SQLite has no `ADD COLUMN IF NOT
+            // EXISTS`); the SQL file holds the supporting docstring.
+            // Legacy rows default to `version = 1` via the SQL
+            // DEFAULT clause; subsequent updates bump via
+            // `storage::update`.
+            let mut has_version_col = false;
+            let mut stmt = conn.prepare("PRAGMA table_info(memories)")?;
+            let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            for col in cols {
+                if col?.as_str() == "version" {
+                    has_version_col = true;
+                }
+            }
+            drop(stmt);
+            if !has_version_col {
+                conn.execute(
+                    "ALTER TABLE memories ADD COLUMN version BIGINT NOT NULL DEFAULT 1",
+                    [],
+                )?;
+            }
+            conn.execute_batch(MIGRATION_V45_SQLITE)?;
+        }
+
+        if version < 46 {
+            // v0.7.0 Provenance Gap 2 (issue #885) — backfill the
+            // first-class `source_uri` column from
+            // `metadata.source_uri` and `citations[0].uri`. The
+            // column itself + partial index shipped at v38
+            // (`0032_v07_form4_provenance.sql`); this arm only runs
+            // the backfill so the reciprocal "from this document"
+            // query path (`memory_search --source-uri X`,
+            // `memory_kg_query --by-source-uri X`) hits the
+            // partial index instead of the legacy O(N) JSON-path
+            // scan over `metadata`.
+            conn.execute_batch(MIGRATION_V46_SQLITE)?;
+        }
+
+        if version < 47 {
+            // v0.7.0 Gap 3 (issue #886) — recall-consumption
+            // observation tier. The migration file is a single
+            // idempotent `CREATE TABLE IF NOT EXISTS` plus three
+            // `CREATE INDEX IF NOT EXISTS` statements — fully
+            // replay-safe.
+            conn.execute_batch(MIGRATION_V47_SQLITE)?;
+        }
+
         conn.execute("DELETE FROM schema_version", [])?;
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?1)",
@@ -1963,13 +2128,43 @@ mod tests {
 
     #[test]
     fn current_schema_version_matches_module_docstring() {
+        // v0.7.0 refactor PR-1 (#793) — schema-pins SSOT.
+        //
         // The module docstring is updated in lockstep with the
         // CURRENT_SCHEMA_VERSION constant. Bumping one without the
-        // other is a documented foot-gun. We pin the relationship
-        // so a future bump is loud.
+        // other is a documented foot-gun. Parse the docstring directly
+        // for the `current value: N` marker so the literal lives in
+        // exactly ONE place (the constant declaration above) and the
+        // assertion is anchored to the rendered docstring.
+        let source = include_str!("migrations.rs");
+        let marker = "current value: ";
+        let pos = source
+            .find(marker)
+            .expect("module docstring must contain `current value: N` marker");
+        let tail = &source[pos + marker.len()..];
+        let end = tail
+            .find(')')
+            .expect("docstring marker must close with `)`");
+        let parsed: i64 = tail[..end]
+            .trim()
+            .parse()
+            .expect("docstring `current value:` must be a parseable integer");
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 42,
-            "module docstring advertises 42; bump the docstring when this number changes"
+            parsed, CURRENT_SCHEMA_VERSION,
+            "module docstring advertises {parsed}; bump the docstring when \
+             CURRENT_SCHEMA_VERSION changes (current = {})",
+            CURRENT_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn current_schema_version_for_tests_matches_constant() {
+        // v0.7.0 refactor PR-1 (#793) — pin the public test-helper to
+        // the module-private constant. Any future drift between the
+        // helper and the constant is caught at build time.
+        assert_eq!(
+            super::current_schema_version_for_tests(),
+            CURRENT_SCHEMA_VERSION
         );
     }
 

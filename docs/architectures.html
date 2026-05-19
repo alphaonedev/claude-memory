@@ -9,7 +9,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ai-memory · Architectures — five tiers from laptop to global hive</title>
-<meta name="description" content="Five reference architectures for ai-memory — from a single agent on a laptop to a globally federated hive of millions. With honest 'today vs roadmap' markers per v0.6.3.">
+<meta name="description" content="Five reference architectures for ai-memory — from a single agent on a laptop to a globally federated hive of millions. With honest 'today vs roadmap' markers per v0.7.0.">
 <meta property="og:title" content="ai-memory · Architectures">
 <meta property="og:description" content="Five reference architectures for ai-memory — from one agent to a global hive.">
 <link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/architectures.html">
@@ -95,7 +95,7 @@ section p{margin-bottom:.85rem}
     <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Architectures</span></a>
     <div class="right">
       <a href="at-a-glance.html" style="color:#6ee7ff">Atlas</a>
-      <a href="whats-new-v063.html" style="color:#ffb86b">v0.6.3</a>
+      <a href="v0.7.0/release-notes.md" style="color:#ffb86b">v0.7.0</a>
       <div class="menu">
         <button class="menu-btn">Audiences<span class="caret">▾</span></button>
         <div class="menu-pane">
@@ -150,7 +150,7 @@ section p{margin-bottom:.85rem}
         <div class="menu-pane">
           <a href="evidence.html">Frozen Claims</a>
           <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
-          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence (historical)</a>
           <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
           <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A Gate</a>
           <a href="performance.html">Performance budgets</a>
@@ -164,7 +164,7 @@ section p{margin-bottom:.85rem}
 
 <section class="hero">
   <h1>ai-memory architectures</h1>
-  <p class="tagline">A primitive that scales from <strong>one agent</strong> on a laptop to a <strong>global hive</strong> of millions. Every tier ships either today, or sits behind a documented gap with a known roadmap. Nothing on this page is marketing fiction — every "today" claim cites code in the v0.6.3 source tree.</p>
+  <p class="tagline">A primitive that scales from <strong>one agent</strong> on a laptop to a <strong>global hive</strong> of millions. Every tier ships either today, or sits behind a documented gap with a known roadmap. Nothing on this page is marketing fiction — every "today" claim cites code in the v0.7.0 source tree.</p>
   <div class="pills">
     <span class="pill">5 tiers</span>
     <span class="pill">T1–T3 ship today</span>
@@ -389,7 +389,7 @@ section p{margin-bottom:.85rem}
     </ul>
     <p>What stays the same:</p>
     <ul>
-      <li>The 43 MCP tools and 50 HTTP endpoints.</li>
+      <li>The MCP tools (71 advertised at <code>--profile full</code>, 7 at <code>--profile core</code>) and 72 HTTP routes at <code>/api/v1/</code>.</li>
       <li>The recall pipeline (FTS5 + HNSW + adaptive blending).</li>
       <li>The tier model (<code>short</code> / <code>mid</code> / <code>long</code>).</li>
       <li>The namespace hierarchy and scope visibility filter.</li>
@@ -403,7 +403,7 @@ section p{margin-bottom:.85rem}
   <div class="container">
     <span class="eyebrow">Federation primitives</span>
     <h2>What lives in the codebase today.</h2>
-    <p class="lede">These are the building blocks every multi-node tier composes. All shipped, all in v0.6.3:</p>
+    <p class="lede">These are the building blocks every multi-node tier composes. All shipped, all in v0.7.0:</p>
     <ul>
       <li><code>src/main.rs:405-447</code> — quorum-write CLI surface: <code>--quorum-writes N</code>, <code>--quorum-peers &lt;comma-list&gt;</code>, <code>--quorum-timeout-ms</code>, <code>--quorum-client-cert/-key/-ca-cert</code>, <code>--catchup-interval-secs</code>.</li>
       <li><code>src/main.rs:380-393</code> — TLS / mTLS allowlist: <code>--tls-cert</code>, <code>--tls-key</code>, <code>--mtls-allowlist &lt;SHA-256 fingerprint file&gt;</code>. Allowlist presence enforces mTLS.</li>
@@ -433,13 +433,13 @@ section p{margin-bottom:.85rem}
     <p>Start at <a href="architectures-t1.html" style="color:var(--p1)">Tier 1</a> and walk forward, or jump straight to the tier that matches your fleet.</p>
 
     <div class="honesty-notice">
-      <strong>Engineering honesty.</strong> Every "ships today" claim cites a file path and behavior in the v0.6.3 source tree. Roadmap items reference ADRs and tracked work. The vision tier (T5) is the north star — we'll get there, but it's not shipping in v0.7. If a diagram shows something the code doesn't do, that's a documentation bug — please file an issue.
+      <strong>Engineering honesty.</strong> Every "ships today" claim cites a file path and behavior in the v0.7.0 source tree. Roadmap items reference ADRs and tracked work. The vision tier (T5) is the north star — we'll get there, but it's not shipping in v0.7.0. If a diagram shows something the code doesn't do, that's a documentation bug — please file an issue.
     </div>
   </div>
 </section>
 
 <footer>
-  <p>© 2026 AlphaOne LLC. Licensed Apache-2.0. ai-memory v0.6.3.1 — <a href="https://github.com/alphaonedev/ai-memory-mcp">source on GitHub</a> · <a href="./">home</a></p>
+  <p>© 2026 AlphaOne LLC. Licensed Apache-2.0. ai-memory v0.7.0 — <a href="https://github.com/alphaonedev/ai-memory-mcp">source on GitHub</a> · <a href="./">home</a></p>
 </footer>
 
 </body>

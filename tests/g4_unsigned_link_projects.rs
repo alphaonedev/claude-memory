@@ -62,15 +62,16 @@ use serde_json::{Value, json};
 use sqlx::Row;
 use tokio::sync::{Mutex, Notify, RwLock};
 
+mod common;
+use common::free_port;
+
+/// AGE-or-Postgres URL fallback — sibling of g2/g4/g5; differs from
+/// `common::age_url` because this test exercises unsigned link
+/// projection against whatever Postgres is available.
 fn age_url() -> Option<String> {
     std::env::var("AI_MEMORY_TEST_AGE_URL")
         .ok()
         .or_else(|| std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok())
-}
-
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    listener.local_addr().expect("local_addr").port()
 }
 
 /// Mirror the agtype decoder from the original G4 reproducer so we
@@ -177,6 +178,7 @@ fn fresh_memory(namespace: &str, title: &str) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 
@@ -226,6 +228,7 @@ async fn g4_unsigned_link_trait_projects_into_age() {
         valid_until: None,
         observed_by: None,
         signature: None,
+        attest_level: None,
     };
     // **Unsigned** trait method — exercise the path the user's
     // hypothesis flagged ("the HTTP path may call link() rather than
@@ -310,6 +313,9 @@ async fn g4_unsigned_http_link_projects_into_age() {
         replay_cache: std::sync::Arc::new(ai_memory::identity::replay::ReplayCache::default()),
 
         verify_require_nonce: false,
+        federation_nonce_cache: std::sync::Arc::new(
+            ai_memory::identity::replay::FederationNonceCache::default(),
+        ),
         autonomous_hooks: false,
         recall_scope: Arc::new(None),
         deferred_audit_queue: Arc::new(None),

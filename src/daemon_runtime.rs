@@ -178,7 +178,11 @@ pub enum Command {
         /// `core,graph,archive`). Default `core` (5 tools). Resolution
         /// order: this CLI flag > `AI_MEMORY_PROFILE` env > `[mcp].profile`
         /// in config.toml > `core`. Set `--profile full` to expose
-        /// every family (71 tools at v0.7.0 — `Profile::full().expected_tool_count()`).
+        /// every family (73 advertised entries at v0.7.0 — 72 callable
+        /// "memory tools" + the always-on `memory_capabilities` bootstrap;
+        /// `Profile::full().expected_tool_count()` returns 73, while
+        /// `memory_capabilities` summary reports the 72-memory-tool count
+        /// — both numbers are intentional, the +1 is the always-on entry).
         #[arg(long, env = "AI_MEMORY_PROFILE")]
         profile: Option<String>,
     },
@@ -210,6 +214,14 @@ pub enum Command {
     Stats,
     /// List all namespaces
     Namespaces,
+    /// v0.7.0 (issue #800) — operator CRUD for the per-namespace
+    /// standard policy memory pointer (Batman Mode Crack 1). Three
+    /// verbs: `set-standard` / `get-standard` / `clear-standard`, plus
+    /// the `batman-policy` helper that prints the canonical Batman
+    /// `GovernancePolicy` JSON blob. Closes the friction that kept
+    /// Batman Forms 2 + 6 dormant on most installs by replacing the
+    /// MCP-stdio JSON-RPC dance with first-class CLI surface.
+    Namespace(crate::cli::namespace::NamespaceArgs),
     /// Export all memories as JSON
     Export,
     /// Import memories from JSON (stdin)
@@ -418,6 +430,11 @@ pub enum GovernanceAction {
     /// `0024_v07_governance_rules.sql`) to `enabled = 1`. Interactive
     /// confirmation by default; `--yes` overrides for CI/scripts.
     InstallDefaults(crate::cli::governance_install_defaults::InstallDefaultsArgs),
+    /// v0.7.0 issue #863 — shell-side parity for the MCP tool
+    /// `memory_check_agent_action`. Dry-run a substrate agent-action
+    /// rule (R001-R004 plus any operator-added rule) and emit the
+    /// Allow / Refuse / Warn verdict.
+    CheckAction(crate::cli::governance_check_action::CheckActionArgs),
 }
 
 /// Arguments for the `doctor` subcommand. Lives next to `Cli` so clap
@@ -886,6 +903,19 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
             let mut out = cli::CliOutput::from_std(&mut so, &mut se);
             cli::gc::run_namespaces(&db_path, j, &mut out)
         }
+        Command::Namespace(a) => {
+            // v0.7.0 (issue #800) — Batman Mode Crack 1. First-class CLI
+            // wrapper around the MCP `memory_namespace_set_standard` /
+            // `_get_standard` / `_clear_standard` tools so operators
+            // don't need to drop into MCP-stdio JSON-RPC just to bind
+            // a `GovernancePolicy` to a namespace.
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            cli::namespace::run(&db_path, a, j, &mut out)
+        }
         Command::Export => {
             let stdout = std::io::stdout();
             let stderr = std::io::stderr();
@@ -1018,12 +1048,36 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
             cli::backup::run_restore(&db_path, &a, j, &mut out)
         }
         Command::Curator(a) => {
-            let stdout = std::io::stdout();
-            let stderr = std::io::stderr();
-            let mut so = stdout.lock();
-            let mut se = stderr.lock();
-            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
-            cli::curator::run(&db_path, &a, app_config, &mut out).await
+            // Initialize the tracing subscriber so the daemon-start
+            // banner and per-cycle `tracing::info!` lines in
+            // `curator::run_daemon` actually emit. Previously only the
+            // HTTP `serve` path called `init_tracing()`, leaving the
+            // curator path silent regardless of `RUST_LOG`. `try_init`
+            // inside `init_tracing` makes this safe to call even when
+            // another subscriber is already installed.
+            init_tracing();
+            // Daemon mode runs indefinitely on a `spawn_blocking` worker
+            // that itself calls `tracing::info!`. If the dispatch held
+            // the process-wide `Stdout::lock()` while the daemon ran,
+            // the blocking thread's tracing write would deadlock on the
+            // ReentrantMutex (same-thread re-entry is fine; cross-thread
+            // contention isn't). `--daemon` doesn't write to `out`
+            // anyway, so route it to `io::sink()` and only lock the
+            // real stdout/stderr for the modes that actually emit CLI
+            // output (`--once`, `--reflect`, `--rollback`).
+            if a.daemon {
+                let mut so = std::io::sink();
+                let mut se = std::io::sink();
+                let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+                cli::curator::run(&db_path, &a, app_config, &mut out).await
+            } else {
+                let stdout = std::io::stdout();
+                let stderr = std::io::stderr();
+                let mut so = stdout.lock();
+                let mut se = stderr.lock();
+                let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+                cli::curator::run(&db_path, &a, app_config, &mut out).await
+            }
         }
         Command::Bench(a) => cmd_bench(&a),
         #[cfg(feature = "sal")]
@@ -1196,6 +1250,9 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
                 GovernanceAction::InstallDefaults(args) => {
                     cli::governance_install_defaults::run(&db_path, args, &mut out)
                 }
+                GovernanceAction::CheckAction(args) => {
+                    cli::governance_check_action::run(&db_path, &args, &mut out)
+                }
             }
         }
         Command::VerifyReflectionChain(a) => {
@@ -1282,7 +1339,7 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
             // than spinning up a transient OllamaClient here. Operators
             // who want the regenerate path call `memory_persona_generate`
             // through MCP (where the daemon already owns the LLM).
-            match cli::commands::persona::run(&db_path, &a, None, &mut out)? {
+            match cli::commands::persona::run(&db_path, &a, None, None, &mut out)? {
                 0 => Ok(()),
                 code => std::process::exit(code),
             }
@@ -1369,6 +1426,12 @@ pub fn is_write_command(cmd: &Command) -> bool {
             // checkpoint keeps the long-lived sqlite file from growing
             // unbounded under register-heavy workloads.
             | Command::Skill(_)
+            // v0.7.0 Batman Mode (issue #800) — `namespace set-standard`
+            // and `clear-standard` write to `namespace_meta`. The
+            // `get-standard` and `batman-policy` verbs are read-only
+            // but we classify the whole family as write-class so the
+            // post-run WAL checkpoint runs.
+            | Command::Namespace(_)
     )
 }
 
@@ -2006,6 +2069,14 @@ async fn build_store_handle(
     store_url: Option<&str>,
     db_path: &Path,
     postgres_statement_timeout_secs: Option<u64>,
+    // Issue #877: configured embedder dim. `None` keeps the legacy
+    // `DEFAULT_EMBEDDING_DIM` (384, MiniLM) behaviour for callers that
+    // explicitly do not load an embedder (keyword-only deployments).
+    // When `Some(dim)` is passed, the postgres adapter takes the
+    // auto-migrate path so a fresh-container schema bootstrapped at the
+    // default 384 is converted in-place to match the configured
+    // embedder's actual dimension (e.g. 768 for `nomic_embed_v15`).
+    configured_embedding_dim: Option<u32>,
 ) -> Result<(
     crate::handlers::StorageBackend,
     Arc<dyn crate::store::MemoryStore>,
@@ -2020,20 +2091,38 @@ async fn build_store_handle(
                 {
                     let timeout = postgres_statement_timeout_secs
                         .unwrap_or(crate::store::postgres::DEFAULT_STATEMENT_TIMEOUT_SECS);
-                    tracing::info!(
-                        "Wave-3: opening Postgres SAL store at {url} \
-                         (statement_timeout={timeout}s)"
-                    );
-                    let store =
+                    // Issue #877: route through the auto-migrate entry
+                    // point when the daemon resolved a configured
+                    // embedder dim. Bootstrap goes via `connect_with_dim`
+                    // so the *fresh* schema lands `vector(<dim>)` from
+                    // the very first INIT; the auto-migrate then handles
+                    // the pre-existing-schema-at-wrong-dim case.
+                    let store = if let Some(dim) = configured_embedding_dim {
+                        tracing::info!(
+                            "Wave-3 (issue #877): opening Postgres SAL store at {url} \
+                             (statement_timeout={timeout}s, embedding_dim={dim}, auto_migrate=on)"
+                        );
+                        crate::store::postgres::PostgresStore::connect_with_dim_and_timeout_auto_migrate(
+                            url, dim, timeout,
+                        )
+                        .await
+                        .context("connect postgres adapter (auto-migrate dim)")?
+                    } else {
+                        tracing::info!(
+                            "Wave-3: opening Postgres SAL store at {url} \
+                             (statement_timeout={timeout}s, no embedder configured)"
+                        );
                         crate::store::postgres::PostgresStore::connect_with_timeout(url, timeout)
                             .await
-                            .context("connect postgres adapter")?;
+                            .context("connect postgres adapter")?
+                    };
                     Ok((StorageBackend::Postgres, Arc::new(store)))
                 }
                 #[cfg(not(feature = "sal-postgres"))]
                 {
                     let _ = url;
                     let _ = postgres_statement_timeout_secs;
+                    let _ = configured_embedding_dim;
                     anyhow::bail!(
                         "--store-url postgres:// requires the binary to be built with \
                          --features sal-postgres; this binary was built with --features sal only"
@@ -2058,6 +2147,7 @@ async fn build_store_handle(
         }
         None => {
             let _ = postgres_statement_timeout_secs;
+            let _ = configured_embedding_dim;
             tracing::debug!("Wave-3: --store-url absent; opening SQLite SAL store at --db path");
             let store = crate::store::sqlite::SqliteStore::open(db_path)
                 .map_err(|e| anyhow::anyhow!("open sqlite adapter: {e}"))?;
@@ -2098,15 +2188,16 @@ pub async fn bootstrap_serve(
                 "refusing to bind to non-loopback address {host:?} without an API key: \
                  the daemon's api_key is unset (default-off auth would expose every \
                  privileged endpoint to any caller that can reach the bind address). \
-                 Either set [api] api_key in config (or --api-key on the CLI) and rebind, \
+                 Either set top-level `api_key = \"...\"` in config (or --api-key on the CLI) and rebind, \
                  or rebind to 127.0.0.1 / ::1 / localhost for a single-tenant deployment. \
-                 (v0.7.0 fix campaign S5-C1, 2026-05-13)"
+                 (v0.7.0 fix campaign S5-C1, 2026-05-13. Note: api_key is a TOP-LEVEL \
+                 AppConfig field per src/config.rs:2283; [api] subsection is silently ignored by serde.)"
             );
         }
         tracing::warn!(
             "API key NOT configured — daemon bound to loopback {host:?}. \
              Privileged endpoints (POST /memories, /links, /agents, /subscriptions) \
-             accept any local caller. Set [api] api_key for production. \
+             accept any local caller. Set top-level `api_key = \"...\"` for production. \
              /approve and /reject remain HMAC-gated regardless."
         );
     }
@@ -2556,11 +2647,32 @@ pub async fn bootstrap_serve(
     // Standard builds (no `--features sal`) skip the trait wiring
     // entirely — the daemon stays a pure SQLite-on-disk deployment with
     // zero behavioural drift versus pre-Wave-3.
+    // Issue #877: resolve the configured embedder dim from the same
+    // resolution ladder `build_embedder` uses — app_config override wins,
+    // then tier preset, then None. We re-derive it here (instead of
+    // pulling from the materialised `embedder` handle) because the
+    // embedder load itself can fail (network egress to HF Hub, OOM,
+    // etc.) and we still need the *configured* dim to inform the
+    // postgres bootstrap, otherwise a transient embedder load failure
+    // would leave the schema mis-dimensioned silently. Falls back to
+    // `None` only when no embedder model is configured at all
+    // (keyword-only).
+    #[cfg(feature = "sal")]
+    let configured_embedding_dim: Option<u32> = {
+        let preset = tier_config.embedding_model;
+        let resolved = app_config
+            .embedding_model
+            .as_deref()
+            .and_then(|raw| raw.parse::<crate::config::EmbeddingModel>().ok())
+            .or(preset);
+        resolved.map(|m| u32::try_from(m.dim()).unwrap_or(384))
+    };
     #[cfg(feature = "sal")]
     let (storage_backend, store_handle) = build_store_handle(
         args.store_url.as_deref(),
         db_path,
         app_config.postgres_statement_timeout_secs,
+        configured_embedding_dim,
     )
     .await
     .context("build SAL store handle")?;
@@ -2624,6 +2736,7 @@ pub async fn bootstrap_serve(
         // operators opt into strict mode via `config.toml`.
         replay_cache: Arc::new(crate::identity::replay::ReplayCache::new()),
         verify_require_nonce: app_config.verify.as_ref().is_some_and(|v| v.require_nonce),
+        federation_nonce_cache: Arc::new(crate::identity::replay::FederationNonceCache::new()),
         // v0.7.0 (issue #519) — resolved autonomous_hooks flag for the
         // HTTP create_memory path's proactive conflict-detection
         // helper. Falls back to false when unset (preserves v0.6.x
@@ -3323,9 +3436,15 @@ pub async fn run_curator_daemon_with_shutdown(
     });
 
     let llm_arc: Option<Arc<crate::llm::OllamaClient>> = None;
+    // Issue #816 — load the daemon signing keypair so the curator's
+    // auto-persona sweep can produce signed persona rows. `None`
+    // (no key on disk + auto-gen disabled) leaves the sweep no-op,
+    // matching the pre-#816 behaviour.
+    let (kp_opt, _outcome) = ensure_and_load_daemon_keypair();
+    let active_keypair = kp_opt.map(Arc::new);
     let db_owned = db_path;
     tokio::task::spawn_blocking(move || {
-        crate::curator::run_daemon(db_owned, llm_arc, cfg, shutdown_flag);
+        crate::curator::run_daemon(db_owned, llm_arc, cfg, shutdown_flag, active_keypair);
     })
     .await
     .map_err(|e| anyhow::anyhow!("curator daemon join: {e}"))?;
@@ -3365,8 +3484,16 @@ pub async fn run_curator_daemon_with_primitives(
         shutdown_flag_for_signal.store(true, Ordering::Relaxed);
     });
 
+    // Issue #816 — load the daemon signing keypair for the auto-persona
+    // sweep. Mirrors the load in `run_curator_daemon_with_shutdown`;
+    // both daemon entry-points need the same keypair resolution so the
+    // CLI (`ai-memory curator --daemon`) and the test-driven shutdown
+    // flow both honour the same on-disk state.
+    let (kp_opt, _outcome) = ensure_and_load_daemon_keypair();
+    let active_keypair = kp_opt.map(Arc::new);
+
     tokio::task::spawn_blocking(move || {
-        crate::curator::run_daemon(db_path, llm, cfg, shutdown_flag);
+        crate::curator::run_daemon(db_path, llm, cfg, shutdown_flag, active_keypair);
     })
     .await
     .map_err(|e| anyhow::anyhow!("curator daemon join: {e}"))?;
@@ -3481,6 +3608,7 @@ mod tests {
             llm_call_timeout: Duration::from_secs(crate::config::DEFAULT_LLM_CALL_TIMEOUT_SECS),
             replay_cache: Arc::new(crate::identity::replay::ReplayCache::new()),
             verify_require_nonce: false,
+            federation_nonce_cache: Arc::new(crate::identity::replay::FederationNonceCache::new()),
             autonomous_hooks: false,
             recall_scope: Arc::new(None),
             deferred_audit_queue: Arc::new(None),
@@ -3741,6 +3869,25 @@ mod tests {
         // exercised under `feature = "test-with-models"` in the
         // recall integration tests.
         // This test stays as a smoke check — it doesn't attempt to load.
+    }
+
+    /// Issue #840 coverage — exercise the `app_config.embedding_model`
+    /// override branch in `build_embedder` (daemon_runtime.rs L1504-1523).
+    /// The keyword tier has no tier-preset model, so when the override is
+    /// unparseable the resolution ladder falls through to `None` without
+    /// attempting an HF-hub fetch. This pins the parse-failure log path
+    /// and the `None` fallback that the L2 comment documents.
+    #[tokio::test]
+    async fn test_build_embedder_invalid_override_falls_back_to_preset() {
+        let mut cfg = AppConfig::default();
+        cfg.embedding_model = Some("not-a-real-embedding-model-2026".to_string());
+        // Keyword tier preset is None; override parse fails → falls back
+        // to preset None → returns None without touching HF-hub.
+        let emb = build_embedder(FeatureTier::Keyword, &cfg).await;
+        assert!(
+            emb.is_none(),
+            "unparseable override + keyword tier must return None"
+        );
     }
 
     // ----- build_vector_index -------------------------------------------
@@ -4159,6 +4306,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = db::insert(&conn, &mem).unwrap();
         db::set_embedding(&conn, &id, &[1.0, 0.0, 0.0]).unwrap();
@@ -4210,6 +4358,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         db::insert(&conn, &mem).unwrap();
         drop(conn);
@@ -5342,6 +5491,7 @@ decision = "allow"
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let inserted_id = db::insert(&conn, &mem).unwrap();
         // Write a real-length embedding (384 dims of f32).

@@ -64,9 +64,14 @@ fn make_memory(i: usize) -> Memory {
         metadata: serde_json::json!({}),
         // v0.7.0 Task 1/8 — substrate-native reflection depth. Benches
         // mint depth-0 (caller-equivalent) memories so the reranker
-        // sees the same shape it would in production.
+        // sees the same shape it would in production. Other Memory
+        // fields added since (citations, source_uri, source_span,
+        // confidence_*, mentioned_entity_id, entity_id, persona_version,
+        // atomised_into, atom_of) take their Default values — none of
+        // them affect reranker scoring or batched dispatch.
         reflection_depth: 0,
         memory_kind: ai_memory::models::MemoryKind::Observation,
+        ..Memory::default()
     }
 }
 

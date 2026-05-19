@@ -33,7 +33,7 @@ use ai_memory::atomisation::curator::{Atom, Curator, CuratorError};
 use ai_memory::atomisation::{Atomiser, AtomiserConfig};
 use ai_memory::config::FeatureTier;
 use ai_memory::forensic::bundle::{ExportForensicBundleArgs, build, build_files};
-use ai_memory::models::{Memory, MemoryKind, Tier};
+use ai_memory::models::{ConfidenceSource, Memory, MemoryKind, Tier};
 use ai_memory::storage as db;
 use anyhow::{Context, Result, anyhow};
 
@@ -141,9 +141,10 @@ fn seed_parent(conn: &rusqlite::Connection, namespace: &str) -> Result<(String, 
         citations: vec![],
         source_uri: None,
         source_span: None,
-        confidence_source: Default::default(),
+        confidence_source: ConfidenceSource::default(),
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let id = db::insert(conn, &parent).context("insert long parent")?;
     Ok((id, body_len))
@@ -177,6 +178,7 @@ fn observe_recall(
         None,
         None,
         /* include_archived = */ false,
+        /* source_uri_prefix = */ None,
     )
     .context("recall default")?;
     let recall_ids: Vec<&str> = rows.iter().map(|(m, _)| m.id.as_str()).collect();
@@ -200,6 +202,7 @@ fn observe_recall(
         None,
         None,
         /* include_archived = */ true,
+        /* source_uri_prefix = */ None,
     )
     .context("recall include_archived")?;
     let parent_visible_with_flag = rows_all.iter().any(|(m, _)| m.id == parent_id);

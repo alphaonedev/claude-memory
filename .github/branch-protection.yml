@@ -1,0 +1,117 @@
+# .github/branch-protection.yml
+#
+# v0.7.0 issue #807 — Batman Mode CI gate as a HARD PR gate.
+#
+# This file is the SOURCE-OF-TRUTH manifest for the branch-protection
+# rules an operator with admin access must wire into the repository's
+# Settings > Branches page. GitHub does NOT honor a checked-in file
+# automatically — branch protection lives on the API and requires an
+# admin token. The file lives here so:
+#   - the rules are version-controlled alongside the code they protect;
+#   - any drift between "what the workflow ships" and "what the repo
+#     enforces" is auditable via `git log`;
+#   - a fresh fork or a re-cloned repo carries the operator follow-up
+#     steps inline rather than relying on tribal knowledge.
+#
+# Operator follow-up (one-shot per protected branch):
+#
+#   1. Repo Settings > Branches > Add branch protection rule
+#   2. Branch name pattern: copy from "branches[].pattern" below.
+#   3. "Require status checks to pass before merging" → ON.
+#      "Require branches to be up to date before merging" → ON.
+#   4. Required status checks: add EVERY entry from
+#      "branches[].required_checks[]" verbatim. Each name MUST match
+#      the corresponding `jobs.<id>.name` in the workflow file.
+#   5. "Do not allow bypassing the above settings" → ON for
+#      release/v0.7.0 and main (operator may permit force-push on
+#      develop for triage; document the exception inline).
+#   6. Save.
+#
+# Drift detection: a future v0.7.x or v0.8.0 follow-up should wire
+# the GitHub Apps / API call that asserts the live branch-protection
+# state matches this manifest as a nightly job. Tracking under #807
+# follow-up.
+#
+# Why this is "Gap #2 / Batman Mode CRITICAL":
+# PR #775 shipped an L1-6 governance posture that silently passed
+# verification because the canonical-bytes encoding mismatched
+# between the rule signer and the rule verifier. The bypass lived
+# ~24 hours post-tag at v0.7.0. The fix (PR #801) shipped integration
+# tests + an acceptance workflow but those tests don't gate merges
+# unless they are pinned as REQUIRED checks in branch protection.
+# This file is the audit trail for that pinning.
+
+version: 1
+
+branches:
+  - pattern: main
+    description: |
+      Production release tags only. Every merge to main must clear the
+      full Batman Mode gate; aligns with v0.7.0 release gate tier 1
+      (issue #836).
+    required_checks:
+      - "Batman Mode acceptance gate / Rust integration (issue_800_batman_mode)"
+      - "Batman Mode acceptance gate / Bash integration (test-batman-mode-suite.sh)"
+      - "Batman Mode acceptance gate / Surface stability (load-bearing symbols)"
+    require_up_to_date: true
+    enforce_admins: true
+    allow_force_push: false
+
+  - pattern: release/**
+    description: |
+      Release-cut branches (release/v0.7.0, release/v0.7.1, …). The
+      Batman Mode gate is HARD-REQUIRED on every release branch so the
+      canonical-bytes mismatch class (PR #775 → PR #801) cannot
+      re-surface on a release candidate.
+    required_checks:
+      - "Batman Mode acceptance gate / Rust integration (issue_800_batman_mode)"
+      - "Batman Mode acceptance gate / Bash integration (test-batman-mode-suite.sh)"
+      - "Batman Mode acceptance gate / Surface stability (load-bearing symbols)"
+    require_up_to_date: true
+    enforce_admins: true
+    allow_force_push: false
+
+  - pattern: develop
+    description: |
+      Integration branch. Batman Mode gate is required so a Form 7
+      regression cannot enter the develop integration window. The
+      surface-stability job catches symbol drift before the downstream
+      integration tests fail with confusing errors.
+    required_checks:
+      - "Batman Mode acceptance gate / Rust integration (issue_800_batman_mode)"
+      - "Batman Mode acceptance gate / Bash integration (test-batman-mode-suite.sh)"
+      - "Batman Mode acceptance gate / Surface stability (load-bearing symbols)"
+    require_up_to_date: true
+    enforce_admins: false
+    allow_force_push: false
+
+# Auxiliary policy: nightly run-against-develop.
+# The Batman acceptance workflow runs on path-filtered PRs by default;
+# the nightly schedule below catches regressions whose triggering edit
+# fell outside the path filter (refactors elsewhere in src/governance
+# that change the canonical-bytes shape, etc.). The workflow file
+# carries the schedule entry; this manifest records the contract.
+nightly_schedule:
+  workflow: .github/workflows/batman-mode-acceptance.yml
+  cron: "0 8 * * *"  # 08:00 UTC daily
+  branch: develop
+  description: |
+    Nightly Batman Mode acceptance regardless of paths. Catches
+    cross-module refactors that drift the canonical-bytes shape
+    without touching the immediate file allowlist.
+
+# CODEOWNERS reminder — the security owner is the operator. Any
+# change to src/governance/** or src/cli/rules.rs requires explicit
+# CODEOWNERS approval (already enforced via .github/CODEOWNERS at the
+# directory level; #807 acceptance pins the requirement here as a
+# cross-link).
+codeowners_gate:
+  paths:
+    - src/governance/**
+    - src/cli/rules.rs
+  required_reviewers_from_codeowners: 1
+  description: |
+    The L1-6 fail-closed posture is operator-set. Any edit to the
+    rules engine or the rules signer requires a CODEOWNERS sign-off
+    so the bypass class that #807 closes cannot reappear under a
+    routine refactor merge.

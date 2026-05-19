@@ -68,7 +68,10 @@ ai-memory store --title "Q2 roadmap" \
 ### `recall`
 
 Semantic + keyword hybrid recall. **Mutates the database**: increments
-`access_count`, extends TTL, auto-promotes mid→long at 5 accesses.
+`access_count`, REPLACES `expires_at` with `now + per-tier-extend_secs`
+(sliding-window REPLACEMENT, NOT max-of-old-and-new extend — issue
+[#830](https://github.com/alphaonedev/ai-memory-mcp/issues/830)),
+auto-promotes mid→long at 5 accesses.
 
 | Flag | Type | Default | Notes |
 |------|------|---------|-------|
@@ -203,8 +206,12 @@ records the original claim.
 
 ### `mcp`
 
-Run as an MCP tool server over stdio (JSON-RPC 2.0, 43 tools + 2
-prompts).
+Run as an MCP tool server over stdio (JSON-RPC 2.0). At v0.7.0,
+`--profile full` advertises 71 entries (70 callable memory tools + the
+always-on `memory_capabilities` bootstrap; see issue
+[#862](https://github.com/alphaonedev/ai-memory-mcp/issues/862) for the
+disambiguation). Default `--profile core` ships 7 tools + the bootstrap.
+Plus 2 prompts (`recall-first`, `memory-workflow`).
 
 ```bash
 ai-memory mcp --tier semantic

@@ -534,9 +534,9 @@ pass-through.
 
 After Wave-3 Continuation 3, **no standard HTTP endpoint** returns
 501 on a postgres-backed daemon. Every endpoint listed in the v0.7.0
-router (~50 endpoints, surfaced through `/api/v1/capabilities`)
-dispatches through the SAL trait or is handled directly by the
-postgres adapter.
+router (**72 `.route(...)` registrations in `src/lib.rs` at v0.7.0**,
+surfaced through `/api/v1/capabilities`) dispatches through the SAL
+trait or is handled directly by the postgres adapter.
 
 The route gate retains its 501 envelope as a safety net for:
 

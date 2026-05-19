@@ -69,22 +69,14 @@ use ai_memory::store::{
     CallerContext, KgBackend, KgInvalidateRow, KgQueryRow, KgTimelineRow, MemoryStore,
 };
 
-// ---------------------------------------------------------------------------
-// Skip helpers — the suite must stay green on machines without Postgres so
-// the default `cargo test` flow doesn't go red on a config-only gap.
-// ---------------------------------------------------------------------------
+mod common;
+use common::{age_url, postgres_url};
 
-/// Returns the configured vanilla Postgres URL, or `None` if the env
-/// var is unset. Mirrors `tests/sal_contract.rs::postgres_url`.
-fn postgres_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-}
-
-/// Returns the configured AGE-enabled Postgres URL, or `None` if the
-/// env var is unset. Mirrors `src/store/postgres.rs::tests::age_kg_url`.
-fn age_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_AGE_URL").ok()
-}
+// ---------------------------------------------------------------------------
+// Skip helpers — postgres_url + age_url consolidated into
+// `tests/common/mod.rs` by issue #854; the suite stays skip-friendly on
+// machines without a live Postgres so default `cargo test` stays green.
+// ---------------------------------------------------------------------------
 
 /// Probe whether the connected Postgres has Apache AGE installed.
 /// Used to gate the AGE half of each equivalence test even when the
@@ -139,6 +131,7 @@ fn make_memory(id: &str, namespace: &str, title: &str, content: &str) -> Memory 
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 

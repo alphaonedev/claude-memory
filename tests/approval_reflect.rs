@@ -68,6 +68,7 @@ fn make_memory(namespace: &str, title: &str, depth: i32) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 
@@ -127,6 +128,7 @@ fn seed_governance_json(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let std_id = db::insert(conn, &standard).unwrap();
     db::set_namespace_standard(conn, namespace, &std_id, None).unwrap();
@@ -562,9 +564,9 @@ fn pre_existing_governance_json_without_field_parses_cleanly() {
     let p: GovernancePolicy = serde_json::from_value(legacy_json)
         .expect("pre-existing governance JSON must parse cleanly");
     // Existing fields must survive.
-    assert_eq!(p.write, GovernanceLevel::Any);
-    assert_eq!(p.max_reflection_depth, Some(3));
-    assert!(p.inherit);
+    assert_eq!(p.core.write, GovernanceLevel::Any);
+    assert_eq!(p.core.max_reflection_depth, Some(3));
+    assert!(p.core.inherit);
 
     // The new field is NOT a struct field — it lives in the raw JSON.
     // resolve_require_approval_above_depth reads it directly from the blob.

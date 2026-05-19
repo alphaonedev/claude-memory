@@ -31,6 +31,18 @@ if [ ! -f /root/.config/ai-memory/keys/daemon.priv ]; then
   /usr/local/bin/ai-memory identity generate --agent-id daemon --json
 fi
 
+# #845: optional api_key when AI_MEMORY_API_KEY is set. NOTE the
+# substrate error message says "set [api] api_key" but the actual
+# AppConfig schema (src/config.rs:2283) has `api_key` as a TOP-LEVEL
+# Option<String> field — NOT inside an [api] section. Serde silently
+# ignores unknown top-level subsections like [api], so the daemon
+# sees api_key=None and the S5-C1 guard refuses to bind 0.0.0.0.
+# Error-message drift filed as a separate sub-defect.
+API_KEY_TOML=""
+if [ -n "${AI_MEMORY_API_KEY:-}" ]; then
+  API_KEY_TOML="api_key = \"${AI_MEMORY_API_KEY}\""
+fi
+
 # config.toml — top-level fields per AppConfig (see src/config.rs line 1433).
 # Sections [memory], [autonomous], [governance], [federation] are NOT valid
 # AppConfig keys — serde silently ignores them, falling through to defaults.
@@ -44,6 +56,7 @@ embedding_model = "nomic_embed_v15"
 llm_model = "${LLM_MODEL}"
 auto_tag_model = "${AUTO_TAG_MODEL}"
 cross_encoder = true
+${API_KEY_TOML}
 
 [audit]
 enabled = true
@@ -77,6 +90,44 @@ if [ -n "$PEER_URLS" ]; then
     QUORUM_FLAGS="$QUORUM_FLAGS --quorum-client-cert $TLS_DIR/client.pem --quorum-client-key $TLS_DIR/client.key"
     [ -f "$TLS_DIR/ca.pem" ] && QUORUM_FLAGS="$QUORUM_FLAGS --quorum-ca-cert $TLS_DIR/ca.pem"
   fi
+fi
+
+# Issue #878 — peer-mesh reach preflight.
+#
+# Plan-C re-test surfaced that `host.docker.internal:<port>` URLs in the
+# peer mesh silently shadow when another host process owns those ports
+# (SSH forwards, python -m http.server, stale docker proxy after
+# `colima delete`, etc.). The published port-bind "succeeds" but quorum
+# POSTs land on the unrelated process and 404 / hang forever.
+#
+# Long-term fix: user-defined bridge + container-DNS in
+# `infra/plan-c/docker-compose.yml` (peer URLs become `http://ic-bob:19077`
+# routed through the docker network, never touching the host). For
+# operators still on the `host.docker.internal` recipe, the preflight
+# below probes every declared peer URL before exec'ing `serve` and
+# aborts with EX_CONFIG (78) if any peer is unreachable.
+#
+# Logic lives in `infra/plan-c/peer-preflight.sh` so it can be unit-
+# tested via `tests/plan_c_preflight.sh` without bringing the rest of
+# the entrypoint side-effects (mkdir /etc, /root/.config) into scope.
+# Opt-out: `AI_MEMORY_SKIP_PEER_PREFLIGHT=1` disables the check.
+PREFLIGHT="${AI_MEMORY_PEER_PREFLIGHT_SCRIPT:-/usr/local/lib/ai-memory/peer-preflight.sh}"
+if [ ! -f "$PREFLIGHT" ]; then
+  for candidate in \
+    "$(dirname "$0")/infra/plan-c/peer-preflight.sh" \
+    "/usr/local/lib/ai-memory/peer-preflight.sh"; do
+    if [ -f "$candidate" ]; then
+      PREFLIGHT="$candidate"
+      break
+    fi
+  done
+fi
+if [ -f "$PREFLIGHT" ]; then
+  PEER_URLS="$PEER_URLS" \
+  AI_MEMORY_SKIP_PEER_PREFLIGHT="${AI_MEMORY_SKIP_PEER_PREFLIGHT:-0}" \
+    bash "$PREFLIGHT" || exit $?
+else
+  echo "[entrypoint] #878 preflight script not found at any candidate path — skipping" >&2
 fi
 
 echo "[entrypoint] starting ai-memory:"

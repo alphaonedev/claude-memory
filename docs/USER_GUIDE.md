@@ -74,7 +74,7 @@ Your AI assistant uses these tools automatically during conversations. You can a
 
 ## MCP Tool Reference
 
-This section documents the 43 MCP tools with their exact parameter schemas, example requests, and response formats (canonical counts on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)). All tools are invoked via JSON-RPC 2.0 using method `tools/call` with the tool name in `params.name` and tool parameters in `params.arguments`.
+This section documents the MCP tools with their exact parameter schemas, example requests, and response formats. **At v0.7.0 the surface advertises 71 entries at `--profile full`** (70 callable "memory tools" + the always-on `memory_capabilities` bootstrap — both numbers are intentional; see issue [#862](https://github.com/alphaonedev/ai-memory-mcp/issues/862) for the disambiguation). Default `--profile core` exposes 7 (the original 5 + `memory_load_family` + `memory_smart_load`) plus the always-on `memory_capabilities`. Canonical counts on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html) and asserted by `Profile::full().expected_tool_count()` in `src/profile.rs`. All tools are invoked via JSON-RPC 2.0 using method `tools/call` with the tool name in `params.name` and tool parameters in `params.arguments`.
 
 All responses are wrapped in the MCP content envelope:
 
@@ -621,16 +621,29 @@ Get all links for a memory (both directions -- where the memory is source or tar
 }
 ```
 
-**Example response:**
+**Example response (v0.7.0 — `memory_get_links` returns the full envelope per issue [#860](https://github.com/alphaonedev/ai-memory-mcp/issues/860); temporal + attestation columns surfaced):**
 
 ```json
 {
   "links": [
-    { "source_id": "a1b2c3d4-...", "target_id": "e5f6g7h8-...", "relation": "related_to" }
+    {
+      "source_id": "a1b2c3d4-...",
+      "target_id": "e5f6g7h8-...",
+      "relation": "related_to",
+      "created_at": "2026-05-18T12:00:00Z",
+      "valid_from": "2026-05-18T12:00:00Z",
+      "valid_until": null,
+      "observed_by": "ai:claude-opus-4.7@host:pid-3812",
+      "signature": null,
+      "attest_level": "unsigned",
+      "signed_at": null
+    }
   ],
   "count": 1
 }
 ```
+
+Relations accepted by `memory_link` and surfaced by `memory_get_links` (six at v0.7.0; was four at v0.6.x): `related_to`, `supersedes`, `contradicts`, `derived_from`, `reflects_on` (recursive-learning Task 1/8), `derives_from` (WT-1-A atomisation).
 
 ---
 

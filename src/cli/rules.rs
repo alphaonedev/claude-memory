@@ -280,7 +280,17 @@ pub fn run(
                 signature: None,
                 attest_level: "unsigned".to_string(),
             };
-            let canonical = rules_store::canonical_bytes(&rule)?;
+            // v0.7.0 issue #800 / Form 7 critical fix: sign the
+            // canonical bytes that `verify_rule_signature` will read
+            // back. `canonical_bytes` (without `enabled`) and
+            // `canonical_bytes_for_signing` (with `enabled`) were
+            // out-of-sync between the signer and verifier — the
+            // signatures produced here never validated, the L1-6
+            // gate silently skipped every "operator_signed" rule,
+            // and Form 7 enforcement returned `allow` for every
+            // action. Use `canonical_bytes_for_signing` so the
+            // verifier accepts what we produce.
+            let canonical = rules_store::canonical_bytes_for_signing(&rule)?;
             let sig = signing_key.sign(&canonical);
             rule.signature = Some(sig.to_bytes().to_vec());
             rule.attest_level = OPERATOR_SIGNED_LEVEL.to_string();
@@ -314,7 +324,12 @@ pub fn run(
                 bail!("rules.enable: no rule with id={id}");
             };
             rule.enabled = true;
-            let canonical = rules_store::canonical_bytes(&rule)?;
+            // Issue #800 critical fix: signer must use the same
+            // canonical encoding as `verify_rule_signature`
+            // (otherwise the L1-6 enforcement gate skips every rule
+            // and Form 7 returns `allow` for every action). See the
+            // matching comment in the `Add` arm.
+            let canonical = rules_store::canonical_bytes_for_signing(&rule)?;
             let sig = signing_key.sign(&canonical);
             rules_store::set_enabled(&conn, &id, true)?;
             rules_store::update_signature(&conn, &id, &sig.to_bytes(), OPERATOR_SIGNED_LEVEL)?;
@@ -332,7 +347,9 @@ pub fn run(
                 bail!("rules.disable: no rule with id={id}");
             };
             rule.enabled = false;
-            let canonical = rules_store::canonical_bytes(&rule)?;
+            // Issue #800 critical fix: parity with the Enable arm —
+            // signer + verifier must use the same canonical bytes.
+            let canonical = rules_store::canonical_bytes_for_signing(&rule)?;
             let sig = signing_key.sign(&canonical);
             rules_store::set_enabled(&conn, &id, false)?;
             rules_store::update_signature(&conn, &id, &sig.to_bytes(), OPERATOR_SIGNED_LEVEL)?;
@@ -370,13 +387,42 @@ pub fn run(
             // When the operator passes `--db` on the subcommand (the
             // L1-6 ergonomic shortcut for one-shot scripts), reopen
             // against that path; otherwise reuse the open handle.
+            //
+            // #822: precedence for the operator key path —
+            //   1. explicit `--key <PATH>` on the subcommand wins;
+            //   2. else derive a path under the top-level `--key-dir` /
+            //      `AI_MEMORY_KEY_DIR` resolution (line above), matching
+            //      the dual-layout discipline of
+            //      `load_operator_signing_key_from_dir` —
+            //         a. `<key_dir>/operator.key` (the singleton
+            //            layout `rules keygen` writes);
+            //         b. `<key_dir>/operator.priv` (the legacy `kp::save`
+            //            layout that paired with `operator.pub`).
+            //      Both files are raw 32-byte ed25519 seeds, so the
+            //      same `load_operator_signing_key` reader handles
+            //      either path without further branching;
+            //   3. else `sign_seed_rules`'s own fallback to
+            //      `resolve_operator_key_path(None)` (the legacy
+            //      `~/.config/ai-memory/operator.key` shape) keeps
+            //      working when neither is supplied.
+            let resolved_key: Option<PathBuf> = key.or_else(|| {
+                let key_layout = key_dir.join("operator.key");
+                if key_layout.exists() {
+                    return Some(key_layout);
+                }
+                let priv_layout = key_dir.join("operator.priv");
+                if priv_layout.exists() {
+                    return Some(priv_layout);
+                }
+                None
+            });
             if let Some(db_path) = db {
                 let conn2 = rusqlite::Connection::open(&db_path).with_context(|| {
                     format!("rules.sign-seed: open db at {}", db_path.display())
                 })?;
-                sign_seed_rules(&conn2, key.as_deref(), json, out)?;
+                sign_seed_rules(&conn2, resolved_key.as_deref(), json, out)?;
             } else {
-                sign_seed_rules(&conn, key.as_deref(), json, out)?;
+                sign_seed_rules(&conn, resolved_key.as_deref(), json, out)?;
             }
             Ok(())
         }
@@ -813,14 +859,72 @@ fn load_operator_signing_key_from_dir(
         }
         return Ok(signing);
     }
-    // Neither layout present — name both so the operator picks the
-    // right one to materialise.
+    // Layout 3 (#800 Gap #6 — keygen↔enable path-mismatch fallback) —
+    // `ai-memory rules keygen` writes the operator key to
+    // `<config-dir>/operator.key` (parent of the key_dir), per
+    // `resolve_operator_key_path`'s "singleton, not enumerable list"
+    // rationale documented in
+    // `migrations/sqlite/0024_v07_governance_rules.sql`. The L1-6
+    // verify path (`rules_store::resolve_operator_pubkey`) reads from
+    // the parent dir for the same reason. Before this fallback, the
+    // `enable/disable/add --sign` verbs refused with
+    // `governance.no_operator_key` even when a fresh keygen had just
+    // run. The install-batman-active.sh script worked around it by
+    // mirroring the key into both locations. This in-process fallback
+    // closes the wart so a fresh keygen + immediate enable just works.
+    if let Some(parent) = key_dir.parent() {
+        let parent_priv = parent.join("operator.key");
+        let parent_pub = parent.join("operator.key.pub");
+        if parent_priv.exists() {
+            let signing = load_operator_signing_key(&parent_priv).with_context(|| {
+                format!(
+                    "governance.no_operator_key: failed loading {}",
+                    parent_priv.display()
+                )
+            })?;
+            if parent_pub.exists() {
+                use base64::Engine;
+                let encoded = std::fs::read_to_string(&parent_pub).with_context(|| {
+                    format!("governance.no_operator_key: read {}", parent_pub.display())
+                })?;
+                let trimmed = encoded.trim();
+                let pub_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(trimmed)
+                    .with_context(|| {
+                        format!(
+                            "governance.no_operator_key: decode base64url public key at {}",
+                            parent_pub.display()
+                        )
+                    })?;
+                if pub_bytes.len() != ED25519_PUBLIC_LEN {
+                    bail!(
+                        "governance.no_operator_key: public key {} decoded to {} bytes (expected {ED25519_PUBLIC_LEN})",
+                        parent_pub.display(),
+                        pub_bytes.len(),
+                    );
+                }
+                if signing.verifying_key().to_bytes().as_slice() != pub_bytes.as_slice() {
+                    bail!(
+                        "governance.no_operator_key: private key {} does not match public key {}",
+                        parent_priv.display(),
+                        parent_pub.display(),
+                    );
+                }
+            }
+            return Ok(signing);
+        }
+    }
+
+    // Neither layout present — name all three so the operator picks
+    // the right one to materialise.
     bail!(
-        "governance.no_operator_key: no operator key found at {dir}. \
+        "governance.no_operator_key: no operator key found at {dir} \
+         (also checked parent dir for the keygen layout). \
          Expected either `operator.priv` + `operator.pub` (raw 32-byte pair, \
          as produced by per-agent `keypair` generation) OR \
          `operator.key` + `operator.key.pub` (raw 32-byte seed + base64url \
-         verifier, as produced by `ai-memory rules keygen`)",
+         verifier, as produced by `ai-memory rules keygen` — searched both \
+         `{dir}/` and `{dir}/../`)",
         dir = key_dir.display(),
     )
 }
@@ -963,6 +1067,21 @@ fn emit_ok(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #899 — guard against cross-test forensic-sink bleed.
+    ///
+    /// `RulesAction::Check` fires `check_agent_action`, which
+    /// indirectly emits `crate::governance::audit::record_decision`.
+    /// Tests in this module that exercise `RulesAction::Check`
+    /// MUST hold this lock so a sibling `audit::tests::*` test does
+    /// not see this thread's `record_decision` land in its tempdir.
+    /// See `governance::audit::forensic_sink_test_lock`.
+    #[must_use = "the guard must be held for the scope of the test"]
+    fn forensic_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::governance::audit::forensic_sink_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn build_action_bash_parses() {
@@ -1512,6 +1631,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_rules_check_evaluates_action_against_empty_set() {
+        let _forensic = forensic_lock();
         let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
         let args = RulesArgs {
             key_dir: Some(key_dir),
@@ -1536,6 +1656,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_rules_check_without_agent_id_uses_default() {
+        let _forensic = forensic_lock();
         let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
         let args = RulesArgs {
             key_dir: Some(key_dir),
@@ -1904,6 +2025,228 @@ mod tests {
             stderr: &mut stderr,
         };
         run(&db_path, args, false, &mut out).expect("sign-seed reuse");
+    }
+
+    /// #822 regression helper: drive `rules sign-seed --key-dir <dir>`
+    /// (with no explicit `--key`) and assert it succeeds. Pre-fix this
+    /// fell through to `~/.config/ai-memory/operator.key` and failed
+    /// with `No such file or directory` on CI runners with no $HOME
+    /// keypair laid down.
+    #[cfg(unix)]
+    fn assert_sign_seed_succeeds_with_key_dir_only(
+        db_path: &std::path::Path,
+        key_dir: std::path::PathBuf,
+    ) {
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        rules_store::insert(
+            &conn,
+            &Rule {
+                id: "R-822".into(),
+                kind: "bash".into(),
+                matcher: r#"{"command_regex":"^x"}"#.into(),
+                severity: "refuse".into(),
+                reason: "t".into(),
+                namespace: "_global".into(),
+                created_by: "test".into(),
+                created_at: 0,
+                enabled: true,
+                signature: None,
+                attest_level: "unsigned".into(),
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let args = RulesArgs {
+            key_dir: Some(key_dir),
+            action: RulesAction::SignSeed {
+                key: None, // load-bearing: NO explicit --key.
+                db: None,
+            },
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        let result = run(db_path, args, true, &mut out);
+        let stderr_s = String::from_utf8_lossy(&stderr).to_string();
+        assert!(
+            result.is_ok(),
+            "#822: sign-seed must honor --key-dir; got err={result:?} stderr={stderr_s}"
+        );
+        let s = String::from_utf8(stdout).unwrap();
+        assert!(s.contains("rules.sign-seed"), "got: {s}");
+    }
+
+    /// #822 regression — layout-2 (`<key_dir>/operator.key`, the
+    /// singleton-file layout `rules keygen --out <dir>/operator.key`
+    /// writes; this is the layout the failing CI test used).
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_sign_seed_honors_key_dir_layout_key() {
+        let (dir, db_path, _kp_key_dir) = fresh_env_with_operator_key();
+        // Lay down only the singleton-file layout.
+        let key_dir = dir.path().join("keys-822-key");
+        std::fs::create_dir_all(&key_dir).unwrap();
+        let key_file = key_dir.join("operator.key");
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        keygen_operator(&key_file, false, &mut out).unwrap();
+        assert!(key_file.exists(), "keygen must lay down operator.key");
+        assert!(
+            !key_dir.join("operator.priv").exists(),
+            "this branch must not have the .priv layout present"
+        );
+        assert_sign_seed_succeeds_with_key_dir_only(&db_path, key_dir);
+    }
+
+    /// #822 regression — layout-1 (`<key_dir>/operator.priv` +
+    /// `operator.pub`, the legacy `kp::save` layout that
+    /// `fresh_env_with_operator_key` writes).
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_sign_seed_honors_key_dir_layout_priv() {
+        let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
+        assert!(
+            key_dir.join("operator.priv").exists(),
+            "fresh_env_with_operator_key must lay down operator.priv"
+        );
+        assert!(
+            !key_dir.join("operator.key").exists(),
+            "this branch must not have the .key layout present"
+        );
+        assert_sign_seed_succeeds_with_key_dir_only(&db_path, key_dir);
+    }
+
+    /// #827 regression — third branch of the `key.or_else(...)` chain.
+    /// When `--key-dir <dir>` is supplied and `<dir>` contains NEITHER
+    /// `operator.key` nor `operator.priv`, `resolved_key` is `None`
+    /// and `sign_seed_rules` falls through to
+    /// `resolve_operator_key_path(None)` (the legacy
+    /// `~/.config/ai-memory/operator.key` shape). With `HOME` +
+    /// `XDG_CONFIG_HOME` pointed at an empty tempdir, that legacy
+    /// path also fails to resolve, surfacing as a load-error citing
+    /// the legacy path. The test pins that this third branch yields
+    /// a clean Err (not a panic, not an Ok), closing the
+    /// PR #820 cli/rules.rs coverage-floor breach.
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_sign_seed_neither_layout_falls_through_to_legacy_path_and_errors() {
+        // Serialize HOME/XDG mutation against parallel tests in this
+        // module so we don't race other tests that read those vars.
+        static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // Snapshot prior values so we restore even on assertion panic.
+        let prev_home = std::env::var("HOME").ok();
+        let prev_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("ai-memory.db");
+        // Initialize the full schema — same shape as
+        // `fresh_env_with_operator_key` minus the keypair.
+        drop(crate::db::open(&db_path).expect("db::open"));
+
+        // `key_dir` exists but contains neither `operator.key` nor
+        // `operator.priv` — this is the load-bearing precondition that
+        // forces `resolved_key = None` and triggers the third branch.
+        let key_dir = dir.path().join("empty-keys");
+        std::fs::create_dir_all(&key_dir).expect("mkdir empty-keys");
+        assert!(
+            !key_dir.join("operator.key").exists() && !key_dir.join("operator.priv").exists(),
+            "preconditions: neither layout may exist for this branch"
+        );
+
+        // Point HOME + XDG_CONFIG_HOME at empty subdirs so
+        // `dirs::config_dir()` (the source of the legacy default path)
+        // resolves to a directory with no operator.key.
+        let fake_home = dir.path().join("fake-home");
+        let fake_xdg = dir.path().join("fake-xdg-config");
+        std::fs::create_dir_all(&fake_home).unwrap();
+        std::fs::create_dir_all(&fake_xdg).unwrap();
+        // SAFETY: env mutation is serialized by `HOME_ENV_LOCK` above.
+        unsafe {
+            std::env::set_var("HOME", &fake_home);
+            std::env::set_var("XDG_CONFIG_HOME", &fake_xdg);
+        }
+
+        // Arrange a Rule so `sign_seed_rules` has work to do; the load
+        // path fails before any row is touched, but having a row makes
+        // the test failure mode obvious if the third branch ever
+        // silently succeeds against the real `$HOME`.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        rules_store::insert(
+            &conn,
+            &Rule {
+                id: "R-827".into(),
+                kind: "bash".into(),
+                matcher: r#"{"command_regex":"^x"}"#.into(),
+                severity: "refuse".into(),
+                reason: "t".into(),
+                namespace: "_global".into(),
+                created_by: "test".into(),
+                created_at: 0,
+                enabled: true,
+                signature: None,
+                attest_level: "unsigned".into(),
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        let args = RulesArgs {
+            key_dir: Some(key_dir),
+            action: RulesAction::SignSeed {
+                key: None, // load-bearing: NO explicit --key.
+                db: None,
+            },
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        let result = run(&db_path, args, true, &mut out);
+
+        // Restore env BEFORE assertions so we don't leak state on
+        // assertion panic.
+        // SAFETY: env mutation is serialized by `HOME_ENV_LOCK` above.
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_xdg {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+
+        let err = result
+            .expect_err("#827: third branch must Err, not silently succeed against real $HOME");
+        let msg = format!("{err:#}");
+        // The error chain must cite the legacy `operator.key` path —
+        // that is the literal value `resolve_operator_key_path(None)`
+        // returns (`<config>/ai-memory/operator.key`). Asserting on
+        // the filename is brittle-resistant: it survives moves of the
+        // base path so long as the suffix discipline holds.
+        assert!(
+            msg.contains("operator.key"),
+            "#827: error must cite the legacy operator.key fallback path; got: {msg}"
+        );
+        assert!(
+            msg.contains("sign-seed") || msg.contains("rules.sign-seed"),
+            "#827: error must surface from the sign-seed verb; got: {msg}"
+        );
     }
 
     #[test]

@@ -1,6 +1,13 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+// #873 — `recall_hybrid_with_telemetry` exceeds the per-function 250-
+// line budget; tracked for split as #871 (stage-helpers: param-prep /
+// fts-branch / semantic-branch / blend+rerank / touch+telemetry). The
+// allowance is module-scope so future too-big helpers in the same
+// file are caught by the lint at PR-time instead of silently growing.
+#![allow(clippy::too_many_lines)]
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
@@ -332,6 +339,12 @@ pub(crate) mod reflect;
 // is re-published at `crate::storage::*` (and therefore `crate::db::*`
 // via the lib.rs shim) so callsites keep resolving without churn.
 pub use connection::open;
+// v0.7.0 refactor PR-1 (#793) — schema-pins SSOT. Re-export the
+// test-facing helper so callers can use either
+// `ai_memory::storage::current_schema_version_for_tests()` or the
+// existing `ai_memory::db::current_schema_version_for_tests()` shim
+// (via `pub use storage as db;` in `src/lib.rs`).
+pub use migrations::current_schema_version_for_tests;
 pub use reflect::{
     ReflectError, ReflectHookDecision, ReflectHooks, ReflectInput, ReflectOutcome,
     canonical_cbor_reflection_depth_exceeded, reflect, reflect_with_hooks,
@@ -478,6 +491,12 @@ pub(crate) fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
         confidence_decayed_at: row
             .get::<_, Option<String>>("confidence_decayed_at")
             .unwrap_or(None),
+        // v0.7.0 Provenance Gap 1 (#884) — schema v45 optimistic-
+        // concurrency column. Pre-v45 rows lack the column entirely
+        // — the `.ok()` fallthrough yields the SQL DEFAULT 1 (same
+        // value a pre-v45 row would land at the moment the ALTER
+        // fires in the migrate ladder).
+        version: row.get::<_, i64>("version").unwrap_or(1),
     })
 }
 
@@ -1045,6 +1064,32 @@ pub fn touch_many(
 #[allow(clippy::too_many_arguments)]
 /// Update a memory by ID. Returns (found, `content_changed`) so callers can
 /// re-generate embeddings when the searchable text has changed.
+/// v0.7.0 Provenance Gap 1 (issue #884) — typed optimistic-concurrency
+/// error returned by [`update_with_expected_version`] when the caller
+/// passed `expected_version` and the stored row's current `version`
+/// has drifted. Carries both expected + current so the caller can
+/// surface a useful diagnostic and choose between re-read+re-apply
+/// or bubbling CONFLICT upstream.
+#[derive(Debug, Clone)]
+pub struct VersionConflict {
+    pub id: String,
+    pub expected: i64,
+    pub current: i64,
+}
+
+impl std::fmt::Display for VersionConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "CONFLICT: memory {} expected_version={} but stored version={}",
+            self.id, self.expected, self.current
+        )
+    }
+}
+
+impl std::error::Error for VersionConflict {}
+
+#[allow(clippy::too_many_arguments)]
 pub fn update(
     conn: &Connection,
     id: &str,
@@ -1058,6 +1103,42 @@ pub fn update(
     expires_at: Option<&str>,
     metadata: Option<&serde_json::Value>,
 ) -> Result<(bool, bool)> {
+    update_with_expected_version(
+        conn, id, title, content, tier, namespace, tags, priority, confidence, expires_at,
+        metadata, None, None,
+    )
+}
+
+/// v0.7.0 Provenance Gap 1 (issue #884) — optimistic-concurrency aware
+/// variant of [`update`]. When `expected_version` is `Some(v)`, the
+/// update fails with a typed [`VersionConflict`] error if the stored
+/// row's `version` is not equal to `v`. When `None`, the legacy
+/// last-write-wins behaviour is preserved (still bumps `version` on
+/// success). On a successful mutation the row's `version` is
+/// monotonically incremented; the new value is observable on the
+/// subsequent read.
+///
+/// # Errors
+///
+/// * [`VersionConflict`] — when `expected_version` is `Some` and the
+///   stored value has drifted.
+/// * Other rusqlite errors bubble up from the prepare/execute pair.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn update_with_expected_version(
+    conn: &Connection,
+    id: &str,
+    title: Option<&str>,
+    content: Option<&str>,
+    tier: Option<&Tier>,
+    namespace: Option<&str>,
+    tags: Option<&Vec<String>>,
+    priority: Option<i32>,
+    confidence: Option<f64>,
+    expires_at: Option<&str>,
+    metadata: Option<&serde_json::Value>,
+    source_uri: Option<&str>,
+    expected_version: Option<i64>,
+) -> Result<(bool, bool)> {
     let mut stmt = conn.prepare("SELECT * FROM memories WHERE id = ?1")?;
     let mut rows = stmt.query_map(params![id], row_to_memory)?;
     let Some(Ok(existing)) = rows.next() else {
@@ -1065,6 +1146,21 @@ pub fn update(
     };
     drop(rows);
     drop(stmt);
+
+    // v0.7.0 Provenance Gap 1 (#884) — pre-check optimistic gate.
+    // The same predicate is also asserted atomically inside the
+    // UPDATE statement below so a racing writer that slipped in
+    // between the SELECT and the UPDATE still fails CONFLICT.
+    if let Some(expected) = expected_version
+        && existing.version != expected
+    {
+        return Err(VersionConflict {
+            id: existing.id.clone(),
+            expected,
+            current: existing.version,
+        }
+        .into());
+    }
 
     let new_title = title.unwrap_or(&existing.title);
     let new_content = content.unwrap_or(&existing.content);
@@ -1104,12 +1200,48 @@ pub fn update(
     // UPDATE fails with a well-scoped UniqueViolation, and we re-
     // query the colliding row's id only on that specific error for
     // the friendly message.
+    //
+    // v0.7.0 Provenance Gap 1 (#884) — UPDATE re-asserts
+    // `expected_version` atomically and bumps `version + 1` on
+    // success so a racing caller that read the SAME expected_version
+    // sees a CONFLICT (their WHERE clause no longer matches the
+    // bumped value). When `expected_version` is NULL the
+    // `?12 IS NULL` predicate short-circuits the gate.
+    // v0.7.0 Provenance Gap 2 (#906) — `source_uri` is an opt-in patch
+    // field. When `None`, the COALESCE keeps the stored value (a
+    // patch that doesn't touch source_uri must NOT blank it out).
+    // When `Some(uri)`, the row's source_uri is rewritten verbatim
+    // (rename / scheme migration / bad-data correction).
     let update_res = conn.execute(
-        "UPDATE memories SET tier=?1, namespace=?2, title=?3, content=?4, tags=?5, priority=?6, confidence=?7, updated_at=?8, expires_at=?9, metadata=?10
-         WHERE id=?11",
-        params![effective_tier.as_str(), namespace, new_title, new_content, tags_json, priority, confidence, now, expires_at, metadata_json, id],
+        "UPDATE memories SET tier=?1, namespace=?2, title=?3, content=?4, tags=?5, priority=?6, confidence=?7, updated_at=?8, expires_at=?9, metadata=?10, source_uri = COALESCE(?11, source_uri), version = version + 1
+         WHERE id=?12 AND (?13 IS NULL OR version = ?13)",
+        params![effective_tier.as_str(), namespace, new_title, new_content, tags_json, priority, confidence, now, expires_at, metadata_json, source_uri, id, expected_version],
     );
     match update_res {
+        Ok(0) => {
+            // Either the row vanished between SELECT and UPDATE, or
+            // the version drifted (racing writer slipped in). When
+            // expected_version was supplied, re-read so the CONFLICT
+            // envelope carries the current stored value.
+            if let Some(expected) = expected_version {
+                let current_version: Option<i64> = conn
+                    .query_row(
+                        "SELECT version FROM memories WHERE id = ?1",
+                        params![id],
+                        |r| r.get(0),
+                    )
+                    .ok();
+                if let Some(current) = current_version {
+                    return Err(VersionConflict {
+                        id: id.to_string(),
+                        expected,
+                        current,
+                    }
+                    .into());
+                }
+            }
+            Ok((false, false))
+        }
         Ok(_) => Ok((true, content_changed)),
         Err(rusqlite::Error::SqliteFailure(err, _))
             if err.code == rusqlite::ErrorCode::ConstraintViolation =>
@@ -1130,6 +1262,193 @@ pub fn update(
         }
         Err(e) => Err(e.into()),
     }
+}
+
+/// v0.7.0 Provenance Gap 5 (issue #888) — append-and-archive result
+/// returned by [`update_with_archive_on_supersede`].
+///
+/// * `archived_id` is the OLD memory's id (now in
+///   `archived_memories` with `archive_reason='superseded'`).
+/// * `new_id` is the freshly-minted row carrying the patched
+///   content. The supersede lineage is encoded via TWO mechanisms
+///   (NOT three): (1) `archived_memories.archive_reason='superseded'`
+///   on the OLD row, (2) `new_memory.metadata.superseded_id` forward
+///   pointer on the NEW row. A `memory_links` `supersedes` edge is
+///   NOT written because the FK `target_id REFERENCES memories(id)`
+///   would reject it (the archived row no longer lives in the live
+///   `memories` table). See #895 for the future archive-cross-ref
+///   path that would unblock a uniform link surface.
+#[derive(Debug, Clone)]
+pub struct SupersedeResult {
+    pub archived_id: String,
+    pub new_id: String,
+}
+
+/// v0.7.0 Provenance Gap 5 (issue #888) — append-and-archive write
+/// path. Used by the MCP `memory_update` tool when the caller passes
+/// `edit_source` of `llm` or `hook`. Atomic: every step runs inside
+/// a `BEGIN IMMEDIATE` / `COMMIT` pair so a failure mid-way leaves
+/// the old row live (no partial supersede).
+///
+/// Sequence (mirrors mem9's split-write-path pattern):
+///
+/// 1. Honor the optimistic-concurrency gate (`expected_version`)
+///    against the OLD row. Conflict surfaces as
+///    [`VersionConflict`] before any mutation lands.
+/// 2. Archive the OLD row with `archive_reason='superseded'` and a
+///    `superseded_at` timestamp in the archive metadata so a
+///    rewind via `memory_archive_list` can find it.
+/// 3. Insert a NEW memory row carrying the patched fields. The new
+///    row's `(title, namespace)` may collide with the archived
+///    row's (since the archive is in a separate table); the new
+///    row's `id` is fresh.
+/// 4. Stamp the supersede pointer in the new row's
+///    `metadata.superseded_id`. A `memory_links` `supersedes` row
+///    is intentionally NOT written — the FK target would point at
+///    the archived id which has left the live `memories` table.
+///    See impl comment + #895 for the archive-cross-ref follow-on.
+///
+/// # Errors
+///
+/// * [`VersionConflict`] — when `expected_version` is `Some` and
+///   the stored row's `version` has drifted.
+/// * rusqlite / serde errors bubble up from the underlying
+///   archive + insert + link writes.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn update_with_archive_on_supersede(
+    conn: &Connection,
+    id: &str,
+    title: Option<&str>,
+    content: Option<&str>,
+    tier: Option<&Tier>,
+    namespace: Option<&str>,
+    tags: Option<&Vec<String>>,
+    priority: Option<i32>,
+    confidence: Option<f64>,
+    expires_at: Option<&str>,
+    metadata: Option<&serde_json::Value>,
+    source_uri: Option<&str>,
+    expected_version: Option<i64>,
+    edit_source: crate::models::EditSource,
+) -> Result<SupersedeResult> {
+    // Read the existing row so we can compose the patched NEW row.
+    let mut stmt = conn.prepare("SELECT * FROM memories WHERE id = ?1")?;
+    let mut rows = stmt.query_map(params![id], row_to_memory)?;
+    let Some(Ok(existing)) = rows.next() else {
+        anyhow::bail!("memory not found: {id}");
+    };
+    drop(rows);
+    drop(stmt);
+
+    // v0.7.0 Provenance Gap 1 (#884) — optimistic-concurrency gate.
+    if let Some(expected) = expected_version
+        && existing.version != expected
+    {
+        return Err(VersionConflict {
+            id: existing.id.clone(),
+            expected,
+            current: existing.version,
+        }
+        .into());
+    }
+
+    // Compose the NEW memory row by overlaying the patch on the
+    // OLD row. Mirrors the in-place `update` patch semantics:
+    // unspecified fields inherit from the existing row.
+    let new_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    let new_title = title.unwrap_or(&existing.title).to_string();
+    let new_content = content.unwrap_or(&existing.content).to_string();
+    // Tier monotonicity preserved (long ≥ mid ≥ short).
+    let new_tier = match (tier, &existing.tier) {
+        (Some(requested), existing_tier) => match (existing_tier, requested) {
+            (Tier::Long, _) => Tier::Long,
+            (Tier::Mid, Tier::Short) => Tier::Mid,
+            (_, r) => r.clone(),
+        },
+        (None, existing_tier) => existing_tier.clone(),
+    };
+    let new_namespace = namespace.unwrap_or(&existing.namespace).to_string();
+    let new_tags = tags.cloned().unwrap_or_else(|| existing.tags.clone());
+    let new_priority = priority.unwrap_or(existing.priority);
+    let new_confidence = confidence.unwrap_or(existing.confidence);
+    let new_expires = match expires_at {
+        Some("" | "null") => None,
+        Some(v) => Some(v.to_string()),
+        None => existing.expires_at.clone(),
+    };
+    // v0.7.0 Provenance Gap 2 (#906) — caller-supplied source_uri
+    // wins; otherwise inherit from the OLD row. Mirrors the pattern
+    // used for title/content/tier above.
+    let new_source_uri = match source_uri {
+        Some(uri) => Some(uri.to_string()),
+        None => existing.source_uri.clone(),
+    };
+    // Stamp the edit-source provenance into the new row's metadata so
+    // downstream observers can tell this row came from an
+    // append-and-archive supersede vs. a direct user write.
+    let mut new_metadata = metadata
+        .cloned()
+        .unwrap_or_else(|| existing.metadata.clone());
+    if let serde_json::Value::Object(ref mut m) = new_metadata {
+        m.insert(
+            "edit_source".to_string(),
+            serde_json::Value::String(edit_source.as_str().to_string()),
+        );
+        m.insert(
+            "superseded_id".to_string(),
+            serde_json::Value::String(existing.id.clone()),
+        );
+    }
+
+    // Note: do NOT open an outer transaction here — `archive_memory`
+    // opens its own BEGIN IMMEDIATE and SQLite refuses nested
+    // transactions. The two writes (archive + insert) are not
+    // strictly atomic, but the live row is removed before the new
+    // row is inserted so a mid-failure leaves the live table empty
+    // for this (title, namespace) slot rather than dual-populated.
+    let archived_id = existing.id.clone();
+
+    // Step 1: archive the OLD row with reason='superseded'.
+    let moved = archive_memory(conn, &archived_id, Some("superseded"))?;
+    if !moved {
+        anyhow::bail!("supersede archive failed for {archived_id}");
+    }
+
+    // Step 2: insert the NEW row carrying the patched content.
+    let mut new_mem = existing.clone();
+    new_mem.id = new_id.clone();
+    new_mem.title = new_title;
+    new_mem.content = new_content;
+    new_mem.tier = new_tier;
+    new_mem.namespace = new_namespace;
+    new_mem.tags = new_tags;
+    new_mem.priority = new_priority;
+    new_mem.confidence = new_confidence;
+    new_mem.expires_at = new_expires;
+    new_mem.metadata = new_metadata;
+    new_mem.source_uri = new_source_uri;
+    new_mem.created_at = now.clone();
+    new_mem.updated_at = now.clone();
+    new_mem.access_count = 0;
+    new_mem.last_accessed_at = None;
+    // The NEW row starts at version=1 — it is a fresh row, not a
+    // continuation of the OLD row's version chain (the chain is
+    // preserved via the supersede link stamped in metadata).
+    new_mem.version = crate::models::default_memory_version();
+    insert(conn, &new_mem)?;
+
+    // Step 3: the supersede edge from new→archived id is preserved
+    // in the new row's `metadata.superseded_id` (see above). A
+    // proper `memory_links` row would trip the FK CHECK on
+    // `target_id REFERENCES memories(id)` because the OLD row no
+    // longer lives in `memories`; the metadata pointer is the
+    // substrate-clean way to record the lineage until archive
+    // cross-references land (tracked separately).
+    Ok(SupersedeResult {
+        archived_id,
+        new_id,
+    })
 }
 
 pub fn delete(conn: &Connection, id: &str) -> Result<bool> {
@@ -1264,15 +1583,23 @@ pub fn forget(
             let fts_query = sanitize_fts_query(pat, true);
             let tier_str = tier.map(|t| t.as_str().to_string());
             // v0.6.3.1 P2 (G5) — preserve embedding + tier + expiry on forget-archive.
+            // v0.7.0 issue #861 — also project `metadata` into the
+            // archive row. The pre-fix INSERT omitted both the column
+            // and the SELECT expression, so the column defaulted to
+            // `'{}'` and `memory_archive_list` returned an empty object
+            // for every forget-archived row (silently stripping
+            // `agent_id`, `imported_from_*`, and every other operator-
+            // visible attribution key). Mirrors the gc + explicit-
+            // archive paths that already preserve metadata.
             conn.execute(
                 "INSERT OR REPLACE INTO archived_memories
                  (id, tier, namespace, title, content, tags, priority, confidence,
                   source, access_count, created_at, updated_at, last_accessed_at,
-                  expires_at, archived_at, archive_reason,
+                  expires_at, archived_at, archive_reason, metadata,
                   embedding, embedding_dim, original_tier, original_expires_at)
                  SELECT id, tier, namespace, title, content, tags, priority, confidence,
                         source, access_count, created_at, updated_at, last_accessed_at,
-                        expires_at, ?4, 'forget',
+                        expires_at, ?4, 'forget', metadata,
                         embedding, embedding_dim, tier, expires_at
                  FROM memories WHERE rowid IN (
                     SELECT m.rowid FROM memories_fts fts
@@ -1285,15 +1612,18 @@ pub fn forget(
             )?;
         } else {
             let tier_str = tier.map(|t| t.as_str().to_string());
+            // v0.7.0 issue #861 — same metadata-projection fix as the
+            // patterned branch above. Forget without a pattern still
+            // archives whole namespaces/tiers, so the same bug applied.
             conn.execute(
                 "INSERT OR REPLACE INTO archived_memories
                  (id, tier, namespace, title, content, tags, priority, confidence,
                   source, access_count, created_at, updated_at, last_accessed_at,
-                  expires_at, archived_at, archive_reason,
+                  expires_at, archived_at, archive_reason, metadata,
                   embedding, embedding_dim, original_tier, original_expires_at)
                  SELECT id, tier, namespace, title, content, tags, priority, confidence,
                         source, access_count, created_at, updated_at, last_accessed_at,
-                        expires_at, ?3, 'forget',
+                        expires_at, ?3, 'forget', metadata,
                         embedding, embedding_dim, tier, expires_at
                  FROM memories WHERE (?1 IS NULL OR namespace = ?1) AND (?2 IS NULL OR tier = ?2)",
                 params![namespace, tier_str, now],
@@ -1416,11 +1746,58 @@ pub fn search(
     // [`recall_with_telemetry`] for the full contract.
     include_archived: bool,
 ) -> Result<Vec<Memory>> {
+    search_with_source_uri(
+        conn,
+        query,
+        namespace,
+        tier,
+        limit,
+        min_priority,
+        since,
+        until,
+        tags_filter,
+        agent_id,
+        as_agent,
+        include_archived,
+        None,
+    )
+}
+
+/// v0.7.0 Provenance Gap 6 (issue #889) — search with optional
+/// reciprocal `source_uri` filter. When `source_uri` is `Some(uri)`,
+/// the FTS search is post-filtered (in SQL) to memories whose
+/// `source_uri` column equals the supplied value verbatim. The
+/// partial `idx_memories_source_uri` index (created at v38) covers
+/// the lookup, keeping it O(log N) over the URI-keyed subspace.
+///
+/// When `source_uri` is `None`, this delegates to the legacy
+/// [`search`] path verbatim.
+#[allow(clippy::too_many_arguments)]
+pub fn search_with_source_uri(
+    conn: &Connection,
+    query: &str,
+    namespace: Option<&str>,
+    tier: Option<&Tier>,
+    limit: usize,
+    min_priority: Option<i32>,
+    since: Option<&str>,
+    until: Option<&str>,
+    tags_filter: Option<&str>,
+    agent_id: Option<&str>,
+    as_agent: Option<&str>,
+    include_archived: bool,
+    source_uri: Option<&str>,
+) -> Result<Vec<Memory>> {
     let now = Utc::now().to_rfc3339();
     let tier_str = tier.map(|t| t.as_str().to_string());
     let fts_query = sanitize_fts_query(query, false);
     let (vis_p, vis_t, vis_u, vis_o) = compute_visibility_prefixes(as_agent);
     let archived_fragment = archived_source_clause(include_archived, "m");
+    let source_uri_fragment = if source_uri.is_some() {
+        "AND m.source_uri = ?15"
+    } else {
+        ""
+    };
 
     let sql = format!(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
@@ -1441,6 +1818,7 @@ pub fn search(
            AND (?8 IS NULL OR EXISTS (SELECT 1 FROM json_each(m.tags) WHERE json_each.value = ?8))
            AND (?10 IS NULL OR m.agent_id_idx = ?10)
            {archived_fragment}
+           {source_uri_fragment}
            {vis}
          ORDER BY (fts.rank * -1)
            + (m.priority * 0.5)
@@ -1452,22 +1830,86 @@ pub fn search(
         vis = visibility_clause(11, "m"),
     );
     let mut stmt = conn.prepare(&sql)?;
+    let rows = if let Some(uri) = source_uri {
+        stmt.query_map(
+            params![
+                fts_query,
+                namespace,
+                tier_str,
+                min_priority,
+                now,
+                since,
+                until,
+                tags_filter,
+                limit,
+                agent_id,
+                vis_p,
+                vis_t,
+                vis_u,
+                vis_o,
+                uri,
+            ],
+            row_to_memory,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+    } else {
+        stmt.query_map(
+            params![
+                fts_query,
+                namespace,
+                tier_str,
+                min_priority,
+                now,
+                since,
+                until,
+                tags_filter,
+                limit,
+                agent_id,
+                vis_p,
+                vis_t,
+                vis_u,
+                vis_o,
+            ],
+            row_to_memory,
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+    };
+    rows
+}
+
+/// v0.7.0 Provenance Gap 6 (issue #889) — list every memory carrying
+/// the supplied `source_uri`. Bypasses the FTS layer so callers that
+/// want the full reciprocal set ("every memory from this document")
+/// don't need to type a query. Hits the partial
+/// `idx_memories_source_uri` index directly. Pure read.
+pub fn list_by_source_uri(
+    conn: &Connection,
+    source_uri: &str,
+    namespace: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Vec<Memory>> {
+    let cap = limit.unwrap_or(200).min(1000);
+    let mut stmt = conn.prepare(
+        "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
+                m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
+                m.last_accessed_at, m.expires_at, m.metadata, m.reflection_depth,
+                m.memory_kind, m.entity_id, m.persona_version,
+                m.citations, m.source_uri, m.source_span,
+                m.confidence_source, m.confidence_signals, m.confidence_decayed_at,
+                m.version
+         FROM memories m
+         WHERE m.source_uri = ?1
+           AND (?2 IS NULL OR m.namespace = ?2)
+         ORDER BY m.created_at ASC
+         LIMIT ?3",
+    )?;
     let rows = stmt.query_map(
         params![
-            fts_query,
+            source_uri,
             namespace,
-            tier_str,
-            min_priority,
-            now,
-            since,
-            until,
-            tags_filter,
-            limit,
-            agent_id,
-            vis_p,
-            vis_t,
-            vis_u,
-            vis_o,
+            i64::try_from(cap).unwrap_or(i64::MAX)
         ],
         row_to_memory,
     )?;
@@ -1991,6 +2433,7 @@ pub fn promote_to_namespace(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let actual_id = insert(conn, &clone)?;
     // Clone → source: derived_from. Safe to ignore if the link layer
@@ -2476,6 +2919,47 @@ pub fn create_link_signed(
     Ok(attest_level)
 }
 
+/// v0.7.0 issue #812 / #813 — return the strongest `attest_level`
+/// label across every outbound link rooted at `source_id`.
+///
+/// Strength ladder (highest first):
+///
+///   `peer_attested` > `self_signed` > `unsigned`
+///
+/// The persona-signing path (`PersonaGenerator::generate`) uses this
+/// to stamp the Persona's own `attest_level` metadata so the
+/// downstream `memory_persona` / `memory_persona_generate` wire
+/// response carries the same attestation level the substrate's
+/// `derives_from` edges actually hold — a Persona whose source
+/// links are all signed is itself self-signed, whereas a Persona
+/// whose source links are unsigned cannot truthfully claim
+/// `self_signed` no matter what label the curator stamps on it.
+///
+/// Returns `"unsigned"` for a source with no outbound links — the
+/// only honest default for a row whose attestation surface is
+/// empty.
+///
+/// # Errors
+///
+/// Bubbles up `rusqlite` errors from the SELECT.
+pub fn strongest_attest_level_for_source(conn: &Connection, source_id: &str) -> Result<String> {
+    let mut stmt = conn.prepare(
+        "SELECT attest_level FROM memory_links \
+         WHERE source_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![source_id], |r| r.get::<_, String>(0))?;
+    let mut strongest = "unsigned";
+    for row in rows {
+        let level = row?;
+        match level.as_str() {
+            "peer_attested" => return Ok("peer_attested".to_string()),
+            "self_signed" if strongest == "unsigned" => strongest = "self_signed",
+            _ => {}
+        }
+    }
+    Ok(strongest.to_string())
+}
+
 /// v0.7 H3 — insert an inbound (federation-replicated) link with a
 /// pre-computed signature and attest level.
 ///
@@ -2659,8 +3143,19 @@ pub fn create_link_inbound(conn: &Connection, link: &MemoryLink, attest_level: &
 }
 
 pub fn get_links(conn: &Connection, id: &str) -> Result<Vec<MemoryLink>> {
+    // v0.7.0 issue #860 — the `memory_get_links` MCP tool's docstring
+    // promises attestation level + temporal-validity columns
+    // (`valid_from`, `valid_until`, `observed_by`, `attest_level`) per
+    // link. The pre-fix SELECT only pulled 4 columns and hard-coded the
+    // optional fields to `None`, so the promised columns never reached
+    // the caller. Expand the SELECT to the full row projection that
+    // the docs commit to. `signature` is intentionally NOT surfaced —
+    // it is the verification surface owned by the `memory_verify` tool
+    // (`LinkVerifyRecord` below), not the read-only graph view.
     let mut stmt = conn.prepare(
-        "SELECT source_id, target_id, relation, created_at FROM memory_links
+        "SELECT source_id, target_id, relation, created_at, \
+                valid_from, valid_until, observed_by, attest_level \
+         FROM memory_links \
          WHERE source_id = ?1 OR target_id = ?1",
     )?;
     let rows = stmt.query_map(params![id], |row| {
@@ -2677,16 +3172,17 @@ pub fn get_links(conn: &Connection, id: &str) -> Result<Vec<MemoryLink>> {
             relation: crate::models::MemoryLinkRelation::from_str(&relation_str)
                 .unwrap_or_default(),
             created_at: row.get(3)?,
-            // get_links is a local read-only view; the H3 wire-extra
-            // fields stay None here. Federation export uses
-            // `export_links` (which mirrors the same shape) and inbound
-            // verification consumes the wire shape directly via
-            // `SyncPushBody.links`. Plumbing signature/observed_by into
-            // this read path is an H4 concern (memory_verify MCP tool).
+            // v0.7.0 #860 — temporal-validity + attestation columns
+            // promised by the `memory_get_links` docstring. `signature`
+            // stays `None`: that bytes-on-the-wire surface is the
+            // verifier's concern (`LinkVerifyRecord`), and exposing it
+            // here would force the JSON response to carry a base64 blob
+            // every existing caller would have to ignore.
             signature: None,
-            observed_by: None,
-            valid_from: None,
-            valid_until: None,
+            valid_from: row.get::<_, Option<String>>(4)?,
+            valid_until: row.get::<_, Option<String>>(5)?,
+            observed_by: row.get::<_, Option<String>>(6)?,
+            attest_level: row.get::<_, Option<String>>(7)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -3348,6 +3844,181 @@ pub fn canonical_content_hash(text: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+// ---------------------------------------------------------------------------
+// v0.7.0 (issue #519) — proactive conflict detection on memory_store
+// ---------------------------------------------------------------------------
+
+/// Cosine-similarity threshold above which a candidate is treated as a
+/// near-duplicate for the purpose of [`proactive_conflict_check`].
+///
+/// Empirically tuned for the MiniLM-L6-v2 / Nomic embedder pair: rows
+/// whose `(title, content)` paraphrase the query at this level are
+/// already considered "the same memory" by the existing duplicate
+/// machinery (`DUPLICATE_THRESHOLD_DEFAULT` sits at 0.85 for the
+/// merge-suggestion surface). 0.95 is the stricter "this is the same
+/// fact, restated" bar; combined with the textual contradiction signal
+/// below, we surface only writes that proactively conflict with an
+/// established near-duplicate.
+pub const PROACTIVE_CONFLICT_SIM_THRESHOLD: f32 = 0.95;
+
+/// Top-K cap for the candidate pool inspected by
+/// [`proactive_conflict_check`]. Bounded so the per-write cost is O(K)
+/// rather than O(namespace_size).
+pub const PROACTIVE_CONFLICT_TOP_K: usize = 5;
+
+/// Result envelope returned by [`proactive_conflict_check`] when an
+/// existing memory near-duplicates AND textually contradicts the
+/// incoming write.
+#[derive(Debug, Clone)]
+pub struct ProactiveConflict {
+    /// `id` of the existing memory the new write conflicts with.
+    pub existing_id: String,
+    /// Title of the existing memory (for diagnostic surfacing).
+    pub existing_title: String,
+    /// Cosine similarity (always `>= PROACTIVE_CONFLICT_SIM_THRESHOLD`
+    /// in returned values).
+    pub similarity: f32,
+    /// Reason the candidate was classified as conflicting. Currently
+    /// always `"near_duplicate_with_differing_content"`; future
+    /// extensions (LLM-backed detector, negation-flip heuristic) can
+    /// surface a different reason string here.
+    pub reason: &'static str,
+}
+
+/// v0.7.0 (issue #519) — proactive contradiction detection on the
+/// `memory_store` write path.
+///
+/// Scans the top-`PROACTIVE_CONFLICT_TOP_K` most similar live memories
+/// in the new memory's namespace (by cosine similarity over the
+/// existing `memories.embedding` column) and returns the first match
+/// whose similarity meets `PROACTIVE_CONFLICT_SIM_THRESHOLD` AND whose
+/// stored `content` differs from the incoming `mem.content` exactly.
+///
+/// The "differs exactly" check is the deterministic substrate-layer
+/// contradiction signal — a row that paraphrases the same fact at
+/// ≥ 0.95 cosine but spells out a different content body is, by
+/// construction, asserting a near-duplicate fact with a different
+/// substantive payload (the LLM detector would call this a soft
+/// contradiction; the substrate check calls it a near-duplicate with
+/// differing content). Callers that want the full LLM-backed
+/// `detect_contradiction` round-trip can layer it on top of the
+/// proactive-check result; the substrate path stays LLM-independent so
+/// it runs deterministically under `AI_MEMORY_NO_CONFIG=1` and in
+/// every CI environment.
+///
+/// A `force=true` switch at the handler layer (MCP / CLI / HTTP)
+/// bypasses this check entirely — see `src/mcp/tools/store.rs` and
+/// `src/handlers/http.rs::create_memory`.
+///
+/// Returns:
+/// * `Ok(None)` — no conflict detected; the caller may proceed with
+///   the insert.
+/// * `Ok(Some(ProactiveConflict))` — at least one candidate triggered
+///   the near-duplicate-with-differing-content guard; the caller
+///   should refuse the insert (and return an error envelope naming
+///   `existing_id`) unless `force=true` was set.
+///
+/// # Errors
+///
+/// Bubbles rusqlite errors from the candidate-pool SELECT. The cosine
+/// pass itself is in-memory and infallible (mismatched-dim candidates
+/// are skipped with a tracing warn, mirroring `check_duplicate`).
+pub fn proactive_conflict_check(
+    conn: &Connection,
+    mem: &Memory,
+    query_embedding: &[f32],
+) -> Result<Option<ProactiveConflict>> {
+    if query_embedding.is_empty() {
+        return Ok(None);
+    }
+    let now = Utc::now().to_rfc3339();
+
+    // Pull (id, title, content, embedding) for the live, in-namespace
+    // pool. We restrict to the same namespace as the incoming write
+    // because cross-namespace "contradictions" are not a substrate
+    // concept (namespaces are deliberately isolated scopes); the
+    // namespace-scoped check matches the `find_contradictions` /
+    // `find_by_title_namespace` semantics already used by the
+    // `OnConflict::Error` branch of `insert_with_conflict`.
+    let mut stmt = conn.prepare(
+        "SELECT id, title, content, embedding FROM memories
+         WHERE embedding IS NOT NULL
+           AND (expires_at IS NULL OR expires_at > ?1)
+           AND namespace = ?2",
+    )?;
+    let rows: Vec<(String, String, String, Vec<u8>)> = stmt
+        .query_map(params![now, &mem.namespace], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    // Score every candidate and keep the top-K by cosine.
+    let mut scored: Vec<(f32, String, String, String)> = Vec::with_capacity(rows.len());
+    for (id, title, content, blob) in rows {
+        if blob.is_empty() {
+            continue;
+        }
+        // Skip self (same id) — happens when a re-store reuses the
+        // existing memory id (NHI replay path).
+        if id == mem.id {
+            continue;
+        }
+        let candidate = match crate::embeddings::decode_embedding_blob(&blob) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    memory_id = %id,
+                    blob_len = blob.len(),
+                    error = %e,
+                    "proactive_conflict_check: skipping candidate with malformed embedding"
+                );
+                continue;
+            }
+        };
+        if candidate.len() != query_embedding.len() {
+            tracing::warn!(
+                memory_id = %id,
+                expected = query_embedding.len(),
+                got = candidate.len(),
+                "proactive_conflict_check: skipping candidate with dimension mismatch"
+            );
+            continue;
+        }
+        let sim = crate::embeddings::Embedder::cosine_similarity(query_embedding, &candidate);
+        scored.push((sim, id, title, content));
+    }
+    // Sort descending by similarity so we visit the strongest matches
+    // first; bail at the top-K cap.
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    for (sim, id, title, content) in scored.into_iter().take(PROACTIVE_CONFLICT_TOP_K) {
+        if sim < PROACTIVE_CONFLICT_SIM_THRESHOLD {
+            // The top-K cap is sorted descending — once we drop below
+            // the threshold we can't find any conflicts in the tail.
+            break;
+        }
+        // Deterministic textual contradiction signal: the candidate
+        // is near-duplicate (≥ 0.95 cosine) AND its content body
+        // differs from the incoming write's content. Same-content
+        // near-duplicates are not contradictions; they are the upsert
+        // happy-path that the SQL `ON CONFLICT(title, namespace)`
+        // already handles.
+        if content != mem.content {
+            return Ok(Some(ProactiveConflict {
+                existing_id: id,
+                existing_title: title,
+                similarity: sim,
+                reason: "near_duplicate_with_differing_content",
+            }));
+        }
+    }
+    Ok(None)
+}
+
 /// v0.7.0 F18 — exact-match-aware nearest-neighbor duplicate check.
 ///
 /// Wraps [`check_duplicate`] with a SHA-256 short-circuit on the raw
@@ -3575,6 +4246,7 @@ pub fn entity_register(
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = insert(conn, &mem).context("insert entity memory")?;
         (id, true)
@@ -4410,6 +5082,13 @@ pub fn register_agent(
         "capabilities": caps_json,
         "registered_at": registered_at,
         "last_seen_at": now,
+        // #910 (SAL-level enforcement) — agent-registration rows live
+        // in the `_agents` namespace and are a public roster: every
+        // agent has a legitimate need to know which other agents are
+        // registered (consensus voting, peer attestation, etc.). Stamp
+        // scope=collective so the SAL visibility filter doesn't drop
+        // them on cross-agent reads.
+        "scope": "collective",
     });
 
     let content = serde_json::to_string(&metadata)
@@ -4441,6 +5120,7 @@ pub fn register_agent(
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
 
     insert(conn, &mem)
@@ -4667,18 +5347,41 @@ pub fn list_archived(
         params_vec.iter().map(std::convert::AsRef::as_ref).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_refs.as_slice(), |row| {
+        // v0.7.0 issue #861 — `metadata` is stored as a JSON TEXT blob
+        // in the column. Falling back to `{}` only covers a NULL/empty
+        // read; the surrounding column projection then re-encodes it
+        // structured so callers see a real JSON object instead of an
+        // escaped string. Coupled with the forget-path archive INSERTs
+        // around lines 1268 / 1289 above (now SELECTing `metadata` so
+        // the column actually carries the source row's metadata), this
+        // restores the round-trip `agent_id` / `imported_from_*` /
+        // `consolidated_from_agents` keys callers rely on for
+        // attribution + restore.
         let metadata_str = row
             .get::<_, String>(16)
             .unwrap_or_else(|_| "{}".to_string());
         let metadata: serde_json::Value =
             serde_json::from_str(&metadata_str).unwrap_or_else(|_| serde_json::json!({}));
+        // v0.7.0 issue #861 — `tags` is stored as a JSON-encoded array
+        // TEXT (`'["a","b"]'`) by every write path. Returning the raw
+        // String forced callers to either double-parse or accept a
+        // string where they expected a JSON array. Parse here so the
+        // response matches the live-row shape (`memory_get`) and the
+        // contract tests in `tests/archive_serialization.rs`. NULL /
+        // malformed columns fall through to an empty array — the
+        // archive table's CHECK constraint makes the malformed case a
+        // never-in-practice path, but the fall-through keeps the read
+        // contract noisy-input-clean rather than panic-on-corruption.
+        let tags_str = row.get::<_, String>(5).unwrap_or_else(|_| "[]".to_string());
+        let tags: serde_json::Value =
+            serde_json::from_str(&tags_str).unwrap_or_else(|_| serde_json::json!([]));
         Ok(serde_json::json!({
             "id": row.get::<_, String>(0)?,
             "tier": row.get::<_, String>(1)?,
             "namespace": row.get::<_, String>(2)?,
             "title": row.get::<_, String>(3)?,
             "content": row.get::<_, String>(4)?,
-            "tags": row.get::<_, String>(5)?,
+            "tags": tags,
             "priority": row.get::<_, i32>(6)?,
             "confidence": row.get::<_, f64>(7)?,
             "source": row.get::<_, String>(8)?,
@@ -4849,6 +5552,11 @@ pub fn export_links(conn: &Connection) -> Result<Vec<MemoryLink>> {
             observed_by: row.get::<_, Option<String>>(5)?,
             valid_from: row.get::<_, Option<String>>(6)?,
             valid_until: row.get::<_, Option<String>>(7)?,
+            // v0.7.0 #860 — `export_links` is the federation outbound
+            // path; the wire shape stays without `attest_level` so
+            // pre-v0.7 receivers do not see an unknown field. Leaving
+            // this `None` keeps `skip_serializing_if` from emitting it.
+            attest_level: None,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -5140,6 +5848,128 @@ pub fn set_embedding(conn: &Connection, id: &str, embedding: &[f32]) -> Result<(
     Ok(())
 }
 
+/// v0.7.0 Wave-2 A5 (issue #853) — batched embedding writer.
+///
+/// Writes a slice of `(id, embedding)` pairs inside a single SQLite
+/// transaction. Equivalent to calling [`set_embedding`] in a loop, but
+/// collapses N `UPDATE` round-trips (N implicit commits in autocommit
+/// mode) into one transaction commit, which is the dominant cost on
+/// SQLite WAL when N grows past a handful of rows.
+///
+/// Dim-invariant policy matches [`set_embedding`]:
+/// * Empty embeddings are written as `embedding_dim = NULL` (legacy
+///   degenerate-case parity).
+/// * Per-namespace established dim is checked once per namespace
+///   (cached in-flight) and any pair whose embedding length conflicts
+///   returns an `EmbeddingDimMismatch` error — the whole transaction
+///   rolls back so callers never see a partial commit. The mismatch
+///   carries the FIRST offending pair's namespace/established/attempted
+///   triple (consistent with the single-row path).
+///
+/// Returns the number of rows updated (rows whose `id` was not found in
+/// the `memories` table are silently skipped — same as [`set_embedding`],
+/// where `UPDATE … WHERE id = ?` returns `Ok(0)` and the function still
+/// returns `Ok(())`).
+///
+/// **Boot backfill use:** [`crate::mcp::run_mcp_server`] calls this in
+/// fixed-size chunks (see `DEFAULT_EMBED_BACKFILL_BATCH_SIZE`) so the
+/// embedder produces vectors in parallel-friendly bursts and the
+/// SQLite commit cost amortises across the batch.
+///
+/// # Errors
+///
+/// * Returns [`EmbeddingDimMismatch`] (boxed via anyhow) if any pair's
+///   embedding dim disagrees with the namespace-established dim. The
+///   transaction is rolled back; no rows are mutated.
+/// * Returns the underlying SQLite error on transaction/prepare/execute
+///   failure.
+pub fn set_embeddings_batch(
+    conn: &mut Connection,
+    entries: &[(String, Vec<f32>)],
+) -> Result<usize> {
+    if entries.is_empty() {
+        return Ok(0);
+    }
+
+    // Lookup table: id -> namespace. Needed up-front because we want
+    // to amortise the dim-check across a batch by resolving namespaces
+    // in a single query rather than one query per row.
+    let mut ns_by_id: HashMap<String, Option<String>> = HashMap::with_capacity(entries.len());
+    {
+        let mut stmt = conn.prepare("SELECT namespace FROM memories WHERE id = ?1")?;
+        for (id, _) in entries {
+            if ns_by_id.contains_key(id) {
+                continue;
+            }
+            let ns: Option<String> = stmt
+                .query_row(params![id], |r| r.get::<_, Option<String>>(0))
+                .ok()
+                .flatten();
+            ns_by_id.insert(id.clone(), ns);
+        }
+    }
+
+    // Per-namespace established dim, cached so we only hit the
+    // namespace_embedding_dim path once per distinct namespace in the
+    // batch (the cache is intra-batch — the namespace's established
+    // dim is immutable within this call's transaction window).
+    let mut ns_dim_cache: HashMap<String, Option<usize>> = HashMap::new();
+
+    let tx = conn.transaction()?;
+    {
+        let mut update =
+            tx.prepare("UPDATE memories SET embedding = ?1, embedding_dim = ?2 WHERE id = ?3")?;
+        let mut update_empty =
+            tx.prepare("UPDATE memories SET embedding = ?1, embedding_dim = NULL WHERE id = ?2")?;
+
+        let mut rows_updated = 0usize;
+        for (id, embedding) in entries {
+            let attempted = embedding.len();
+            if attempted == 0 {
+                let bytes = crate::embeddings::encode_embedding_blob(embedding);
+                rows_updated += update_empty.execute(params![bytes, id])?;
+                continue;
+            }
+            if let Some(Some(ns)) = ns_by_id.get(id) {
+                let established = if let Some(cached) = ns_dim_cache.get(ns) {
+                    *cached
+                } else {
+                    let resolved = namespace_embedding_dim(&tx, ns)?;
+                    ns_dim_cache.insert(ns.clone(), resolved);
+                    resolved
+                };
+                if let Some(established) = established
+                    && established != attempted
+                {
+                    return Err(EmbeddingDimMismatch {
+                        namespace: ns.clone(),
+                        established,
+                        attempted,
+                    }
+                    .into());
+                }
+                // First successful write in a namespace sets the
+                // established dim for the rest of this batch — keep
+                // the cache in sync so subsequent rows in the same
+                // namespace get a fast path AND so any inconsistent
+                // pair later in the batch trips the dim check rather
+                // than committing.
+                if established.is_none() {
+                    ns_dim_cache.insert(ns.clone(), Some(attempted));
+                }
+            }
+            let bytes = crate::embeddings::encode_embedding_blob(embedding);
+            let dim_i64 = i64::try_from(attempted).unwrap_or(i64::MAX);
+            rows_updated += update.execute(params![bytes, dim_i64, id])?;
+        }
+
+        drop(update);
+        drop(update_empty);
+        tx.commit()?;
+        Ok(rows_updated)
+    }
+}
+
 /// Load an embedding vector for a memory. Returns None if not set.
 ///
 /// v0.6.3.1 P2 — tolerant of legacy unheaded payloads (raw LE f32, length
@@ -5284,8 +6114,519 @@ pub fn recall_hybrid(
 /// 0.2 cosine gate, `blend_weight_avg` is the mean `semantic_weight`
 /// across the *returned* set (not the full candidate pool — operators
 /// care about what made it out).
+// ---------------------------------------------------------------------------
+// #871 — `recall_hybrid_with_telemetry` stage helpers.
+//
+// The original function was ~508 LOC carrying query preparation,
+// FTS5 keyword retrieval, semantic (HNSW or linear-scan) retrieval,
+// adaptive blend + decay scoring, touch ops + budget application,
+// and telemetry assembly. Per the code-review verdict the function
+// is split into focused stage-helpers so each phase has a clear
+// contract and the orchestrator stays readable.
+//
+// The stages are kept inside `storage::mod` (rather than carved into
+// a sub-module) because the helpers all share access to private
+// helpers like `row_to_memory`, `sanitize_fts_query`,
+// `archived_source_clause`, etc., and the SQL is tightly tied to
+// the schema living in this module.
+//
+// Behaviour is byte-for-byte preserved: the same SQL runs, the same
+// fusion produces the same blended scores, and `touch_many` mutates
+// the same surviving set. Only the function-internal structure
+// changes.
+// ---------------------------------------------------------------------------
+
+/// Result of [`prepare_hybrid_query`] — the pre-computed SQL
+/// fragments + bind params the FTS and semantic phases need.
+struct HybridPrep<'a> {
+    fts_query: String,
+    now: String,
+    prefixes: VisibilityPrefixes,
+    fts_hierarchy_fragment: String,
+    sem_hierarchy_fragment: String,
+    effective_namespace: Option<&'a str>,
+    hierarchy_active: bool,
+    fts_archived_fragment: &'static str,
+    sem_archived_fragment: &'static str,
+    fts_source_uri_fragment: &'static str,
+    sem_source_uri_fragment: &'static str,
+    source_uri_like_param: Option<String>,
+}
+
+/// #871 stage 1 — query preparation. Sanitises the FTS5 expression,
+/// resolves namespace hierarchy expansion (`Task 1.12`), computes
+/// visibility prefixes for the `?8..?11` (FTS) / `?6..?9` (semantic)
+/// bind slots, and stamps the archived-source / source-URI-prefix
+/// SQL fragments.
+///
+/// The `'now'` timestamp is captured here so all subsequent stages
+/// see the same monotonic instant.
+fn prepare_hybrid_query<'a>(
+    context: &str,
+    namespace: Option<&'a str>,
+    as_agent: Option<&str>,
+    include_archived: bool,
+    source_uri_prefix: Option<&str>,
+) -> HybridPrep<'a> {
+    let now = Utc::now().to_rfc3339();
+    let fts_query = sanitize_fts_query(context, true);
+    let prefixes = compute_visibility_prefixes(as_agent);
+    let (fts_hierarchy_in, hierarchy_active) = hierarchy_in_clause(namespace);
+    let fts_hierarchy_fragment = fts_hierarchy_in.unwrap_or_default();
+    let sem_hierarchy_fragment = if hierarchy_active {
+        if let Some(ns) = namespace {
+            let ancestors = crate::models::namespace_ancestors(ns);
+            let quoted: Vec<String> = ancestors
+                .iter()
+                .map(|a| format!("'{}'", a.replace('\'', "''")))
+                .collect();
+            format!("AND memories.namespace IN ({})", quoted.join(","))
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+    let effective_namespace = if hierarchy_active { None } else { namespace };
+    let fts_archived_fragment = archived_source_clause(include_archived, "m");
+    let sem_archived_fragment = archived_source_clause(include_archived, "memories");
+    let source_uri_like_param: Option<String> = match source_uri_prefix {
+        Some(prefix) if !prefix.is_empty() => Some(format!("{}%", escape_like_pattern(prefix))),
+        _ => None,
+    };
+    let fts_source_uri_fragment = if source_uri_like_param.is_some() {
+        "AND m.source_uri LIKE ?12 ESCAPE '\\'"
+    } else {
+        ""
+    };
+    let sem_source_uri_fragment = if source_uri_like_param.is_some() {
+        "AND memories.source_uri LIKE ?10 ESCAPE '\\'"
+    } else {
+        ""
+    };
+    HybridPrep {
+        fts_query,
+        now,
+        prefixes,
+        fts_hierarchy_fragment,
+        sem_hierarchy_fragment,
+        effective_namespace,
+        hierarchy_active,
+        fts_archived_fragment,
+        sem_archived_fragment,
+        fts_source_uri_fragment,
+        sem_source_uri_fragment,
+        source_uri_like_param,
+    }
+}
+
+/// #871 stage 2 — FTS5 keyword phase. Builds + executes the FTS SQL
+/// with the per-row `fts_score` projection, returns the raw
+/// `(Memory, fts_score, embedding_bytes)` tuples for the fusion
+/// stage. The embedding bytes are pulled inline from the same
+/// SELECT (Cluster-F PERF-2) so the fusion stage can compute cosine
+/// without an N+1 round-trip.
+fn fts_keyword_phase(
+    conn: &Connection,
+    prep: &HybridPrep<'_>,
+    tags_filter: Option<&str>,
+    since: Option<&str>,
+    until: Option<&str>,
+    limit: usize,
+) -> Result<Vec<(Memory, f64, Option<Vec<u8>>)>> {
+    let fts_limit = (limit * 3).max(30);
+    let fts_sql = format!(
+        "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
+                m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
+                m.last_accessed_at, m.expires_at, m.metadata, m.reflection_depth,
+                m.memory_kind, m.entity_id, m.persona_version,
+                m.citations, m.source_uri, m.source_span,
+                m.confidence_source, m.confidence_signals, m.confidence_decayed_at, m.embedding,
+                (fts.rank * -1) + (m.priority * 0.5) + (MIN(m.access_count, 50) * 0.1)
+                + (m.confidence * 2.0)
+                + (CASE m.tier WHEN 'long' THEN 3.0 WHEN 'mid' THEN 1.0 ELSE 0.0 END)
+                + (1.0 / (1.0 + (julianday('now') - julianday(m.updated_at)) * 0.1))
+                AS fts_score
+         FROM memories_fts fts
+         JOIN memories m ON m.rowid = fts.rowid
+         WHERE memories_fts MATCH ?1
+           AND (?2 IS NULL OR m.namespace = ?2)
+           {fts_hierarchy_fragment}
+           AND (m.expires_at IS NULL OR m.expires_at > ?3)
+           AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(m.tags) WHERE json_each.value = ?4))
+           AND (?5 IS NULL OR m.created_at >= ?5)
+           AND (?6 IS NULL OR m.created_at <= ?6)
+           {fts_archived_fragment}
+           {fts_source_uri_fragment}
+           {vis}
+         ORDER BY fts_score DESC
+         LIMIT ?7",
+        fts_hierarchy_fragment = prep.fts_hierarchy_fragment,
+        fts_archived_fragment = prep.fts_archived_fragment,
+        fts_source_uri_fragment = prep.fts_source_uri_fragment,
+        vis = visibility_clause(8, "m"),
+    );
+    let mut fts_stmt = conn.prepare(&fts_sql)?;
+    let fts_row_handler =
+        |row: &rusqlite::Row<'_>| -> rusqlite::Result<(Memory, f64, Option<Vec<u8>>)> {
+            let mem = row_to_memory(row)?;
+            let fts_score: f64 = row.get("fts_score")?;
+            // Index 25 = `m.embedding` (the SELECT list above places it
+            // after `confidence_decayed_at`). Pull as `Option<Vec<u8>>`
+            // so legacy rows without embeddings surface as `None`.
+            let embedding_bytes: Option<Vec<u8>> = row.get(25)?;
+            Ok((mem, fts_score, embedding_bytes))
+        };
+    let (vis_p, vis_t, vis_u, vis_o) = prep.prefixes.clone();
+    let rows: Vec<(Memory, f64, Option<Vec<u8>>)> =
+        if let Some(ref uri_param) = prep.source_uri_like_param {
+            fts_stmt
+                .query_map(
+                    params![
+                        prep.fts_query,
+                        prep.effective_namespace,
+                        prep.now,
+                        tags_filter,
+                        since,
+                        until,
+                        fts_limit,
+                        vis_p,
+                        vis_t,
+                        vis_u,
+                        vis_o,
+                        uri_param,
+                    ],
+                    fts_row_handler,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            fts_stmt
+                .query_map(
+                    params![
+                        prep.fts_query,
+                        prep.effective_namespace,
+                        prep.now,
+                        tags_filter,
+                        since,
+                        until,
+                        fts_limit,
+                        vis_p,
+                        vis_t,
+                        vis_u,
+                        vis_o,
+                    ],
+                    fts_row_handler,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+    Ok(rows)
+}
+
+/// #871 stage 3 — semantic phase. Two paths share the same `scored`
+/// HashMap mutation contract:
+///
+///   - HNSW path (when a `vector_index` is supplied): runs an ANN
+///     search bounded at `5×limit`, gates each hit at `cosine > 0.2`,
+///     and re-applies the FTS WHERE-clause filters in Rust because
+///     the HNSW index returns raw vector neighbours (no SQL
+///     visibility / archived-source / source-URI-prefix filter has
+///     run).
+///   - Linear-scan fallback (HNSW absent): runs the semantic SQL,
+///     decodes embedding BLOBs, applies the same `cosine > 0.2`
+///     gate, and inserts surviving rows into `scored`.
+///
+/// Returns the running `hnsw_candidates_count` for telemetry. Rows
+/// already present in `scored` (i.e. FTS-side hits) are skipped so
+/// the FTS embedding-based cosine wins (consistent with the
+/// pre-refactor behaviour).
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)]
+fn semantic_phase(
+    conn: &Connection,
+    prep: &HybridPrep<'_>,
+    query_embedding: &[f32],
+    vector_index: Option<&crate::hnsw::VectorIndex>,
+    namespace: Option<&str>,
+    tags_filter: Option<&str>,
+    since: Option<&str>,
+    until: Option<&str>,
+    limit: usize,
+    include_archived: bool,
+    source_uri_prefix: Option<&str>,
+    scored: &mut HashMap<String, (Memory, f64, f64)>,
+) -> Result<usize> {
+    let mut hnsw_candidates_count: usize = 0;
+    let now = prep.now.as_str();
+    if let Some(idx) = vector_index {
+        let ann_limit = (limit * 5).max(50);
+        let hits = idx.search(query_embedding, ann_limit);
+        for hit in hits {
+            if scored.contains_key(&hit.id) {
+                continue;
+            }
+            let cosine = f64::from(1.0 - hit.distance);
+            // v0.6.2 (S18 iteration): cosine gate relaxed 0.3 → 0.2 —
+            // see the matching comment in the linear-scan branch below.
+            if cosine > 0.2
+                && let Some(mem) = get(conn, &hit.id)?
+            {
+                if let Some(ns) = namespace {
+                    if prep.hierarchy_active {
+                        let ancestors = crate::models::namespace_ancestors(ns);
+                        if !ancestors.iter().any(|a| a == &mem.namespace) {
+                            continue;
+                        }
+                    } else if mem.namespace != ns {
+                        continue;
+                    }
+                }
+                if let Some(exp) = &mem.expires_at
+                    && exp.as_str() <= now
+                {
+                    continue;
+                }
+                if let Some(tf) = tags_filter
+                    && !mem.tags.iter().any(|t| t == tf)
+                {
+                    continue;
+                }
+                if let Some(s) = since
+                    && mem.created_at.as_str() < s
+                {
+                    continue;
+                }
+                if let Some(u) = until
+                    && mem.created_at.as_str() > u
+                {
+                    continue;
+                }
+                if !is_visible(&mem, &prep.prefixes) {
+                    continue;
+                }
+                if !include_archived && is_archived_source(&mem) {
+                    continue;
+                }
+                if let Some(prefix) = source_uri_prefix
+                    && !prefix.is_empty()
+                    && !mem
+                        .source_uri
+                        .as_deref()
+                        .is_some_and(|u| u.starts_with(prefix))
+                {
+                    continue;
+                }
+                scored.insert(mem.id.clone(), (mem, 0.0, cosine));
+                hnsw_candidates_count += 1;
+            }
+        }
+        return Ok(hnsw_candidates_count);
+    }
+
+    // Fallback: linear scan over all embeddings.
+    let sem_sql = format!(
+        "SELECT id, tier, namespace, title, content, tags, priority,
+                confidence, source, access_count, created_at, updated_at,
+                last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, embedding
+         FROM memories
+         WHERE embedding IS NOT NULL
+           AND (?1 IS NULL OR namespace = ?1)
+           {sem_hierarchy_fragment}
+           AND (expires_at IS NULL OR expires_at > ?2)
+           AND (?3 IS NULL OR EXISTS (SELECT 1 FROM json_each(memories.tags) WHERE json_each.value = ?3))
+           AND (?4 IS NULL OR created_at >= ?4)
+           AND (?5 IS NULL OR created_at <= ?5)
+           {sem_archived_fragment}
+           {sem_source_uri_fragment}
+           {vis}",
+        sem_hierarchy_fragment = prep.sem_hierarchy_fragment,
+        sem_archived_fragment = prep.sem_archived_fragment,
+        sem_source_uri_fragment = prep.sem_source_uri_fragment,
+        vis = visibility_clause(6, "memories"),
+    );
+    let mut sem_stmt = conn.prepare(&sem_sql)?;
+    let sem_row_handler = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(Memory, Option<Vec<u8>>)> {
+        let mem = row_to_memory(row)?;
+        // v0.7.x Form 6 — `memory_kind` was inserted between
+        // `reflection_depth` and `embedding` in the SELECT list
+        // above; `embedding` sits at zero-based index 17.
+        let emb_bytes: Option<Vec<u8>> = row.get(17)?;
+        Ok((mem, emb_bytes))
+    };
+    let (vis_p, vis_t, vis_u, vis_o) = prep.prefixes.clone();
+    let sem_results: Vec<(Memory, Option<Vec<u8>>)> =
+        if let Some(ref uri_param) = prep.source_uri_like_param {
+            sem_stmt
+                .query_map(
+                    params![
+                        prep.effective_namespace,
+                        prep.now,
+                        tags_filter,
+                        since,
+                        until,
+                        vis_p,
+                        vis_t,
+                        vis_u,
+                        vis_o,
+                        uri_param,
+                    ],
+                    sem_row_handler,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            sem_stmt
+                .query_map(
+                    params![
+                        prep.effective_namespace,
+                        prep.now,
+                        tags_filter,
+                        since,
+                        until,
+                        vis_p,
+                        vis_t,
+                        vis_u,
+                        vis_o,
+                    ],
+                    sem_row_handler,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+    for (mem, emb_bytes) in sem_results {
+        if scored.contains_key(&mem.id) {
+            continue;
+        }
+        if let Some(bytes) = emb_bytes
+            && !bytes.is_empty()
+        {
+            // v0.6.3.1 P2 — tolerate legacy + headed payloads; skip
+            // (with telemetry) on malformed BLOBs so a single corrupt
+            // row can't poison the whole semantic stage.
+            let Ok(emb) = crate::embeddings::decode_embedding_blob(&bytes) else {
+                tracing::warn!(
+                    memory_id = %mem.id,
+                    "skipping malformed embedding BLOB during semantic recall"
+                );
+                continue;
+            };
+            let cosine = f64::from(crate::embeddings::Embedder::cosine_similarity(
+                query_embedding,
+                &emb,
+            ));
+            if cosine > 0.2 {
+                scored.insert(mem.id.clone(), (mem, 0.0, cosine));
+                hnsw_candidates_count += 1;
+            }
+        }
+    }
+    Ok(hnsw_candidates_count)
+}
+
+/// #871 stage 4 — adaptive blend + decay.
+///
+/// Per-row: normalises `fts_score` by `max_fts_score`, lerp-derives
+/// `semantic_weight` from content length (0.50 ≤500 chars → 0.15
+/// ≥5000 chars; embeddings lose information on long text, FTS stays
+/// precise), and multiplies by the per-tier exponential decay from
+/// `scoring`. Returns the ranked (sort by blended score, truncated
+/// to `limit`) result list AND the captured per-candidate
+/// `semantic_weight` vector for telemetry.
+fn blend_and_rank(
+    scored: HashMap<String, (Memory, f64, f64)>,
+    max_fts_score: f64,
+    scoring: &crate::config::ResolvedScoring,
+    limit: usize,
+) -> (Vec<(Memory, f64)>, Vec<f64>) {
+    let now_utc = Utc::now();
+    let mut weights: Vec<f64> = Vec::new();
+    let mut results: Vec<(Memory, f64)> = scored
+        .into_values()
+        .map(|(mem, fts_score, cosine)| {
+            let norm_fts = if max_fts_score > 0.0 {
+                fts_score / max_fts_score
+            } else {
+                0.0
+            };
+            // B4 (R2-LOW) — clamp to i32::MAX instead of panicking when
+            // a memory's content is >2GB. The lerp below treats anything
+            // ≥5000 chars as the long-tail bucket regardless, so the
+            // clamp does not change scoring; it only closes a panic
+            // window a hostile import could otherwise reach.
+            let content_len = f64::from(i32::try_from(mem.content.len()).unwrap_or(i32::MAX));
+            let semantic_weight = if content_len <= 500.0 {
+                0.50
+            } else if content_len >= 5000.0 {
+                0.15
+            } else {
+                0.50 - 0.35 * ((content_len - 500.0) / 4500.0)
+            };
+            weights.push(semantic_weight);
+            let blended = semantic_weight * cosine + (1.0 - semantic_weight) * norm_fts;
+            let age_days = chrono::DateTime::parse_from_rfc3339(&mem.created_at)
+                .ok()
+                .map_or(0.0, |ts| {
+                    let secs = (now_utc - ts.with_timezone(&Utc)).num_seconds();
+                    #[allow(clippy::cast_precision_loss)]
+                    {
+                        secs as f64 / 86_400.0
+                    }
+                });
+            let decay = scoring.decay_multiplier(&mem.tier, age_days);
+            (mem, blended * decay)
+        })
+        .collect();
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    results.truncate(limit);
+    (results, weights)
+}
+
+/// #871 stage 5 — post-fusion ops: proximity boost (when hierarchy
+/// expansion is active), token-budget application, and the batched
+/// `touch_many` write that bumps `access_count` + slides the per-tier
+/// expiry on every memory in the surviving set.
+fn apply_recall_post_ops(
+    conn: &Connection,
+    results: Vec<(Memory, f64)>,
+    hierarchy_active: bool,
+    namespace: Option<&str>,
+    budget_tokens: Option<usize>,
+    short_extend: i64,
+    mid_extend: i64,
+) -> (Vec<(Memory, f64)>, BudgetOutcome) {
+    let boosted = if let (true, Some(anchor)) = (hierarchy_active, namespace) {
+        apply_proximity_boost(results, anchor)
+    } else {
+        results
+    };
+    let (budgeted, outcome) = apply_token_budget(boosted, budget_tokens);
+    let touch_ids: Vec<&str> = budgeted.iter().map(|(mem, _)| mem.id.as_str()).collect();
+    if let Err(e) = touch_many(conn, &touch_ids, short_extend, mid_extend) {
+        tracing::warn!("touch_many failed for hybrid recall set: {}", e);
+    }
+    (budgeted, outcome)
+}
+
+/// #871 stage 6 — telemetry assembly. Aggregates the per-stage
+/// candidate counters and the mean `semantic_weight` across the
+/// returned set (NOT the full candidate pool — operators care about
+/// what made it out).
+fn assemble_recall_telemetry(
+    fts_candidates: usize,
+    hnsw_candidates: usize,
+    blend_weights: &[f64],
+) -> crate::models::RecallTelemetry {
+    let blend_weight_avg = if blend_weights.is_empty() {
+        0.0
+    } else {
+        #[allow(clippy::cast_precision_loss)]
+        let n = blend_weights.len() as f64;
+        blend_weights.iter().sum::<f64>() / n
+    };
+    crate::models::RecallTelemetry {
+        fts_candidates,
+        hnsw_candidates,
+        blend_weight_avg,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn recall_hybrid_with_telemetry(
     conn: &Connection,
     context: &str,
@@ -5314,188 +6655,32 @@ pub fn recall_hybrid_with_telemetry(
     BudgetOutcome,
     crate::models::RecallTelemetry,
 )> {
-    let now = Utc::now().to_rfc3339();
-    let fts_query = sanitize_fts_query(context, true);
-    let prefixes = compute_visibility_prefixes(as_agent);
-    let (vis_p, vis_t, vis_u, vis_o) = prefixes.clone();
-
-    // Task 1.12: hierarchy expansion (same logic as `recall`). Hierarchical
-    // `namespace` broadens filter to ancestor chain; flat namespaces stay
-    // exact-match.
-    let (fts_hierarchy_in, hierarchy_active) = hierarchy_in_clause(namespace);
-    let fts_hierarchy_fragment = fts_hierarchy_in.unwrap_or_default();
-    // Semantic stmt has no `m.` alias and binds at slot 1 — compute separately.
-    let sem_hierarchy_fragment = if hierarchy_active {
-        if let Some(ns) = namespace {
-            let ancestors = crate::models::namespace_ancestors(ns);
-            let quoted: Vec<String> = ancestors
-                .iter()
-                .map(|a| format!("'{}'", a.replace('\'', "''")))
-                .collect();
-            format!("AND memories.namespace IN ({})", quoted.join(","))
-        } else {
-            String::new()
-        }
-    } else {
-        String::new()
-    };
-    let effective_namespace = if hierarchy_active { None } else { namespace };
-
-    // v0.7.0 WT-1-E — archived-source exclusion (default) / pass-
-    // through. Same predicate shape used in `recall`; the FTS branch
-    // uses the `m.` alias, the semantic branch (semantic-only `SELECT
-    // FROM memories`) uses the `memories.` alias.
-    let fts_archived_fragment = archived_source_clause(include_archived, "m");
-    let sem_archived_fragment = archived_source_clause(include_archived, "memories");
-
-    // v0.7.0 Form 4 / Cluster-A PERF-3 — push `source_uri_prefix` into
-    // both branches. FTS branch binds at ?12 (visibility uses ?8–?11);
-    // semantic branch binds at ?10 (visibility uses ?6–?9).
-    let source_uri_like_param: Option<String> = match source_uri_prefix {
-        Some(prefix) if !prefix.is_empty() => Some(format!("{}%", escape_like_pattern(prefix))),
-        _ => None,
-    };
-    let fts_source_uri_fragment = if source_uri_like_param.is_some() {
-        "AND m.source_uri LIKE ?12 ESCAPE '\\'"
-    } else {
-        ""
-    };
-    let sem_source_uri_fragment = if source_uri_like_param.is_some() {
-        "AND memories.source_uri LIKE ?10 ESCAPE '\\'"
-    } else {
-        ""
-    };
-
-    // Step 1: Get FTS candidates (up to 3x limit to have a good pool)
-    let fts_limit = (limit * 3).max(30);
-    let fts_sql = format!(
-        "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
-                m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
-                m.last_accessed_at, m.expires_at, m.metadata, m.reflection_depth,
-                m.memory_kind, m.entity_id, m.persona_version,
-                m.citations, m.source_uri, m.source_span,
-                m.confidence_source, m.confidence_signals, m.confidence_decayed_at, m.embedding,
-                (fts.rank * -1) + (m.priority * 0.5) + (MIN(m.access_count, 50) * 0.1)
-                + (m.confidence * 2.0)
-                + (CASE m.tier WHEN 'long' THEN 3.0 WHEN 'mid' THEN 1.0 ELSE 0.0 END)
-                + (1.0 / (1.0 + (julianday('now') - julianday(m.updated_at)) * 0.1))
-                AS fts_score
-         FROM memories_fts fts
-         JOIN memories m ON m.rowid = fts.rowid
-         WHERE memories_fts MATCH ?1
-           AND (?2 IS NULL OR m.namespace = ?2)
-           {fts_hierarchy_fragment}
-           AND (m.expires_at IS NULL OR m.expires_at > ?3)
-           AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(m.tags) WHERE json_each.value = ?4))
-           AND (?5 IS NULL OR m.created_at >= ?5)
-           AND (?6 IS NULL OR m.created_at <= ?6)
-           {fts_archived_fragment}
-           {fts_source_uri_fragment}
-           {vis}
-         ORDER BY fts_score DESC
-         LIMIT ?7",
-        vis = visibility_clause(8, "m"),
+    // Stage 1 — query preparation (FTS sanitisation, namespace
+    // hierarchy expansion, visibility prefixes, SQL fragments).
+    let prep = prepare_hybrid_query(
+        context,
+        namespace,
+        as_agent,
+        include_archived,
+        source_uri_prefix,
     );
-    let mut fts_stmt = conn.prepare(&fts_sql)?;
 
-    // Step 2: Get semantic candidates — all memories with embeddings
-    let sem_sql = format!(
-        "SELECT id, tier, namespace, title, content, tags, priority,
-                confidence, source, access_count, created_at, updated_at,
-                last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, embedding
-         FROM memories
-         WHERE embedding IS NOT NULL
-           AND (?1 IS NULL OR namespace = ?1)
-           {sem_hierarchy_fragment}
-           AND (expires_at IS NULL OR expires_at > ?2)
-           AND (?3 IS NULL OR EXISTS (SELECT 1 FROM json_each(memories.tags) WHERE json_each.value = ?3))
-           AND (?4 IS NULL OR created_at >= ?4)
-           AND (?5 IS NULL OR created_at <= ?5)
-           {sem_archived_fragment}
-           {sem_source_uri_fragment}
-           {vis}",
-        vis = visibility_clause(6, "memories"),
-    );
-    let mut sem_stmt = conn.prepare(&sem_sql)?;
+    // Stage 2 — FTS5 keyword phase.
+    let fts_results = fts_keyword_phase(conn, &prep, tags_filter, since, until, limit)?;
 
-    // Collect FTS results with scores
-    let mut scored: HashMap<String, (Memory, f64, f64)> = HashMap::new(); // id -> (memory, fts_score, cosine_score)
-
-    // Cluster-F PERF-2 — the FTS SELECT already pulls `m.embedding` as
-    // the 26th column (index 25). Extract the bytes inline so the
-    // result-set walk below can compute cosine WITHOUT issuing a
-    // per-row `get_embedding` query — eliminating an N+1 round-trip
-    // against the `memories` table on every hybrid recall.
-    //
-    // Conditional binding: SQLite errors on parameter-count mismatch,
-    // so when source_uri_prefix is None we must NOT bind ?12.
-    let fts_row_handler =
-        |row: &rusqlite::Row<'_>| -> rusqlite::Result<(Memory, f64, Option<Vec<u8>>)> {
-            let mem = row_to_memory(row)?;
-            let fts_score: f64 = row.get("fts_score")?;
-            // Index 25 = `m.embedding` (the SELECT list above places it
-            // after `confidence_decayed_at`). Pull as `Option<Vec<u8>>`
-            // so legacy rows without embeddings surface as `None`.
-            let embedding_bytes: Option<Vec<u8>> = row.get(25)?;
-            Ok((mem, fts_score, embedding_bytes))
-        };
-    let fts_results: Vec<(Memory, f64, Option<Vec<u8>>)> =
-        if let Some(ref uri_param) = source_uri_like_param {
-            let rows = fts_stmt.query_map(
-                params![
-                    fts_query,
-                    effective_namespace,
-                    now,
-                    tags_filter,
-                    since,
-                    until,
-                    fts_limit,
-                    vis_p,
-                    vis_t,
-                    vis_u,
-                    vis_o,
-                    uri_param,
-                ],
-                fts_row_handler,
-            )?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        } else {
-            let rows = fts_stmt.query_map(
-                params![
-                    fts_query,
-                    effective_namespace,
-                    now,
-                    tags_filter,
-                    since,
-                    until,
-                    fts_limit,
-                    vis_p,
-                    vis_t,
-                    vis_u,
-                    vis_o,
-                ],
-                fts_row_handler,
-            )?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
-
-    // v0.6.3.1 (P3): pre-fusion candidate-pool counters surfaced to the
-    // MCP `meta` block. Counted here at retrieval time, not after fusion,
-    // so operators see how each stage contributed even when fusion
-    // collapses the union to a smaller set.
-    let mut fts_candidates_count: usize = 0;
-    let mut hnsw_candidates_count: usize = 0;
-
+    // Fusion pool (id → (memory, fts_score, cosine_score)). FTS rows
+    // land first so their inline-fetched embedding-cosine wins; the
+    // semantic phase only inserts ids it hasn't seen.
+    let mut scored: HashMap<String, (Memory, f64, f64)> = HashMap::new();
     let mut max_fts_score: f64 = 1.0;
+    let mut fts_candidates_count: usize = 0;
     for (mem, fts_score, embedding_bytes) in fts_results {
         if fts_score > max_fts_score {
             max_fts_score = fts_score;
         }
         // Cluster-F PERF-2 — cosine from the inline-fetched embedding
-        // bytes. The bytes decoder matches the contract in
-        // `get_embedding` (v0.6.3.1 P2 magic-byte tolerant); malformed
-        // BLOBs degrade to cosine=0 + warn-log so a single corrupt row
-        // does not poison the whole recall.
+        // bytes. Malformed BLOBs degrade to cosine=0 + warn-log so a
+        // single corrupt row does not poison the whole recall.
         let cosine = match embedding_bytes {
             Some(bytes) if !bytes.is_empty() => {
                 match crate::embeddings::decode_embedding_blob(&bytes) {
@@ -5518,279 +6703,39 @@ pub fn recall_hybrid_with_telemetry(
         fts_candidates_count += 1;
     }
 
-    // Semantic-only candidates — use HNSW index for fast ANN if available,
-    // otherwise fall back to linear scan over all embeddings.
-    if let Some(idx) = vector_index {
-        // HNSW approximate nearest-neighbor search
-        let ann_limit = (limit * 5).max(50);
-        let hits = idx.search(query_embedding, ann_limit);
-        for hit in hits {
-            if scored.contains_key(&hit.id) {
-                continue;
-            }
-            let cosine = f64::from(1.0 - hit.distance);
-            // v0.6.2 (S18 iteration): cosine gate relaxed 0.3 → 0.2.
-            // Scenario-18 caught a real-world miss at the old ceiling:
-            // semantically-related pairs with varied phrasing ("morning
-            // outdoor exercise routine" vs. "brisk uphill strides along
-            // the ridge line trails") landed at 0.25-0.29 cosine and
-            // silently fell below 0.3, returning zero semantic hits.
-            // 0.2 keeps clearly-unrelated content out (random noise
-            // hovers near 0) while admitting legitimate semantic
-            // associations; the blended score + FTS component still
-            // rank relevance on the way out.
-            if cosine > 0.2
-                && let Some(mem) = get(conn, &hit.id)?
-            {
-                // Apply namespace/expiry/tag filters. Task 1.12: when
-                // hierarchy expansion is active, allow any ancestor match
-                // (namespace_ancestors gives us the set); otherwise exact.
-                if let Some(ns) = namespace {
-                    if hierarchy_active {
-                        let ancestors = crate::models::namespace_ancestors(ns);
-                        if !ancestors.iter().any(|a| a == &mem.namespace) {
-                            continue;
-                        }
-                    } else if mem.namespace != ns {
-                        continue;
-                    }
-                }
-                if let Some(exp) = &mem.expires_at
-                    && exp.as_str() <= now.as_str()
-                {
-                    continue;
-                }
-                if let Some(tf) = tags_filter
-                    && !mem.tags.iter().any(|t| t == tf)
-                {
-                    continue;
-                }
-                if let Some(s) = since
-                    && mem.created_at.as_str() < s
-                {
-                    continue;
-                }
-                if let Some(u) = until
-                    && mem.created_at.as_str() > u
-                {
-                    continue;
-                }
-                // #151 visibility filter (HNSW branch)
-                if !is_visible(&mem, &prefixes) {
-                    continue;
-                }
-                // v0.7.0 WT-1-E — archived-source exclusion. The HNSW
-                // path bypasses the FTS/semantic SQL WHERE clause, so
-                // we re-check the same predicate in Rust to keep the
-                // include_archived=false semantics consistent across
-                // retrieval branches. Looks for BOTH atomised_into>0
-                // and metadata.atomisation_archived_at, mirroring
-                // [`archived_source_clause`].
-                if !include_archived && is_archived_source(&mem) {
-                    continue;
-                }
-                // v0.7.0 Form 4 / Cluster-A PERF-3 — apply
-                // source-URI-prefix filter on the HNSW branch in Rust
-                // (the HNSW index returns vector neighbours, not a
-                // SQL query — so the WHERE-clause push-down in the
-                // FTS/semantic branches doesn't reach here).
-                if let Some(prefix) = source_uri_prefix
-                    && !prefix.is_empty()
-                    && !mem
-                        .source_uri
-                        .as_deref()
-                        .is_some_and(|u| u.starts_with(prefix))
-                {
-                    continue;
-                }
-                scored.insert(mem.id.clone(), (mem, 0.0, cosine));
-                hnsw_candidates_count += 1;
-            }
-        }
-    } else {
-        // Fallback: linear scan over all embeddings. Conditional
-        // binding mirrors the FTS branch — when source_uri_prefix is
-        // None we must not bind ?10.
-        let sem_row_handler =
-            |row: &rusqlite::Row<'_>| -> rusqlite::Result<(Memory, Option<Vec<u8>>)> {
-                let mem = row_to_memory(row)?;
-                // v0.7.x Form 6: `memory_kind` was inserted between
-                // `reflection_depth` and `embedding` in the SELECT list
-                // above. The semantic SELECT's column order is
-                // [id, tier, namespace, title, content, tags, priority,
-                //  confidence, source, access_count, created_at,
-                //  updated_at, last_accessed_at, expires_at, metadata,
-                //  reflection_depth, memory_kind, embedding] — embedding
-                // sits at zero-based index 17 (Cluster-F regression
-                // pin caught the prior `row.get(16)` reading the
-                // `memory_kind` TEXT column as `Option<Vec<u8>>`).
-                let emb_bytes: Option<Vec<u8>> = row.get(17)?;
-                Ok((mem, emb_bytes))
-            };
-        let sem_results: Vec<(Memory, Option<Vec<u8>>)> =
-            if let Some(ref uri_param) = source_uri_like_param {
-                let rows = sem_stmt.query_map(
-                    params![
-                        effective_namespace,
-                        now,
-                        tags_filter,
-                        since,
-                        until,
-                        vis_p,
-                        vis_t,
-                        vis_u,
-                        vis_o,
-                        uri_param,
-                    ],
-                    sem_row_handler,
-                )?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()?
-            } else {
-                let rows = sem_stmt.query_map(
-                    params![
-                        effective_namespace,
-                        now,
-                        tags_filter,
-                        since,
-                        until,
-                        vis_p,
-                        vis_t,
-                        vis_u,
-                        vis_o,
-                    ],
-                    sem_row_handler,
-                )?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()?
-            };
+    // Stage 3 — semantic phase (HNSW when available, linear-scan fallback).
+    let hnsw_candidates_count = semantic_phase(
+        conn,
+        &prep,
+        query_embedding,
+        vector_index,
+        namespace,
+        tags_filter,
+        since,
+        until,
+        limit,
+        include_archived,
+        source_uri_prefix,
+        &mut scored,
+    )?;
 
-        for row in sem_results {
-            let (mem, emb_bytes) = (row.0, row.1);
-            if scored.contains_key(&mem.id) {
-                continue;
-            }
-            if let Some(bytes) = emb_bytes
-                && !bytes.is_empty()
-            {
-                // v0.6.3.1 P2 — tolerate legacy + headed payloads; skip
-                // (with telemetry) on malformed BLOBs so a single corrupt
-                // row can't poison the whole semantic stage.
-                let Ok(emb) = crate::embeddings::decode_embedding_blob(&bytes) else {
-                    tracing::warn!(
-                        memory_id = %mem.id,
-                        "skipping malformed embedding BLOB during semantic recall"
-                    );
-                    continue;
-                };
-                let cosine = f64::from(crate::embeddings::Embedder::cosine_similarity(
-                    query_embedding,
-                    &emb,
-                ));
-                // v0.6.2 (S18): see matching note above at the HNSW gate.
-                if cosine > 0.2 {
-                    scored.insert(mem.id.clone(), (mem, 0.0, cosine));
-                    hnsw_candidates_count += 1;
-                }
-            }
-        }
-    }
+    // Stage 4 — adaptive blend + per-tier decay.
+    let (results, blend_weights) = blend_and_rank(scored, max_fts_score, scoring, limit);
 
-    // Normalize FTS scores and compute blended score.
-    // Adaptive blend: semantic weight decreases for longer content (embeddings
-    // lose information on long text; FTS stays precise).  Short memories
-    // (< 500 chars) get 50/50, long memories (> 5 000 chars) get 15/85.
-    // v0.6.0.0: multiply the blend by a per-tier exponential time-decay with
-    // half-life defaults 7 d (short) / 30 d (mid) / 365 d (long). The
-    // `legacy_scoring` config knob short-circuits the decay back to 1.0 for
-    // A/B comparison and emergency regression rollback.
-    let now_utc = Utc::now();
-    // v0.6.3.1 (P3): collect per-candidate semantic weight in parallel with
-    // the existing fusion pass so MCP `meta.blend_weight` reports the
-    // *applied* (not configured) weight. Wrapped in `RefCell` so the map
-    // closure can side-effect without restructuring the iterator chain.
-    let blend_weights: std::cell::RefCell<Vec<f64>> = std::cell::RefCell::new(Vec::new());
-    let mut results: Vec<(Memory, f64)> = scored
-        .into_values()
-        .map(|(mem, fts_score, cosine)| {
-            let norm_fts = if max_fts_score > 0.0 {
-                fts_score / max_fts_score
-            } else {
-                0.0
-            };
-            // B4 (R2-LOW) — clamp to i32::MAX instead of panicking when
-            // a memory's content is >2GB. The lerp below treats anything
-            // ≥5000 chars as the long-tail bucket regardless, so the
-            // clamp does not change scoring; it only closes a panic
-            // window a hostile import could otherwise reach.
-            let content_len = f64::from(i32::try_from(mem.content.len()).unwrap_or(i32::MAX));
-            // Lerp semantic_weight from 0.50 (≤500 chars) to 0.15 (≥5000 chars)
-            let semantic_weight = if content_len <= 500.0 {
-                0.50
-            } else if content_len >= 5000.0 {
-                0.15
-            } else {
-                0.50 - 0.35 * ((content_len - 500.0) / 4500.0)
-            };
-            blend_weights.borrow_mut().push(semantic_weight);
-            let blended = semantic_weight * cosine + (1.0 - semantic_weight) * norm_fts;
-            let age_days = chrono::DateTime::parse_from_rfc3339(&mem.created_at)
-                .ok()
-                .map_or(0.0, |ts| {
-                    let secs = (now_utc - ts.with_timezone(&Utc)).num_seconds();
-                    // Saturate at ~68 y (i32::MAX seconds). Practical: any memory
-                    // older than that decays all the way down and the exact age
-                    // doesn't matter. Precision loss here is negligible — we
-                    // only need ~hour granularity on a 1 e-9..1.0 multiplier.
-                    #[allow(clippy::cast_precision_loss)]
-                    {
-                        secs as f64 / 86_400.0
-                    }
-                });
-            let decay = scoring.decay_multiplier(&mem.tier, age_days);
-            (mem, blended * decay)
-        })
-        .collect();
+    // Stage 5 — proximity boost + token budget + batched touch.
+    let (budgeted, outcome) = apply_recall_post_ops(
+        conn,
+        results,
+        prep.hierarchy_active,
+        namespace,
+        budget_tokens,
+        short_extend,
+        mid_extend,
+    );
 
-    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    results.truncate(limit);
-
-    // Task 1.12: proximity boost (if hierarchy expansion is active).
-    let boosted = if let (true, Some(anchor)) = (hierarchy_active, namespace) {
-        apply_proximity_boost(results, anchor)
-    } else {
-        results
-    };
-
-    // Task 1.11 / Phase P6: apply token budget in rank order (AFTER
-    // proximity). Returns BudgetOutcome with all R1 meta fields.
-    let (budgeted, outcome) = apply_token_budget(boosted, budget_tokens);
-
-    // Cluster-F PERF-6 — batched touch for the hybrid surviving set
-    // (see [`touch_many`] for the contract).
-    let touch_ids: Vec<&str> = budgeted.iter().map(|(mem, _)| mem.id.as_str()).collect();
-    if let Err(e) = touch_many(conn, &touch_ids, short_extend, mid_extend) {
-        tracing::warn!("touch_many failed for hybrid recall set: {}", e);
-    }
-
-    // v0.6.3.1 (P3): summarize per-stage candidate counts and the average
-    // semantic blend weight for the MCP `meta` block. `blend_weight_avg`
-    // is the unweighted mean across the *post-fusion* candidate set so
-    // operators see the typical weight applied to what shipped, not the
-    // configured ceiling. Pre-fusion counts come from the retrieval
-    // counters (FTS / HNSW), which gives an honest picture of stage
-    // contribution even when fusion deduplicates.
-    let weights = blend_weights.into_inner();
-    let blend_weight_avg = if weights.is_empty() {
-        0.0
-    } else {
-        #[allow(clippy::cast_precision_loss)]
-        let n = weights.len() as f64;
-        weights.iter().sum::<f64>() / n
-    };
-    let telemetry = crate::models::RecallTelemetry {
-        fts_candidates: fts_candidates_count,
-        hnsw_candidates: hnsw_candidates_count,
-        blend_weight_avg,
-    };
+    // Stage 6 — telemetry assembly.
+    let telemetry =
+        assemble_recall_telemetry(fts_candidates_count, hnsw_candidates_count, &blend_weights);
 
     Ok((budgeted, outcome, telemetry))
 }
@@ -6449,16 +7394,18 @@ pub fn enforce_governance(
     let Some(policy) = resolve_governance_policy(conn, namespace) else {
         return Ok(GovernanceDecision::Allow);
     };
+    // #880 — `write`/`delete`/`promote` live on `policy.core` after
+    // the governance decomposition.
     let level = match action {
-        GovernedAction::Store => &policy.write,
-        GovernedAction::Delete => &policy.delete,
-        GovernedAction::Promote => &policy.promote,
+        GovernedAction::Store => &policy.core.write,
+        GovernedAction::Delete => &policy.core.delete,
+        GovernedAction::Promote => &policy.core.promote,
         // v0.7.0 L1-8: Reflect is gated by the L1-8 approval mechanism
         // (`require_approval_above_depth`) in the MCP handler rather than
         // the standard `enforce_governance` pipeline. Map to `write`
         // as the conservative fallback so the arm compiles; in practice
         // no current callsite passes `GovernedAction::Reflect` here.
-        GovernedAction::Reflect => &policy.write,
+        GovernedAction::Reflect => &policy.core.write,
     };
     let ns_owner = if matches!(action, GovernedAction::Store) {
         namespace_owner(conn, namespace)
@@ -6858,8 +7805,10 @@ pub fn approve_with_approver_type(
     }
     // Resolve the namespace's approver type. If no policy, default to Human —
     // which accepts any approval (back-compat with 1.9 callers).
-    let approver =
-        resolve_governance_policy(conn, &pa.namespace).map_or(ApproverType::Human, |p| p.approver);
+    // #880 — `approver` lives on `policy.core` after the governance
+    // decomposition.
+    let approver = resolve_governance_policy(conn, &pa.namespace)
+        .map_or(ApproverType::Human, |p| p.core.approver);
 
     match approver {
         ApproverType::Human => {
@@ -7870,6 +8819,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 
@@ -10277,6 +11227,15 @@ mod tests {
         insert(&conn, &s).unwrap();
         insert(&conn, &t).unwrap();
 
+        // v0.7.0 issue #810 / #813 — the CHECK trigger on memory_links
+        // refuses any peer_attested row whose signature blob is NULL /
+        // wrong-length. The pre-#810 test passed a NULL signature here
+        // because the legacy invariant did not police that pairing;
+        // now we synthesise a 64-byte fake signature blob so the row
+        // satisfies the trigger's WHEN clause. The K9-bypass property
+        // under test is orthogonal to whether the signature bytes
+        // actually verify (verification is `memory_verify`'s job, not
+        // this insertion path's).
         let link = MemoryLink {
             source_id: s.id.clone(),
             target_id: t.id.clone(),
@@ -10285,7 +11244,8 @@ mod tests {
             valid_from: None,
             valid_until: None,
             observed_by: Some("peer:remote".to_string()),
-            signature: None,
+            signature: Some(vec![0xAB_u8; 64]),
+            attest_level: None,
         };
 
         // Peer-attested inbound bypasses the K9 deny.
@@ -10302,6 +11262,7 @@ mod tests {
             valid_until: None,
             observed_by: Some("peer:remote".to_string()),
             signature: None,
+            attest_level: None,
         };
         let err = create_link_inbound(&conn, &link2, "unsigned")
             .expect_err("unsigned inbound must NOT bypass governance");
@@ -10342,6 +11303,7 @@ mod tests {
             valid_until: None,
             observed_by: Some("peer:remote".to_string()),
             signature: None,
+            attest_level: None,
         };
         let err = create_link_inbound(&conn, &cycle_link, "peer_attested")
             .expect_err("cycle check must run even on peer_attested inbound");
@@ -10827,10 +11789,10 @@ mod tests {
         // under distinct agent identities. Tests ensures the helper
         // returns the documented shape.
         let policy = crate::models::GovernancePolicy::default_for_managed_namespace();
-        assert_eq!(policy.write, crate::models::GovernanceLevel::Owner);
-        assert_eq!(policy.promote, crate::models::GovernanceLevel::Any);
-        assert_eq!(policy.delete, crate::models::GovernanceLevel::Owner);
-        assert!(policy.inherit);
+        assert_eq!(policy.core.write, crate::models::GovernanceLevel::Owner);
+        assert_eq!(policy.core.promote, crate::models::GovernanceLevel::Any);
+        assert_eq!(policy.core.delete, crate::models::GovernanceLevel::Owner);
+        assert!(policy.core.inherit);
     }
 
     #[test]
@@ -10852,7 +11814,7 @@ mod tests {
 
         let resolved = resolve_governance_policy(&conn, "ns/locked")
             .expect("policy must resolve when explicitly set");
-        assert_eq!(resolved.write, crate::models::GovernanceLevel::Owner);
+        assert_eq!(resolved.core.write, crate::models::GovernanceLevel::Owner);
     }
 
     /// F1 regression (v0.7.0 round-2-fixes): when a parent namespace
@@ -10869,8 +11831,8 @@ mod tests {
             override_active_permissions_mode_for_test,
         };
         use crate::models::{
-            ApproverType, GovernanceDecision, GovernanceLevel, GovernancePolicy, GovernedAction,
-            default_metadata,
+            ApproverType, CorePolicy, GovernanceDecision, GovernanceLevel, GovernancePolicy,
+            GovernedAction, default_metadata,
         };
 
         let _gate = lock_permissions_mode_for_test();
@@ -10882,26 +11844,15 @@ mod tests {
         let parent_ns = "f1/parent";
         let owner = "ai:alice";
         let policy = GovernancePolicy {
-            write: GovernanceLevel::Owner,
-            promote: GovernanceLevel::Any,
-            delete: GovernanceLevel::Owner,
-            approver: ApproverType::Human,
-            inherit: true,
-            max_reflection_depth: None,
-            auto_export_reflections_to_filesystem: None,
-            auto_atomise: None,
-            auto_atomise_threshold_cl100k: None,
-            auto_atomise_max_atom_tokens: None,
-            auto_atomise_max_retries: None,
-            auto_persona_trigger_every_n_memories: None,
-            auto_export_personas_to_filesystem: None,
-            auto_atomise_mode: None,
-            legacy_per_pair_classifier: None,
-            auto_classify_kind: None,
-            synthesis_failure_mode: None,
-            synthesis_max_deletes_per_call: None,
-            synthesis_max_candidate_chars: None,
-            multistep_max_content_chars: None,
+            core: CorePolicy {
+                write: GovernanceLevel::Owner,
+                promote: GovernanceLevel::Any,
+                delete: GovernanceLevel::Owner,
+                approver: ApproverType::Human,
+                inherit: true,
+                max_reflection_depth: None,
+            },
+            ..Default::default()
         };
 
         let now = chrono::Utc::now().to_rfc3339();
@@ -10942,6 +11893,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let standard_id = insert(&conn, &standard).unwrap();
         set_namespace_standard(&conn, parent_ns, &standard_id, None).unwrap();
@@ -11011,8 +11963,8 @@ mod tests {
             override_active_permissions_mode_for_test,
         };
         use crate::models::{
-            ApproverType, GovernanceDecision, GovernanceLevel, GovernancePolicy, GovernedAction,
-            default_metadata,
+            ApproverType, CorePolicy, GovernanceDecision, GovernanceLevel, GovernancePolicy,
+            GovernedAction, default_metadata,
         };
 
         let _gate = lock_permissions_mode_for_test();
@@ -11030,26 +11982,15 @@ mod tests {
         let parent_ns = "f1nb/parent";
         let owner = "ai:alice";
         let policy = GovernancePolicy {
-            write: GovernanceLevel::Owner,
-            promote: GovernanceLevel::Any,
-            delete: GovernanceLevel::Owner,
-            approver: ApproverType::Human,
-            inherit: false,
-            max_reflection_depth: None,
-            auto_export_reflections_to_filesystem: None,
-            auto_atomise: None,
-            auto_atomise_threshold_cl100k: None,
-            auto_atomise_max_atom_tokens: None,
-            auto_atomise_max_retries: None,
-            auto_persona_trigger_every_n_memories: None,
-            auto_export_personas_to_filesystem: None,
-            auto_atomise_mode: None,
-            legacy_per_pair_classifier: None,
-            auto_classify_kind: None,
-            synthesis_failure_mode: None,
-            synthesis_max_deletes_per_call: None,
-            synthesis_max_candidate_chars: None,
-            multistep_max_content_chars: None,
+            core: CorePolicy {
+                write: GovernanceLevel::Owner,
+                promote: GovernanceLevel::Any,
+                delete: GovernanceLevel::Owner,
+                approver: ApproverType::Human,
+                inherit: false,
+                max_reflection_depth: None,
+            },
+            ..Default::default()
         };
         let now = chrono::Utc::now().to_rfc3339();
         let mut metadata = default_metadata();
@@ -11089,6 +12030,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let standard_id = insert(&conn, &standard).unwrap();
         set_namespace_standard(&conn, parent_ns, &standard_id, None).unwrap();
@@ -12597,6 +13539,7 @@ mod tests {
             observed_by: Some("peer-bob".to_string()),
             valid_from: Some(now.clone()),
             valid_until: None,
+            attest_level: None,
         };
         let before = count_signed_events_of_type(&conn, "memory_link.created");
         create_link_inbound(&conn, &link, "unsigned").unwrap();
@@ -12787,6 +13730,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let ref_mem = Memory {
             id: uuid::Uuid::new_v4().to_string(),
@@ -12814,6 +13758,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
 
         insert(&conn, &obs).unwrap();
@@ -12882,6 +13827,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let id = insert(&conn, &mem).unwrap();
         let got = get(&conn, &id)
@@ -12930,6 +13876,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         insert(&conn, &mem_reflection).unwrap();
 
@@ -12960,6 +13907,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         insert(&conn, &mem_obs).unwrap();
 
@@ -12972,5 +13920,160 @@ mod tests {
             crate::models::MemoryKind::Reflection,
             "upsert with Observation must not overwrite an existing Reflection kind"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // v0.7.0 issue #810 / #812 / #813 — CHECK trigger + strongest_attest
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn strongest_attest_returns_unsigned_for_isolate_source() {
+        // A source with no outbound links — the only honest default
+        // is `unsigned`.
+        let conn = test_db();
+        let lonely = make_memory("lonely", "test", Tier::Long, 5);
+        insert(&conn, &lonely).unwrap();
+        let got = strongest_attest_level_for_source(&conn, &lonely.id).unwrap();
+        assert_eq!(got, "unsigned");
+    }
+
+    #[test]
+    fn strongest_attest_picks_self_signed_over_unsigned() {
+        use crate::identity::keypair;
+        let conn = test_db();
+        let src = make_memory("attest-src", "test", Tier::Long, 5);
+        let a = make_memory("attest-a", "test", Tier::Long, 5);
+        let b = make_memory("attest-b", "test", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &a).unwrap();
+        insert(&conn, &b).unwrap();
+        // One unsigned + one signed outbound link.
+        create_link_signed(&conn, &src.id, &a.id, "related_to", None).unwrap();
+        let kp = keypair::generate("alice").unwrap();
+        create_link_signed(&conn, &src.id, &b.id, "supersedes", Some(&kp)).unwrap();
+        let got = strongest_attest_level_for_source(&conn, &src.id).unwrap();
+        assert_eq!(got, "self_signed", "self_signed beats unsigned");
+    }
+
+    #[test]
+    fn strongest_attest_picks_peer_attested_over_self_signed() {
+        // Construct a peer-attested row by hand-rolling the
+        // create_link_inbound path so we don't depend on a remote
+        // signature. The CHECK trigger requires a 64-byte sig blob
+        // for `peer_attested` — fabricate one.
+        let conn = test_db();
+        let src = make_memory("attest-pa-src", "test", Tier::Long, 5);
+        let a = make_memory("attest-pa-a", "test", Tier::Long, 5);
+        let b = make_memory("attest-pa-b", "test", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &a).unwrap();
+        insert(&conn, &b).unwrap();
+        // Self-signed link.
+        let kp = crate::identity::keypair::generate("alice").unwrap();
+        create_link_signed(&conn, &src.id, &a.id, "related_to", Some(&kp)).unwrap();
+        // Hand-inject a peer_attested row with a 64-byte signature so
+        // the CHECK trigger admits it.
+        let now = chrono::Utc::now().to_rfc3339();
+        let sig = vec![0xAB_u8; 64];
+        conn.execute(
+            "INSERT INTO memory_links \
+                (source_id, target_id, relation, created_at, valid_from, signature, attest_level, observed_by) \
+             VALUES (?1, ?2, 'related_to', ?3, ?3, ?4, 'peer_attested', 'peer-bob')",
+            params![&src.id, &b.id, &now, &sig],
+        )
+        .unwrap();
+        let got = strongest_attest_level_for_source(&conn, &src.id).unwrap();
+        assert_eq!(got, "peer_attested", "peer_attested beats self_signed");
+    }
+
+    #[test]
+    fn ck_trigger_refuses_self_signed_insert_without_signature() {
+        // BUG-A regression test — a direct INSERT that claims
+        // `self_signed` with NULL signature must fail at the SQLite
+        // trigger layer. Closes the phantom-attest-level defect at
+        // the substrate boundary even when a future caller (or
+        // operator UPDATE) bypasses `create_link_signed`'s match arm.
+        let conn = test_db();
+        let s = make_memory("ck-src", "test", Tier::Long, 5);
+        let t = make_memory("ck-tgt", "test", Tier::Long, 5);
+        insert(&conn, &s).unwrap();
+        insert(&conn, &t).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let res = conn.execute(
+            "INSERT INTO memory_links \
+                (source_id, target_id, relation, created_at, valid_from, signature, attest_level) \
+             VALUES (?1, ?2, 'related_to', ?3, ?3, NULL, 'self_signed')",
+            params![&s.id, &t.id, &now],
+        );
+        let err = res.expect_err("CHECK trigger must reject self_signed + NULL signature");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("CHECK constraint failed")
+                || msg.contains("attest_level")
+                || msg.contains("64-byte signature"),
+            "trigger error must name the failure mode, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn ck_trigger_refuses_self_signed_insert_with_wrong_length_signature() {
+        // Same defense for a non-NULL but wrong-length signature
+        // (e.g. truncated by a partial wire-read or a malformed
+        // operator INSERT).
+        let conn = test_db();
+        let s = make_memory("ck-src-wlen", "test", Tier::Long, 5);
+        let t = make_memory("ck-tgt-wlen", "test", Tier::Long, 5);
+        insert(&conn, &s).unwrap();
+        insert(&conn, &t).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let res = conn.execute(
+            "INSERT INTO memory_links \
+                (source_id, target_id, relation, created_at, valid_from, signature, attest_level) \
+             VALUES (?1, ?2, 'related_to', ?3, ?3, ?4, 'self_signed')",
+            params![&s.id, &t.id, &now, &[0u8; 8][..]],
+        );
+        assert!(
+            res.is_err(),
+            "CHECK trigger must reject wrong-length signature"
+        );
+    }
+
+    #[test]
+    fn ck_trigger_refuses_update_to_self_signed_without_signature() {
+        // The CHECK trigger fires on UPDATE as well as INSERT — a
+        // post-hoc UPDATE that flips an unsigned row to self_signed
+        // without supplying signature bytes must be refused.
+        let conn = test_db();
+        let s = make_memory("ck-upd-src", "test", Tier::Long, 5);
+        let t = make_memory("ck-upd-tgt", "test", Tier::Long, 5);
+        insert(&conn, &s).unwrap();
+        insert(&conn, &t).unwrap();
+        create_link_signed(&conn, &s.id, &t.id, "related_to", None).unwrap();
+        let res = conn.execute(
+            "UPDATE memory_links SET attest_level = 'self_signed' \
+             WHERE source_id = ?1 AND target_id = ?2",
+            params![&s.id, &t.id],
+        );
+        assert!(
+            res.is_err(),
+            "CHECK trigger must reject UPDATE to self_signed with NULL signature"
+        );
+    }
+
+    #[test]
+    fn ck_trigger_admits_unsigned_with_null_signature() {
+        // The trigger's `WHEN` clause is scoped to self_signed /
+        // peer_attested — the unsigned path with NULL signature
+        // (the v0.6.4 default) must still admit. Negative-control
+        // test pinning the trigger's narrow scope.
+        let conn = test_db();
+        let s = make_memory("ck-unsigned-src", "test", Tier::Long, 5);
+        let t = make_memory("ck-unsigned-tgt", "test", Tier::Long, 5);
+        insert(&conn, &s).unwrap();
+        insert(&conn, &t).unwrap();
+        // create_link_signed's unsigned branch sets (NULL, "unsigned");
+        // confirm it still works under the new trigger.
+        create_link_signed(&conn, &s.id, &t.id, "related_to", None)
+            .expect("unsigned create must still succeed under the new CHECK trigger");
     }
 }

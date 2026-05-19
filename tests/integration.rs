@@ -8,6 +8,9 @@
 // AI_MEMORY_NO_CONFIG=1 prevents loading ~/.config/ai-memory/config.toml
 // which may set tier=autonomous and trigger embedder/LLM initialization.
 
+mod common;
+use common::free_port;
+
 fn cmd(binary: &str) -> std::process::Command {
     let mut c = std::process::Command::new(binary);
     c.env("AI_MEMORY_NO_CONFIG", "1");
@@ -1873,8 +1876,12 @@ fn test_mcp_tools_list() {
         .expect("tools should be array");
     assert_eq!(
         tools.len(),
-        71,
-        "expected 71 MCP tools (v0.6.3 baseline 43 + v0.7.0 I4 memory_replay + v0.7 H4 memory_verify + v0.7 B1 memory_load_family + v0.7 B2 memory_smart_load + v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list + v0.7 J7 memory_find_paths + v0.7 K8 memory_quota_status + v0.7.0 Task 4/8 memory_reflect + v0.7.0 L2-2 memory_reflection_origin + v0.7.0 L2-3 memory_dependents_of_invalidated + v0.7.0 issue #691 memory_check_agent_action + memory_rule_list + v0.7.0 L1-5 5 memory_skill_* tools + v0.7.0 L2-6 memory_skill_promote_from_reflection + v0.7.0 L2-7 memory_skill_compositional_context + v0.7.0 QW-1 memory_export_reflection + v0.7.0 QW-3 follow-up memory_offload + memory_deref + v0.7.0 WT-1-C memory_atomise + v0.7.0 QW-2 memory_persona + memory_persona_generate + v0.7.0 Form 3 memory_ingest_multistep + v0.7.0 Form 5 memory_calibrate_confidence)"
+        ai_memory::profile::Profile::full().expected_tool_count(),
+        "expected the canonical full-profile tool count from \
+         `Profile::full().expected_tool_count()` = 72 at v0.7.0 \
+         (issues #224 + #311 pulled memory_share forward from v0.8 \
+         Phase 3 Memory Sharing & Sync RFC per operator directive \
+         `28860423-d12c-4959-bc8b-8fa9a94a33d9`)"
     );
 
     let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
@@ -7590,17 +7597,36 @@ fn test_budget_mcp_tool_schema_and_response() {
         .iter()
         .find(|t| t["name"] == "memory_recall")
         .unwrap();
-    // v0.7 C4 — `budget_tokens` is an OPTIONAL param and is hidden
-    // from the default `tools/list` payload (verbose=false). The
-    // contract changed from "must be advertised" to "must NOT be
-    // advertised by default; runtime call still works". Verbose
-    // discovery is exercised below via memory_capabilities.
+    // v0.7 C4 + #859 — `budget_tokens` is an OPTIONAL param. **Pre-#859**
+    // the C4 trim dropped every optional from the default `tools/list`
+    // payload, hiding the call surface from MCP clients. **Post-#859**
+    // every property entry is preserved on the wire (with per-property
+    // `description` prose stripped) so NHI agents can DISCOVER the
+    // call surface from `tools/list` directly. The runtime call still
+    // works either way — this assertion just pins the wire shape.
+    let recall_props = recall_tool["inputSchema"]["properties"]
+        .as_object()
+        .expect("memory_recall must declare properties");
     assert!(
-        recall_tool["inputSchema"]["properties"]
-            .get("budget_tokens")
-            .is_none(),
-        "v0.7 C4: memory_recall must NOT advertise optional `budget_tokens` in the \
-         default tools/list payload. Pass verbose=true to memory_capabilities to opt in."
+        recall_props.contains_key("budget_tokens"),
+        "#859: memory_recall.inputSchema.properties must expose `budget_tokens` \
+         on the default tools/list payload for client-side discovery."
+    );
+    // Per-property prose is stripped on the wire (verbose path keeps it).
+    let budget_tokens = recall_props
+        .get("budget_tokens")
+        .and_then(serde_json::Value::as_object)
+        .unwrap();
+    assert!(
+        !budget_tokens.contains_key("description"),
+        "#859: per-property `description` prose must be stripped on the wire"
+    );
+    // Structural metadata stays so clients can construct valid args.
+    assert_eq!(
+        budget_tokens
+            .get("type")
+            .and_then(serde_json::Value::as_str),
+        Some("integer")
     );
     // The required param `context` survives the trim.
     assert!(
@@ -8053,14 +8079,6 @@ fn test_cli_sync_dry_run_writes_nothing() {
 // The defining grand-slam test: one peer's memory ends up on the other
 // within a couple of daemon cycles, no cloud, no login, no manual sync.
 // ---------------------------------------------------------------------------
-
-/// Find a free localhost TCP port by binding to :0 and dropping.
-fn free_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = l.local_addr().unwrap().port();
-    drop(l);
-    port
-}
 
 /// Wait for the `/api/v1/health` endpoint to respond 200 — up to ~10s.
 ///
@@ -8702,6 +8720,29 @@ fn curl_get(port: u16, path: &str) -> (String, serde_json::Value) {
     (code.trim().to_string(), v)
 }
 
+/// #910 SAL-level — same shape as `curl_get` but threads `X-Agent-Id`
+/// so the request lands at the SAL with a stable principal. Use this
+/// for any test that creates rows via `curl_post(.., Some(agent))`
+/// and reads them back — the round-trip needs a matching principal
+/// so the scope=private filter doesn't drop the rows.
+fn curl_get_as(port: u16, path: &str, agent_id: &str) -> (String, serde_json::Value) {
+    let out = std::process::Command::new("curl")
+        .args([
+            "-s",
+            "-w",
+            "\n%{http_code}",
+            "-H",
+            &format!("x-agent-id: {agent_id}"),
+            &format!("http://127.0.0.1:{port}{path}"),
+        ])
+        .output()
+        .unwrap();
+    let raw = String::from_utf8_lossy(&out.stdout).into_owned();
+    let (body, code) = raw.rsplit_once('\n').unwrap_or(("", ""));
+    let v: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+    (code.trim().to_string(), v)
+}
+
 fn curl_post(
     port: u16,
     path: &str,
@@ -8863,6 +8904,9 @@ impl OneshotDaemon {
             replay_cache: std::sync::Arc::new(ai_memory::identity::replay::ReplayCache::default()),
 
             verify_require_nonce: false,
+            federation_nonce_cache: std::sync::Arc::new(
+                ai_memory::identity::replay::FederationNonceCache::default(),
+            ),
             autonomous_hooks: false,
             recall_scope: std::sync::Arc::new(None),
             deferred_audit_queue: std::sync::Arc::new(None),
@@ -9094,7 +9138,12 @@ async fn http_notify_and_inbox_round_trip() {
     .await;
     assert_eq!(code, "201");
 
-    let (code, body) = route_get(&d, "/api/v1/inbox?agent_id=ai:bob&limit=50").await;
+    // #910 SAL — bob reads his own inbox. The handler now requires
+    // X-Agent-Id to match the ?agent_id= owner per #901; the SAL
+    // visibility filter recognises bob as the inbox owner via
+    // `metadata.target_agent_id`.
+    let (code, body) =
+        route_get_with_agent(&d, "/api/v1/inbox?agent_id=ai:bob&limit=50", "ai:bob").await;
     assert_eq!(code, "200");
     let messages = body["messages"].as_array().expect("messages array");
     assert!(
@@ -9105,7 +9154,12 @@ async fn http_notify_and_inbox_round_trip() {
     );
 
     // charlie must NOT see bob's notification.
-    let (_code, body2) = route_get(&d, "/api/v1/inbox?agent_id=ai:charlie&limit=50").await;
+    let (_code, body2) = route_get_with_agent(
+        &d,
+        "/api/v1/inbox?agent_id=ai:charlie&limit=50",
+        "ai:charlie",
+    )
+    .await;
     let messages2 = body2["messages"].as_array().cloned().unwrap_or_default();
     assert!(
         !messages2
@@ -9150,8 +9204,10 @@ fn http_inbox_cross_source_agent_id_body_vs_query_vs_header() {
         Some("ai:alice"),
     );
 
-    // Query string path.
-    let (code_q, body_q) = curl_get(d.port, "/api/v1/inbox?agent_id=ai:bob&limit=5");
+    // Query string path. #901 requires the X-Agent-Id header to
+    // match the ?agent_id= query owner; #910 SAL needs the same
+    // principal so the inbox filter sees bob's `target_agent_id`.
+    let (code_q, body_q) = curl_get_as(d.port, "/api/v1/inbox?agent_id=ai:bob&limit=5", "ai:bob");
     assert_eq!(code_q, "200");
     assert_eq!(body_q["agent_id"], "ai:bob", "query-string owner mismatch");
 
@@ -9198,7 +9254,8 @@ async fn http_subscriptions_s33_shape_round_trip() {
     .await;
     assert!(code == "201" || code == "200", "subscribe code={code}");
 
-    let (code_g, body_g) = route_get(&d, "/api/v1/subscriptions?agent_id=ai:bob").await;
+    let (code_g, body_g) =
+        route_get_with_agent(&d, "/api/v1/subscriptions?agent_id=ai:bob", "ai:bob").await;
     assert_eq!(code_g, "200");
     let rows = body_g["subscriptions"]
         .as_array()
@@ -9219,7 +9276,8 @@ async fn http_subscriptions_s33_shape_round_trip() {
         "delete code={del_code}"
     );
 
-    let (_code_g2, body_g2) = route_get(&d, "/api/v1/subscriptions?agent_id=ai:bob").await;
+    let (_code_g2, body_g2) =
+        route_get_with_agent(&d, "/api/v1/subscriptions?agent_id=ai:bob", "ai:bob").await;
     let rows_after = body_g2["subscriptions"]
         .as_array()
         .cloned()
@@ -9512,14 +9570,36 @@ fn spawn_leader(quorum_writes: usize, peer_urls: &[String]) -> DaemonGuard {
 /// Poll GET `/api/v1/memories` on `peer_port` filtered by `namespace`
 /// until `expected` rows appear OR the deadline lapses. Returns observed
 /// count.
+#[allow(dead_code)] // anonymous fallback retained for tests that don't write
 fn wait_for_peer_rows(peer_port: u16, namespace: &str, expected: usize, timeout_ms: u64) -> usize {
+    wait_for_peer_rows_as(peer_port, namespace, expected, timeout_ms, None)
+}
+
+/// #910 SAL-level variant — pass the caller principal so the
+/// `list_memories` handler resolves a known agent and the SAL
+/// visibility filter doesn't drop rows authored by the same id.
+/// Caller `None` is anonymous (sees only scope=collective rows).
+fn wait_for_peer_rows_as(
+    peer_port: u16,
+    namespace: &str,
+    expected: usize,
+    timeout_ms: u64,
+    caller: Option<&str>,
+) -> usize {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     let mut seen = 0;
     while std::time::Instant::now() < deadline {
-        let (code, body) = curl_get(
-            peer_port,
-            &format!("/api/v1/memories?namespace={namespace}&limit=200"),
-        );
+        let (code, body) = match caller {
+            Some(c) => curl_get_as(
+                peer_port,
+                &format!("/api/v1/memories?namespace={namespace}&limit=200"),
+                c,
+            ),
+            None => curl_get(
+                peer_port,
+                &format!("/api/v1/memories?namespace={namespace}&limit=200"),
+            ),
+        };
         if code == "200"
             && let Some(arr) = body["memories"].as_array()
         {
@@ -9601,7 +9681,8 @@ fn http_bulk_create_fans_out_concurrently() {
     // Give the peer generous slack under parallel-test load (20s) — a
     // regression to sequential fanout would stall far beyond this on
     // realistic scenario burst sizes.
-    let seen = wait_for_peer_rows(peer.port, "s40-fanout", n, 20_000);
+    // #910 SAL — read as the same principal that wrote.
+    let seen = wait_for_peer_rows_as(peer.port, "s40-fanout", n, 20_000, Some("ai:s40"));
     assert_eq!(seen, n, "peer missed rows: saw {seen}/{n}");
     // Sanity: the leader call itself should return in well under a full
     // n×quorum-window. Concurrent-bounded fanout completes ≪ sequential
@@ -9645,10 +9726,12 @@ fn http_notify_fans_out_to_peers_so_target_inbox_sees_it() {
 
     // Poll peer's /api/v1/inbox?agent_id=bob until we see the message or
     // timeout. 10s is generous; concurrent fanout normally completes <1s.
+    // #910 SAL — read the inbox AS bob so the visibility filter
+    // recognises the target_agent_id stamp.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut found = false;
     while std::time::Instant::now() < deadline {
-        let (code, body) = curl_get(peer.port, "/api/v1/inbox?agent_id=bob");
+        let (code, body) = curl_get_as(peer.port, "/api/v1/inbox?agent_id=bob", "bob");
         if code == "200"
             && let Some(msgs) = body["messages"].as_array()
             && msgs.iter().any(|m| m["title"] == "S32 hello")
@@ -9757,7 +9840,7 @@ fn http_archive_restore_fans_out() {
 
     // Let the fanout settle.
     assert!(
-        wait_for_peer_rows(peer.port, "s29-restore", 1, 10_000) >= 1,
+        wait_for_peer_rows_as(peer.port, "s29-restore", 1, 10_000, Some("ai:s29")) >= 1,
         "peer never saw initial create"
     );
 
@@ -9771,10 +9854,11 @@ fn http_archive_restore_fans_out() {
     assert_eq!(code, "200");
 
     // Peer should no longer show the row in active.
+    // #910 SAL — read as the same principal that wrote.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut archived_on_peer = false;
     while std::time::Instant::now() < deadline {
-        let (code, _) = curl_get(peer.port, &format!("/api/v1/memories/{id}"));
+        let (code, _) = curl_get_as(peer.port, &format!("/api/v1/memories/{id}"), "ai:s29");
         if code == "404" {
             archived_on_peer = true;
             break;
@@ -9796,7 +9880,7 @@ fn http_archive_restore_fans_out() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut restored_on_peer = false;
     while std::time::Instant::now() < deadline {
-        let (code, _) = curl_get(peer.port, &format!("/api/v1/memories/{id}"));
+        let (code, _) = curl_get_as(peer.port, &format!("/api/v1/memories/{id}"), "ai:s29");
         if code == "200" {
             restored_on_peer = true;
             break;
@@ -9897,7 +9981,14 @@ fn http_list_memories_cap_raised_to_max_bulk_size() {
     assert_eq!(code, "200", "bulk_create: {resp}");
 
     // Explicit limit > 200 must now return all 300 rows.
-    let (code, body) = curl_get(d.port, "/api/v1/memories?namespace=list-cap&limit=500");
+    // #910 — read back as the same principal that wrote so the
+    // SAL-level scope=private filter doesn't drop the (private-by-
+    // default) seed rows.
+    let (code, body) = curl_get_as(
+        d.port,
+        "/api/v1/memories?namespace=list-cap&limit=500",
+        "ai:list-cap",
+    );
     assert_eq!(code, "200", "list_memories: {body}");
     let mems = body["memories"].as_array().expect("memories array");
     assert_eq!(
@@ -9910,7 +10001,11 @@ fn http_list_memories_cap_raised_to_max_bulk_size() {
     // limit=1000 is still the ceiling — a request for 2000 clamps to 1000.
     // We already have 300 rows, so asking for 2000 returns 300 (not capped
     // by the ceiling but proves the request parses + executes).
-    let (code, body) = curl_get(d.port, "/api/v1/memories?namespace=list-cap&limit=2000");
+    let (code, body) = curl_get_as(
+        d.port,
+        "/api/v1/memories?namespace=list-cap&limit=2000",
+        "ai:list-cap",
+    );
     assert_eq!(code, "200");
     let mems = body["memories"].as_array().expect("memories array");
     assert_eq!(mems.len(), n);
@@ -10641,6 +10736,7 @@ fn federation_cfg_for_test(
         client,
         sender_agent_id: "ai:fed-test".to_string(),
         api_key: None,
+        signing_key: None,
     }
 }
 
@@ -10817,8 +10913,12 @@ async fn test_subscription_webhook_namespace_filter() {
     );
 
     // Immediately verify the subscription was created.
-    let (code_subs, body_subs) =
-        route_get(&d, "/api/v1/subscriptions?agent_id=webhook-receiver").await;
+    let (code_subs, body_subs) = route_get_with_agent(
+        &d,
+        "/api/v1/subscriptions?agent_id=webhook-receiver",
+        "webhook-receiver",
+    )
+    .await;
     assert_eq!(code_subs, "200");
     let subs = body_subs["subscriptions"]
         .as_array()
@@ -10875,8 +10975,12 @@ async fn test_subscription_webhook_namespace_filter() {
     assert_eq!(code_other_ns, "201", "store non-matching memory");
 
     // Verify the subscription is still active after storing memories.
-    let (code_subs_final, body_subs_final) =
-        route_get(&d, "/api/v1/subscriptions?agent_id=webhook-receiver").await;
+    let (code_subs_final, body_subs_final) = route_get_with_agent(
+        &d,
+        "/api/v1/subscriptions?agent_id=webhook-receiver",
+        "webhook-receiver",
+    )
+    .await;
     assert_eq!(code_subs_final, "200");
     let subs_final = body_subs_final["subscriptions"]
         .as_array()
@@ -12576,6 +12680,9 @@ fn build_serve_state(
         replay_cache: std::sync::Arc::new(ai_memory::identity::replay::ReplayCache::default()),
 
         verify_require_nonce: false,
+        federation_nonce_cache: std::sync::Arc::new(
+            ai_memory::identity::replay::FederationNonceCache::default(),
+        ),
         autonomous_hooks: false,
         recall_scope: std::sync::Arc::new(None),
         deferred_audit_queue: std::sync::Arc::new(None),

@@ -65,8 +65,8 @@ use ai_memory::hooks::pre_store::{
     maybe_enqueue_auto_atomise,
 };
 use ai_memory::models::{
-    ApproverType, AutoAtomiseMode, ConfidenceSource, GovernanceLevel, GovernancePolicy, Memory,
-    Tier,
+    ApproverType, AtomisationPolicy, AutoAtomiseMode, ConfidenceSource, CorePolicy,
+    GovernanceLevel, GovernancePolicy, Memory, Tier,
 };
 use ai_memory::storage as db;
 
@@ -129,6 +129,7 @@ fn make_memory(ns: &str, title: &str, content: &str) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 
@@ -319,12 +320,18 @@ fn pre_store_hooks_share_caller_connection() {
     // Seed a namespace standard whose policy DISABLES auto_atomise.
     let ns = "perf1/disabled-ns".to_string();
     let policy = GovernancePolicy {
-        write: GovernanceLevel::Any,
-        promote: GovernanceLevel::Any,
-        delete: GovernanceLevel::Owner,
-        approver: ApproverType::Human,
-        inherit: true,
-        auto_atomise: Some(false),
+        core: CorePolicy {
+            write: GovernanceLevel::Any,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Human,
+            inherit: true,
+            ..CorePolicy::default()
+        },
+        atomisation: AtomisationPolicy {
+            auto_atomise: Some(false),
+            ..AtomisationPolicy::default()
+        },
         ..GovernancePolicy::default()
     };
     let std_mem = Memory {
@@ -499,14 +506,20 @@ fn auto_atomise_max_retries_policy_override_honored() {
     // Sanity-check the `effective_auto_atomise_max_retries` accessor
     // surfaces the override.
     let policy = GovernancePolicy {
-        write: GovernanceLevel::Any,
-        promote: GovernanceLevel::Any,
-        delete: GovernanceLevel::Owner,
-        approver: ApproverType::Human,
-        inherit: true,
-        auto_atomise: Some(true),
-        auto_atomise_mode: Some(AutoAtomiseMode::Synchronous),
-        auto_atomise_max_retries: Some(5),
+        core: CorePolicy {
+            write: GovernanceLevel::Any,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Human,
+            inherit: true,
+            ..CorePolicy::default()
+        },
+        atomisation: AtomisationPolicy {
+            auto_atomise: Some(true),
+            auto_atomise_mode: Some(AutoAtomiseMode::Synchronous),
+            auto_atomise_max_retries: Some(5),
+            ..AtomisationPolicy::default()
+        },
         ..GovernancePolicy::default()
     };
     assert_eq!(policy.effective_auto_atomise_max_retries(), Some(5));

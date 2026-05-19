@@ -1,0 +1,259 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+  Audience page: operator / SRE — issue #832.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>ai-memory for operators &mdash; install, deploy, harden, observe</title>
+<meta name="description" content="ai-memory for SREs: install in 3 ways, config.toml essentials, HTTP daemon + MCP + CLI surfaces, observability, hardening, Plan C container, upgrade path.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/audience/operator.html">
+<style>
+:root{--bg:#0a0a0a;--panel:#121212;--border:#262626;--border-hi:#3a3a3a;--text:#f5f5f5;--muted:#9a9a9a;--dim:#6b6b6b;--accent:#6ee7ff;--warn:#ffb86b;--good:#7cd992;--code-bg:#161616;--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;--font-mono:"SF Mono","JetBrains Mono","Cascadia Code",Consolas,monospace;--w-mid:840px;--w-wide:1080px}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--text);font-family:var(--font-sans);line-height:1.65;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+code,pre{font-family:var(--font-mono);font-size:.88rem}
+code{background:var(--code-bg);padding:.1em .35em;border-radius:3px;color:#d4d4d4}
+pre{background:var(--code-bg);border:1px solid var(--border);border-radius:6px;padding:1rem 1.15rem;overflow-x:auto;line-height:1.55;margin:1rem 0}
+pre code{background:none;padding:0;color:#d4d4d4}
+.wrap-mid{max-width:var(--w-mid);margin:0 auto;padding:0 1.5rem}
+.topnav{border-bottom:1px solid var(--border);position:sticky;top:0;background:rgba(10,10,10,.92);backdrop-filter:blur(8px);z-index:50}
+.topnav .row{display:flex;align-items:center;justify-content:space-between;padding:1rem 1.5rem;max-width:var(--w-wide);margin:0 auto;font-size:.9rem}
+.topnav .brand{color:var(--text);font-weight:600}
+.topnav .links{display:flex;gap:1.5rem}
+.topnav .links a{color:var(--muted)}
+.topnav .links a:hover{color:var(--text);text-decoration:none}
+.crumb{padding:1.25rem 1.5rem 0;max-width:var(--w-mid);margin:0 auto;color:var(--dim);font-size:.82rem;font-family:var(--font-mono)}
+.crumb a{color:var(--muted)}
+.hero{padding:3rem 0 2.5rem}
+.hero .eyebrow{font-family:var(--font-mono);font-size:.72rem;letter-spacing:.18em;color:var(--accent);text-transform:uppercase;margin-bottom:1rem}
+.hero h1{font-size:2.2rem;font-weight:700;letter-spacing:-.025em;line-height:1.15;margin-bottom:1.25rem}
+.hero .lede{font-size:1.1rem;color:var(--muted);max-width:680px;line-height:1.6}
+section{padding:3rem 0;border-top:1px solid var(--border)}
+.eyebrow-h2{font-family:var(--font-mono);font-size:.7rem;letter-spacing:.18em;color:var(--dim);text-transform:uppercase;margin-bottom:.5rem}
+h2{font-size:1.5rem;font-weight:700;letter-spacing:-.015em;margin-bottom:1rem}
+h3{font-size:1.05rem;font-weight:600;margin:1.75rem 0 .5rem;color:var(--text)}
+p{color:var(--muted);margin-bottom:1rem;max-width:680px}
+p.lede{color:var(--text);font-size:1rem}
+ul,ol{color:var(--muted);margin:0 0 1rem 1.5rem}
+li{margin-bottom:.35rem}
+li code{font-size:.85em}
+.tld{display:grid;grid-template-columns:auto 1fr;gap:.5rem 1rem;margin:1rem 0;padding:1rem 1.25rem;background:var(--panel);border:1px solid var(--border);border-radius:6px;font-size:.88rem}
+.tld dt{color:var(--accent);font-family:var(--font-mono);font-weight:600;white-space:nowrap}
+.tld dd{color:var(--muted)}
+.callout{border-left:3px solid var(--accent);padding:1rem 1.25rem;background:rgba(110,231,255,.04);border-radius:0 6px 6px 0;margin:1.5rem 0;font-size:.92rem}
+.callout strong{color:var(--text)}
+.warn{border-color:var(--warn);background:rgba(255,184,107,.05)}
+.warn strong{color:var(--warn)}
+footer{padding:3rem 0;border-top:1px solid var(--border);color:var(--dim);font-size:.82rem;text-align:center}
+footer a{color:var(--muted)}
+.next{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:.6rem;margin:1.5rem 0}
+.next a{display:block;padding:.85rem 1rem;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.9rem;transition:border-color .15s}
+.next a:hover{border-color:var(--accent);text-decoration:none}
+.next a .desc{display:block;color:var(--muted);font-size:.78rem;margin-top:.2rem;font-weight:400}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="row">
+    <a class="brand" href="../">ai-memory</a>
+    <div class="links">
+      <a href="../#install">Install</a>
+      <a href="operator.html" style="color:var(--text)">Operator</a>
+      <a href="developer.html">Developer</a>
+      <a href="decision-maker.html">Decision</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<div class="crumb"><a href="../">ai-memory</a> &nbsp;/&nbsp; audience &nbsp;/&nbsp; operator</div>
+
+<header class="hero wrap-mid">
+  <div class="eyebrow">For operators / SREs</div>
+  <h1>Deploy ai-memory in production.</h1>
+  <p class="lede">ai-memory ships as a single static Rust binary with four operational modes. This page is the operator's path: install, configure, deploy, observe, harden, upgrade. Every claim links to the reference doc that backs it.</p>
+</header>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">1. Install</div>
+  <h2>One binary, three packaging paths.</h2>
+  <p>Pick the path that matches how your fleet is already managed. All three deliver the same binary.</p>
+
+  <h3>Homebrew (macOS, Linuxbrew)</h3>
+  <pre><code>brew install alphaonedev/tap/ai-memory</code></pre>
+
+  <h3>COPR (Fedora / RHEL / Rocky)</h3>
+  <pre><code>sudo dnf copr enable alpha-one-ai/ai-memory
+sudo dnf install ai-memory</code></pre>
+
+  <h3>cargo (any platform with Rust 1.88+)</h3>
+  <pre><code>cargo install ai-memory</code></pre>
+
+  <p>Full matrix (Windows, .deb manual install, Docker, source) is in <a href="../INSTALL.md">INSTALL.md</a>.</p>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">2. Configure</div>
+  <h2>config.toml essentials.</h2>
+  <p>Default config path: <code>~/.config/ai-memory/config.toml</code> on Linux/macOS. Override with <code>--config</code> or unset entirely via <code>AI_MEMORY_NO_CONFIG=1</code> (tests). The full ladder is <strong>CLI flag &gt; AI_MEMORY_* env var &gt; config.toml field &gt; compiled default</strong>.</p>
+
+  <pre><code># config.toml — minimal production
+db = "/var/lib/ai-memory/ai-memory.db"
+
+[identity]
+anonymize_default = false
+
+[permissions]
+mode = "enforce"       # v0.7.0 secure default
+
+[tier]
+default = "semantic"   # keyword | semantic | smart | autonomous
+
+[http]
+host = "127.0.0.1"
+port = 9077
+tls_cert = "/etc/ai-memory/tls.crt"
+tls_key  = "/etc/ai-memory/tls.key"
+api_key_file = "/etc/ai-memory/api.key"  # mode 0400, owned by service user</code></pre>
+
+  <p>Every knob &mdash; including the 28 environment variables, secret-vs-config classification, and precedence regression tests &mdash; is enumerated in <a href="../ADMIN_GUIDE.md">ADMIN_GUIDE.md</a>.</p>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">3. Deploy</div>
+  <h2>Four operational modes.</h2>
+
+  <dl class="tld">
+    <dt>stdio MCP</dt>
+    <dd><code>ai-memory mcp</code> &mdash; long-lived stdio subprocess, launched by the AI client. Best for single-developer local use.</dd>
+    <dt>HTTP daemon</dt>
+    <dd><code>ai-memory serve</code> &mdash; Axum REST on port 9077, 50 endpoints. Best for shared org deployments with mTLS or API-key gating.</dd>
+    <dt>autonomous curator</dt>
+    <dd><code>ai-memory curate</code> &mdash; long-running consolidation + reflection loop, requires Ollama-served LLM. Best as a sidecar to the HTTP daemon.</dd>
+    <dt>quorum sync</dt>
+    <dd><code>ai-memory federate</code> &mdash; signed-event replication between peer nodes. Best for multi-region hive (T3+) deployments.</dd>
+  </dl>
+
+  <p>The same binary covers all four, distinguished only by the subcommand. Architectures T1 (single agent) through T5 (global hive) are walked through in <a href="../architectures.html">architectures.html</a>.</p>
+
+  <h3>systemd unit for the HTTP daemon</h3>
+  <pre><code>[Unit]
+Description=ai-memory HTTP daemon
+After=network-online.target
+
+[Service]
+Type=simple
+User=ai-memory
+Group=ai-memory
+ExecStart=/usr/bin/ai-memory --config /etc/ai-memory/config.toml serve
+Restart=on-failure
+RestartSec=2s
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target</code></pre>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">4. Observe</div>
+  <h2>Telemetry, audit, signed events.</h2>
+  <p>Three observability surfaces, all on by default:</p>
+  <ul>
+    <li><strong>tracing logs</strong> &mdash; standard <code>tracing-subscriber</code> via <code>RUST_LOG</code>. JSON output supported.</li>
+    <li><strong>append-only audit chain</strong> &mdash; per-event Ed25519-signed records under the configured audit dir. Replayable via <code>ai-memory verify</code>.</li>
+    <li><strong>capabilities v3</strong> &mdash; <code>GET /api/v1/capabilities</code> returns pre-computed calibration strings for monitoring tooling. Never includes secrets.</li>
+  </ul>
+  <p>Full surface in <a href="../telemetry.md">telemetry.md</a> and <a href="../signed-events-v4.md">signed-events-v4.md</a>.</p>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">5. Harden</div>
+  <h2>The v0.7.0 secure-default posture.</h2>
+
+  <ol>
+    <li><strong>Permissions on by default.</strong> <code>permissions.mode = "enforce"</code> from v0.7.0 onward. Advisory/off requires explicit opt-out.</li>
+    <li><strong>SSRF gate on webhooks.</strong> <code>AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS</code> defaults false; loopback URLs rejected.</li>
+    <li><strong>Operator-signed substrate rules (L1&ndash;L6).</strong> Governance rules are Ed25519-signed by <code>AI_MEMORY_OPERATOR_PUBKEY</code>; treat that env var as override-authority.</li>
+    <li><strong>HMAC-required subscriptions.</strong> Webhook subscribers must register an HMAC secret; unsigned events are rejected.</li>
+    <li><strong>API-key file mode 0400.</strong> The Plan C entrypoint reads <code>AI_MEMORY_API_KEY</code> from env and writes the config at boot; never logged.</li>
+    <li><strong>SQLcipher build available.</strong> Enables at-rest encryption with <code>--db-passphrase-file</code> (also mode 0400). See <a href="../encryption.html">encryption.html</a>.</li>
+  </ol>
+
+  <div class="callout warn"><strong>Override authority warning.</strong> Anyone who sets <code>AI_MEMORY_OPERATOR_PUBKEY</code> controls rule signing. Lock down host access; keep the operator key offline when possible.</div>
+
+  <p>Full hardening checklist: <a href="../SECURITY.md">SECURITY.md</a>.</p>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">6. Container deployment (Plan C)</div>
+  <h2>One image, env-driven config.</h2>
+  <p>Plan C is the production container recipe. Image boots, reads <code>AI_MEMORY_API_KEY</code> + <code>AI_MEMORY_DB</code> from env, renders <code>config.toml</code>, and exec's the daemon. No baked-in secrets.</p>
+
+  <pre><code>docker run -d \
+  --name ai-memory \
+  -p 9077:9077 \
+  -e AI_MEMORY_API_KEY=$(cat /run/secrets/ai-memory-key) \
+  -e AI_MEMORY_DB=/data/ai-memory.db \
+  -v /var/lib/ai-memory:/data \
+  ghcr.io/alphaonedev/ai-memory:0.7.0</code></pre>
+
+  <p>Per-issue context (#845 hardened entrypoint, never-leak invariant): <a href="../integrations/README.md">integrations/README.md</a>.</p>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">7. Upgrade</div>
+  <h2>Schema-versioned, migration-tested.</h2>
+  <p>The SQLite store carries an integer schema version (currently v43). Migrations run on first open of the new binary; the migration set is dry-run-tested against the operator's own DB by the project's dogfood script before a release ships.</p>
+  <ul>
+    <li>Backup the DB before upgrade: <code>cp ai-memory.db ai-memory.db.bak</code>.</li>
+    <li>Stop the daemon, install the new binary, restart. Migrations run automatically.</li>
+    <li>Validate post-upgrade: <code>ai-memory stats &amp;&amp; ai-memory verify --since 24h</code>.</li>
+  </ul>
+  <p>Version-to-version upgrade notes: <a href="../MIGRATION_v0.7.md">MIGRATION_v0.7.md</a>, <a href="../v0.7.0/release-notes.md">v0.7.0 release notes</a>.</p>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">Test results</div>
+  <h2>Evidence behind the SHIP verdict.</h2>
+  <p>Every release ships with a public test campaign directory under <code>docs/v0.7.0/test-campaign-YYYY-MM-DD/</code>. The latest Track A NHI re-run (2026-05-18) verifies the operator-facing surfaces &mdash; install, configure, deploy, observe, harden, upgrade &mdash; against the post-fix-batch binary.</p>
+  <div class="next">
+    <a href="../v0.7.0/test-campaign-2026-05-18/"><strong>Latest campaign index</strong><span class="desc">2026-05-18 &middot; SHIP &middot; 85 PASS / 0 FAIL</span></a>
+    <a href="../v0.7.0/test-campaign-2026-05-18/audience-non-technical.md"><strong>For non-technical readers</strong><span class="desc">Plain-English verdict + what it means for you</span></a>
+    <a href="../v0.7.0/test-campaign-2026-05-18/audience-c-level.md"><strong>For decision-makers</strong><span class="desc">Risk, cost, comparison, roadmap</span></a>
+    <a href="../v0.7.0/test-campaign-2026-05-18/audience-sme-engineer.md"><strong>For SME engineers</strong><span class="desc">Reproducibility, methodology, six-level provenance</span></a>
+  </div>
+</section>
+
+<section class="wrap-mid">
+  <div class="eyebrow-h2">Next</div>
+  <h2>Where to go from here.</h2>
+  <div class="next">
+    <a href="../ADMIN_GUIDE.md"><strong>Admin guide</strong><span class="desc">Full operator reference</span></a>
+    <a href="../SECURITY.md"><strong>Security posture</strong><span class="desc">Threat model + hardening</span></a>
+    <a href="../TROUBLESHOOTING.md"><strong>Troubleshooting</strong><span class="desc">Common errors</span></a>
+    <a href="../production-deployment.md"><strong>Production checklist</strong><span class="desc">Pre-flight before go-live</span></a>
+    <a href="../telemetry.md"><strong>Telemetry</strong><span class="desc">Metrics + tracing surface</span></a>
+    <a href="../signed-events-v4.md"><strong>Signed events</strong><span class="desc">Audit chain spec</span></a>
+    <a href="../v0.7.0/test-campaign-2026-05-18/"><strong>Latest test campaign</strong><span class="desc">2026-05-18 SHIP evidence</span></a>
+    <a href="../federation.md"><strong>Federation</strong><span class="desc">Multi-node sync</span></a>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap-mid">
+    <a href="../">&larr; back to ai-memory</a> &middot;
+    <a href="https://github.com/alphaonedev/ai-memory-mcp">source</a> &middot;
+    Apache-2.0 &middot; &copy; 2026 AlphaOne LLC
+  </div>
+</footer>
+
+</body>
+</html>

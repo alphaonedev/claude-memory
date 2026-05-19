@@ -1,0 +1,25 @@
+-- Copyright 2026 AlphaOne LLC
+-- SPDX-License-Identifier: Apache-2.0
+--
+-- v0.7.0 Provenance Gap 1 (issue #884, schema v45 sqlite).
+--
+-- Adds `memories.version BIGINT NOT NULL DEFAULT 1` so every memory
+-- row carries an optimistic-concurrency counter. The `version` column
+-- is bumped on every mutation by `storage::update`; concurrent updates
+-- pass `expected_version` (via MCP `memory_update` param or HTTP
+-- `If-Match: <version>` header) and receive a typed `CONFLICT`
+-- envelope when the stored version has drifted.
+--
+-- # Idempotency
+--
+-- The Rust migrate ladder probes `PRAGMA table_info(memories)` for the
+-- `version` column before emitting the ALTER (SQLite has no
+-- `ADD COLUMN IF NOT EXISTS`). This file holds the supporting
+-- documentation. Pure additive on legacy rows: every pre-v45 row
+-- inherits `version = 1` via the SQL DEFAULT clause; subsequent
+-- updates monotonically bump from there.
+--
+-- See `tests/optimistic_concurrency.rs` for the regression-pin:
+-- two concurrent updates against the same memory must produce
+-- exactly one winner; the loser receives a `CONFLICT` envelope
+-- naming the current stored version.

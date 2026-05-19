@@ -25,14 +25,9 @@ use ai_memory::profile::{Family, Profile};
 use ai_memory::quotas::{self, QuotaOp};
 use rusqlite::Connection;
 use serde_json::json;
-use tempfile::NamedTempFile;
 
-fn fresh_db() -> (NamedTempFile, std::path::PathBuf) {
-    let f = NamedTempFile::new().expect("tempfile");
-    let p = f.path().to_path_buf();
-    let _ = ai_memory::db::open(&p).expect("db::open");
-    (f, p)
-}
+mod common;
+use common::fresh_db_tempfile_path as fresh_db;
 
 #[test]
 fn k8_quota_status_registered_under_power_family() {
@@ -59,18 +54,12 @@ fn k8_quota_status_loaded_under_full_profile() {
     );
     assert_eq!(
         Profile::full().expected_tool_count(),
-        71,
-        "tool count cascade must advance to 71 with v0.7.0 L2-3 \
-         memory_dependents_of_invalidated, v0.7.0 L2-6 \
-         memory_skill_promote_from_reflection, v0.7.0 L2-7 \
-         memory_skill_compositional_context on top of v0.7.0 issue #691 \
-         memory_check_agent_action + memory_rule_list (post-L2-2), \
-         v0.7.0 L1-5 5 memory_skill_* tools, v0.7.0 QW-1 \
-         memory_export_reflection, v0.7.0 QW-3 follow-up \
-         memory_offload + memory_deref, v0.7.0 WT-1-C memory_atomise, \
-         v0.7.0 QW-2 memory_persona + memory_persona_generate, \
-         v0.7.0 Form 3 memory_ingest_multistep, and \
-         v0.7.0 Form 5 memory_calibrate_confidence"
+        73,
+        "tool count cascade must advance to 73 with v0.7.0 Gap 3 (#886) \
+         memory_recall_observations on top of issues #224 + #311 \
+         memory_share (Phase 3 Memory Sharing & Sync RFC) + the prior \
+         v0.7.0 cascade (Form 5, Form 3, QW-2, WT-1-C, QW-3 follow-up, \
+         QW-1, L1-5, #691, L2-2 through L2-7)"
     );
 }
 

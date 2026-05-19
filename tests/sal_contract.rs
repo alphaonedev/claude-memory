@@ -41,6 +41,8 @@ use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{AgentRegistration, Memory, MemoryLink, Tier};
 use ai_memory::store::{CallerContext, Capabilities, Filter, MemoryStore, StoreError, UpdatePatch};
 
+mod common;
+
 // ---------------------------------------------------------------------------
 // Generic helpers + contract bodies — backend-agnostic.
 // ---------------------------------------------------------------------------
@@ -76,6 +78,7 @@ fn make_memory(namespace: &str, title: &str, content: &str) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 
@@ -403,6 +406,7 @@ fn make_link(source_id: &str, target_id: &str, relation: &str) -> MemoryLink {
         observed_by: None,
         valid_from: None,
         valid_until: None,
+        attest_level: None,
     }
 }
 
@@ -792,11 +796,7 @@ mod postgres_contract {
     };
     use ai_memory::store::postgres::PostgresStore;
 
-    /// Returns Some(url) when the live-PG fixture is configured, None
-    /// otherwise. Tests that get None print a skip message and return.
-    fn postgres_url() -> Option<String> {
-        std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-    }
+    use crate::common::postgres_url;
 
     async fn fresh_store() -> Option<PostgresStore> {
         let url = postgres_url()?;

@@ -271,6 +271,17 @@ pub(super) fn handle_link(
         }
     }
 
+    // v0.7.0 Gap 3 (#886) — recall-consumption hook.
+    //
+    // When the request body cites a prior `recall_id` plus a list
+    // of `cited_memory_ids` the caller used to compose this link
+    // request, flip the matching `recall_observations` rows to
+    // `consumed = TRUE` with `consumed_by_memory_id = source_id`
+    // (the link's owner memory). Best-effort; substrate errors do
+    // NOT roll back the link write — the audit ledger is
+    // subordinate to the underlying graph mutation.
+    crate::observations::try_mark_consumed_from_params(conn, params, source_id);
+
     Ok(json!({
         "linked": true,
         "source_id": source_id,
@@ -381,6 +392,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 
@@ -687,6 +699,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 

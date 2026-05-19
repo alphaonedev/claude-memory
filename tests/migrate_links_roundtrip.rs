@@ -61,6 +61,7 @@ fn seed_memory(id: &str, ns: &str, title: &str) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 
@@ -102,6 +103,7 @@ fn link(src: &str, dst: &str, rel: &str) -> MemoryLink {
         observed_by: None,
         valid_from: None,
         valid_until: None,
+        attest_level: None,
     }
 }
 

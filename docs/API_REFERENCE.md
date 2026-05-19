@@ -335,11 +335,11 @@ Immediate garbage collection. Empty body. Returns `{"expired_deleted":N}`.
 { "source_id": "abc", "target_id": "def", "relation": "supersedes" }
 ```
 
-Relations: `related_to`, `supersedes`, `contradicts`, `derived_from`.
+Relations (six at v0.7.0; was four at v0.6.x): `related_to`, `supersedes`, `contradicts`, `derived_from`, `reflects_on` (recursive-learning Task 1/8), `derives_from` (WT-1-A atomisation — atom row → parent memory). Canonical enum in `src/models/link.rs::MemoryLinkRelation`.
 
 ### `GET /api/v1/links/{id}`
 
-Returns inbound + outbound links for a memory.
+Returns inbound + outbound links for a memory under `{"links": [...]}`. Each row in the array surfaces the full link envelope including the v0.7 temporal-validity columns (`valid_from`, `valid_until`, `observed_by`) and the attestation columns (`signature`, `attest_level`, `signed_at`) — wired through `db::get_links` per issue [#860](https://github.com/alphaonedev/ai-memory-mcp/issues/860).
 
 ## Knowledge Graph + taxonomy (v0.6.3)
 

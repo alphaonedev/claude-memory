@@ -52,10 +52,8 @@ use ai_memory::store::sqlite::SqliteStore;
 use serde_json::Value;
 use tokio::sync::{Mutex, Notify, RwLock};
 
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    listener.local_addr().expect("local_addr").port()
-}
+mod common;
+use common::free_port;
 
 /// Build an `AppState` with a SAL-routed `SqliteStore` opened against
 /// a tempfile so the freshly-applied migrations populate the
@@ -97,6 +95,9 @@ fn build_sqlite_app_state() -> (AppState, tempfile::NamedTempFile) {
         replay_cache: std::sync::Arc::new(ai_memory::identity::replay::ReplayCache::default()),
 
         verify_require_nonce: false,
+        federation_nonce_cache: std::sync::Arc::new(
+            ai_memory::identity::replay::FederationNonceCache::default(),
+        ),
         autonomous_hooks: false,
         recall_scope: Arc::new(None),
         deferred_audit_queue: Arc::new(None),
@@ -181,23 +182,17 @@ async fn s75_capabilities_surfaces_runtime_db_schema_version() {
          freshly-opened SqliteStore (migrations were applied at open \
          time); got {v}"
     );
+    // v0.7.0 refactor PR-1 (#793) — schema-pins SSOT. Pin against the
+    // canonical constant re-exported from the migrations module so the
+    // next schema bump touches ONE constant and this test fixture
+    // picks the new value up automatically.
+    let expected = ai_memory::db::current_schema_version_for_tests();
     assert_eq!(
-        v, 42,
-        "S75: db_schema_version must match `CURRENT_SCHEMA_VERSION` \
-         (42 at v0.7.0 polish-readiness — v0.7.0 grand-slam delta over \
-         the prior 37: Form 4 (#757, citations/source-uri/atom-span) \
-         bumped 37 to 38, Form 5 (#758, confidence-calibration + \
-         shadow-mode) bumped 38 to 39, Cluster C signed-events DLQ \
-         (issue #767 / SEC-3) bumped 39 to 40, Cluster G \
-         shadow-retention denormalised source column + compound \
-         index (issue #767 / PERF-4) bumped 40 to 41, and polish \
-         PERF-8 (issue #781, auto_persona mentioned_entity_id + \
-         partial index replacing the content LIKE scan) bumped 41 \
-         to 42. Pre-grand-slam baseline 37 history retained in the \
-         pre-cluster-G version of this test. A drift here means \
-         either the binary's migrate ladder skipped a step or the new \
-         SAL `schema_version()` lookup is reading from the wrong \
-         source."
+        v, expected,
+        "S75: db_schema_version must match the canonical \
+         `CURRENT_SCHEMA_VERSION` ({expected}); drift means the binary's \
+         migrate ladder skipped a step or the new SAL `schema_version()` \
+         lookup is reading from the wrong source."
     );
 
     // 4) The wire-format discriminator stays alongside but distinct

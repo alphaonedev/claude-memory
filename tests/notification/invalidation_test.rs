@@ -68,6 +68,7 @@ fn make_mem(title: &str, namespace: &str, kind: MemoryKind) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 

@@ -52,6 +52,9 @@ use rusqlite::Connection;
 use serde_json::json;
 use std::path::Path;
 
+mod common;
+use common::fresh_conn;
+
 /// Process-wide mutex serialising registry mutation across the
 /// scenarios below. Tests in this file MUST `let _g =
 /// registry_lock().lock().unwrap();` at function entry and hold the
@@ -61,10 +64,6 @@ use std::path::Path;
 fn registry_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn fresh_conn() -> Connection {
-    db::open(Path::new(":memory:")).expect("open in-memory DB")
 }
 
 /// Insert a memory in `namespace` and return its id.
@@ -96,6 +95,7 @@ fn insert_memory(conn: &Connection, namespace: &str, title: &str) -> String {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(conn, &mem).expect("insert memory")
 }
@@ -510,6 +510,7 @@ fn handle_kg_invalidate_dispatches_event_with_owner_agent_id_from_metadata() {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let src_id = db::insert(&conn, &src_mem).unwrap();
     let dst_id = insert_memory(&conn, ns, "dst");

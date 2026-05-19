@@ -55,14 +55,8 @@ use ai_memory::store::postgres::PostgresStore;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, RwLock};
 
-fn postgres_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-}
-
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    listener.local_addr().expect("local_addr").port()
-}
+mod common;
+use common::{free_port, postgres_url};
 
 #[derive(Clone)]
 struct MockPeer {
@@ -148,6 +142,7 @@ fn federation_cfg_for_test(peer_urls: &[String], quorum_writes: usize) -> Federa
         // v0.7.0 fold-A2A1.4 backcompat default: this test path doesn't run
         // with api-key auth, so no outbound x-api-key header is needed.
         api_key: None,
+        signing_key: None,
     }
 }
 
@@ -178,6 +173,9 @@ async fn build_postgres_app_state(url: &str, federation: Option<FederationConfig
         llm_call_timeout: Duration::from_secs(30),
         replay_cache: Arc::new(ai_memory::identity::replay::ReplayCache::default()),
         verify_require_nonce: false,
+        federation_nonce_cache: std::sync::Arc::new(
+            ai_memory::identity::replay::FederationNonceCache::default(),
+        ),
         autonomous_hooks: false,
         recall_scope: Arc::new(None),
         deferred_audit_queue: Arc::new(None),
@@ -438,10 +436,14 @@ async fn subscribe_postgres_replays_history() {
     // The list_subscriptions endpoint resolves the subscription back
     // through the SAL `list` projection. The post-fanout local row
     // is still present (fanout doesn't move ownership, it mirrors).
+    // Per #874 (security-medium, 2026-05-18): the list_subscriptions
+    // handler requires X-Agent-Id to match the agent_id= query param,
+    // else it returns 403 before reaching the SAL list projection.
     let list_resp = client
         .get(format!(
             "{base}/api/v1/subscriptions?agent_id={subscriber_aid}"
         ))
+        .header("x-agent-id", &subscriber_aid)
         .send()
         .await
         .expect("list subs")

@@ -29,6 +29,10 @@ use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, Tier};
 use chrono::Utc;
 
+mod common;
+#[cfg(feature = "sal-postgres")]
+use common::postgres_url;
+
 /// Test fixture builder. Returns a fully-populated `Memory` with the
 /// supplied `reflection_depth` so individual tests don't have to repeat
 /// the 16-field literal.
@@ -60,6 +64,7 @@ fn make_memory(title: &str, reflection_depth: i32) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 
@@ -204,11 +209,6 @@ fn sqlite_migration_is_idempotent() {
 // Mirrors the gating pattern in tests/g1_postgres_quota_increment_on_store.rs
 // and tests/sal_v07_postgres_findings.rs.
 // ─────────────────────────────────────────────────────────────────────
-
-#[cfg(feature = "sal-postgres")]
-fn postgres_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-}
 
 #[cfg(feature = "sal-postgres")]
 #[tokio::test]

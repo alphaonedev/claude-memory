@@ -243,14 +243,14 @@ mod tests {
     #[test]
     fn governance_default_policy() {
         let p = GovernancePolicy::default();
-        assert_eq!(p.write, GovernanceLevel::Any);
-        assert_eq!(p.promote, GovernanceLevel::Any);
-        assert_eq!(p.delete, GovernanceLevel::Owner);
-        assert_eq!(p.approver, ApproverType::Human);
+        assert_eq!(p.core.write, GovernanceLevel::Any);
+        assert_eq!(p.core.promote, GovernanceLevel::Any);
+        assert_eq!(p.core.delete, GovernanceLevel::Owner);
+        assert_eq!(p.core.approver, ApproverType::Human);
         // v0.6.3.1 (P4, G1): inheritance is the documented default. Existing
         // rows are backfilled to true by migration 0012; new rows that omit
         // the field deserialize as true via #[serde(default)].
-        assert!(p.inherit);
+        assert!(p.core.inherit);
     }
 
     #[test]
@@ -260,8 +260,8 @@ mod tests {
         // of parent inheritance the moment they write a child policy.
         let json = r#"{"write":"approve"}"#;
         let p: GovernancePolicy = serde_json::from_str(json).unwrap();
-        assert_eq!(p.write, GovernanceLevel::Approve);
-        assert!(p.inherit, "missing `inherit` must deserialize as true");
+        assert_eq!(p.core.write, GovernanceLevel::Approve);
+        assert!(p.core.inherit, "missing `inherit` must deserialize as true");
     }
 
     #[test]
@@ -270,7 +270,7 @@ mod tests {
         // inheritance, the false value must round-trip and serialize.
         let json = r#"{"write":"any","inherit":false}"#;
         let p: GovernancePolicy = serde_json::from_str(json).unwrap();
-        assert!(!p.inherit);
+        assert!(!p.core.inherit);
         let back = serde_json::to_value(&p).unwrap();
         assert_eq!(back["inherit"], false);
     }
@@ -316,26 +316,15 @@ mod tests {
     #[test]
     fn governance_policy_full_roundtrip() {
         let p = GovernancePolicy {
-            write: GovernanceLevel::Registered,
-            promote: GovernanceLevel::Approve,
-            delete: GovernanceLevel::Owner,
-            approver: ApproverType::Agent("maintainer".to_string()),
-            inherit: true,
-            max_reflection_depth: None,
-            auto_export_reflections_to_filesystem: None,
-            auto_atomise: None,
-            auto_atomise_threshold_cl100k: None,
-            auto_atomise_max_atom_tokens: None,
-            auto_atomise_max_retries: None,
-            auto_persona_trigger_every_n_memories: None,
-            auto_export_personas_to_filesystem: None,
-            auto_atomise_mode: None,
-            legacy_per_pair_classifier: None,
-            auto_classify_kind: None,
-            synthesis_failure_mode: None,
-            synthesis_max_deletes_per_call: None,
-            synthesis_max_candidate_chars: None,
-            multistep_max_content_chars: None,
+            core: CorePolicy {
+                write: GovernanceLevel::Registered,
+                promote: GovernanceLevel::Approve,
+                delete: GovernanceLevel::Owner,
+                approver: ApproverType::Agent("maintainer".to_string()),
+                inherit: true,
+                max_reflection_depth: None,
+            },
+            ..Default::default()
         };
         let json = serde_json::to_string(&p).unwrap();
         let back: GovernancePolicy = serde_json::from_str(&json).unwrap();
@@ -381,20 +370,20 @@ mod tests {
     fn governance_partial_policy_write_only_uses_defaults() {
         let json = serde_json::json!({"write": "owner"});
         let parsed: GovernancePolicy = serde_json::from_value(json).expect("write-only parses");
-        assert_eq!(parsed.write, GovernanceLevel::Owner);
-        assert_eq!(parsed.promote, GovernanceLevel::Any);
-        assert_eq!(parsed.delete, GovernanceLevel::Owner);
-        assert_eq!(parsed.approver, ApproverType::Human);
+        assert_eq!(parsed.core.write, GovernanceLevel::Owner);
+        assert_eq!(parsed.core.promote, GovernanceLevel::Any);
+        assert_eq!(parsed.core.delete, GovernanceLevel::Owner);
+        assert_eq!(parsed.core.approver, ApproverType::Human);
     }
 
     #[test]
     fn governance_partial_policy_write_and_promote() {
         let json = serde_json::json!({"write": "any", "promote": "registered"});
         let parsed: GovernancePolicy = serde_json::from_value(json).expect("parses");
-        assert_eq!(parsed.promote, GovernanceLevel::Registered);
+        assert_eq!(parsed.core.promote, GovernanceLevel::Registered);
         // Absent fields still take defaults.
-        assert_eq!(parsed.delete, GovernanceLevel::Owner);
-        assert_eq!(parsed.approver, ApproverType::Human);
+        assert_eq!(parsed.core.delete, GovernanceLevel::Owner);
+        assert_eq!(parsed.core.approver, ApproverType::Human);
     }
 
     #[test]
@@ -531,6 +520,7 @@ mod tests {
             confidence_source: ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: Memory = serde_json::from_str(&json).unwrap();
@@ -555,9 +545,12 @@ mod tests {
             "approver": {"agent": "alice"}
         });
         let parsed: GovernancePolicy = serde_json::from_value(json).expect("parses");
-        assert_eq!(parsed.write, GovernanceLevel::Owner);
-        assert_eq!(parsed.approver, ApproverType::Agent("alice".to_string()));
-        assert_eq!(parsed.promote, GovernanceLevel::Any);
-        assert_eq!(parsed.delete, GovernanceLevel::Owner);
+        assert_eq!(parsed.core.write, GovernanceLevel::Owner);
+        assert_eq!(
+            parsed.core.approver,
+            ApproverType::Agent("alice".to_string())
+        );
+        assert_eq!(parsed.core.promote, GovernanceLevel::Any);
+        assert_eq!(parsed.core.delete, GovernanceLevel::Owner);
     }
 }

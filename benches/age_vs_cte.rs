@@ -540,6 +540,18 @@ async fn insert_fixture(
             // production.
             reflection_depth: 0,
             memory_kind: ai_memory::models::MemoryKind::Observation,
+            // v0.7.0 QW-2 + Form 4 + Form 5 fields. Bench fixtures use
+            // defaults (no persona, no citations, caller-provided
+            // confidence) — KG-traversal perf doesn't depend on these.
+            entity_id: None,
+            persona_version: None,
+            citations: vec![],
+            source_uri: None,
+            source_span: None,
+            confidence_source: ai_memory::models::ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
+            version: 1,
         };
         store.store(&ctx, &mem).await?;
     }

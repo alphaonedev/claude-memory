@@ -69,9 +69,135 @@ chain — with V-4 cross-row hash chain at v34 (#698) — sidechain
 transcripts with `memory_replay`, programmable
 25-event hook pipeline, opt-in Apache AGE acceleration, K1/G1
 namespace-inheritance enforcement, real permission system with
-deny-first semantics, A2A maturity).
+deny-first semantics, A2A maturity). Note: signed-events row `sig`
+population is gated on the resolved daemon `agent_id` having an
+Ed25519 `*.priv` on disk under the key directory
+(`src/main.rs:96-98` — `load_daemon_signing_key` returning `None`
+deliberately swallows the failure with the "continuing unsigned"
+stderr line; the cross-row hash chain itself remains tamper-evident
+in either posture).
 
 ## What's new since v0.6.4
+
+### Provenance gaps 1-7 + dogfood-fix sprint (2026-05-18)
+
+ai-memory v0.7.0 documented a **7-level provenance framework** (Identity,
+Source, Causal, Capture confidence, Versioned, Reciprocal, Decoration) on
+the capabilities surface, but the substrate's write + read paths carried
+partial coverage — every gap was a real defect under the prime directive.
+This sprint closes all seven end-to-end across the sqlite and postgres
+adapters, lands the four wire-schema + docstring fixes a 2026-05-19
+dogfood session surfaced, and ships the postgres parity work tracked
+under issue [#894](https://github.com/alphaonedev/ai-memory-mcp/issues/894).
+Tool count rises **71 → 73** (Gap 3 `memory_recall_observations` + the
+Gap 4 `confidence_tier` callable). Schema ladder advances to **sqlite v47
+/ postgres v29**. Cross-link to the full evidence bundle:
+[`docs/v0.7.0/test-campaign-2026-05-18-dogfood/`](./test-campaign-2026-05-18-dogfood/).
+
+**The 7-level framework — gap × before × after × evidence.**
+
+| Gap | Level | Before | After | Issue | Commit |
+|----|-------|--------|-------|-------|--------|
+| 1 | Versioned (optimistic concurrency) | `memory_update` was last-write-wins; concurrent writers silently clobbered each other | `memories.version BIGINT NOT NULL DEFAULT 1`; `update_with_expected_version` returns typed `VersionConflict { id, expected_version, current_version }`; MCP `expected_version` arg + HTTP `If-Match: <version>` → 409 with structured envelope | [#884](https://github.com/alphaonedev/ai-memory-mcp/issues/884) | [`6ad87c8`](https://github.com/alphaonedev/ai-memory-mcp/commit/6ad87c824) |
+| 2 | Source (URI as first-class) | `source_uri` lived in `metadata` JSON; un-indexable, un-queryable, surfaced only by full-row decode | First-class column with partial index `idx_memories_source_uri WHERE source_uri IS NOT NULL`; schema v45 backfills from `metadata.source_uri` AND `citations[0].uri`; insert path promotes it out of metadata automatically | [#885](https://github.com/alphaonedev/ai-memory-mcp/issues/885) | [`6ad87c8`](https://github.com/alphaonedev/ai-memory-mcp/commit/6ad87c824) |
+| 3 | Causal (recall-consumption ledger) | Substrate couldn't tell which recall candidates the caller actually cited downstream | Schema v47 `recall_observations` ledger keyed by `(recall_id, memory_id)` with `retriever`, `rank`, `score`, `consumed`, `consumed_by_memory_id` columns; `memory_recall` stamps UUIDv4 `recall_id` into every response; `memory_store` + `memory_link` consume hook reads `recall_id + cited_memory_ids` and flips matching rows; new `memory_recall_observations` MCP tool for filtered read-back; TTL pruner gated by `AI_MEMORY_OBSERVATIONS_TTL_DAYS` (default 7) | [#886](https://github.com/alphaonedev/ai-memory-mcp/issues/886) | [`3cd8c11`](https://github.com/alphaonedev/ai-memory-mcp/commit/3cd8c116d) |
+| 4 | Capture confidence (tier breakpoints exposed) | `confidence` was a bare f64; callers re-derived `Confirmed` / `Likely` / `Ambiguous` against undocumented breakpoints | `ConfidenceTier` enum (`Confirmed >= 0.95`, `Likely >= 0.7`, `Ambiguous < 0.7`); `Memory::confidence_tier()` method; capabilities-v3 `confidence_calibration.tier_thresholds` block surfaces `ConfidenceTierThresholds { confirmed, likely, ambiguous }`; `memory_recall` accepts `confidence_tier: Option<String>` filter | [#887](https://github.com/alphaonedev/ai-memory-mcp/issues/887) | [`23379e2`](https://github.com/alphaonedev/ai-memory-mcp/commit/23379e26f) |
+| 5 | Reciprocal (edit-source on supersede) | `update_with_archive_on_supersede` archived the old row but emitted no supersede-lineage audit columns | `archived_memories.archive_reason = 'superseded'` on OLD row; `new_memory.metadata.superseded_id` forward pointer on NEW row; atomic write inside a transaction (SELECT FOR UPDATE → archive → delete old → insert new); the FK `target_id REFERENCES memories(id)` prevents a `memory_links` row at supersede time — provenance is encoded via the two metadata mechanisms instead | [#888](https://github.com/alphaonedev/ai-memory-mcp/issues/888) | [`6ad87c8`](https://github.com/alphaonedev/ai-memory-mcp/commit/6ad87c824) |
+| 6 | Source (query by URI) | `source_uri` filter unsupported — callers had to full-scan and post-filter | MCP `memory_search` accepts `source_uri` query arg; storage `search_with_source_uri` + `list_by_source_uri` hit the partial index from Gap 2; namespace composability preserved | [#889](https://github.com/alphaonedev/ai-memory-mcp/issues/889) | [`6ad87c8`](https://github.com/alphaonedev/ai-memory-mcp/commit/6ad87c824) |
+| 7 | Decoration (recall response audit envelope) | `memory_recall` returned raw rows; callers re-derived freshness, link-attest, tier from N+1 lookups | Default `verbose_provenance=true` decorates every row with `confidence`, derived `confidence_tier` (from Gap 4), `source`, `source_uri`, derived `freshness_state` (computed from `expires_at + last_accessed_at + access_count`), `access_count`, `last_accessed_at`, `latest_link_attest_level` (strongest `AttestLevel` across incident links); envelope echoes Gap 3 `recall_id` UUID for downstream citation | [#890](https://github.com/alphaonedev/ai-memory-mcp/issues/890) | [`c3e344c`](https://github.com/alphaonedev/ai-memory-mcp/commit/c3e344c7a) |
+
+**Wire contract notes.**
+
+- The `confidence_tier` breakpoints are surfaced on the capabilities v3
+  envelope under `confidence_calibration.tier_thresholds`; legacy v2
+  consumers stay backward-compatible via `#[serde(default)]`.
+- HTTP `If-Match` accepts both bare integer (`If-Match: 5`) and quoted
+  ETag-style (`If-Match: "5"`) per RFC 7232 §3.1; the conflict envelope
+  matches the MCP shape (`{status: "conflict", id, expected_version,
+  current_version}`).
+- The Gap 3 ledger's `consumed` boolean defaults to `FALSE` — recall
+  candidates that the caller never cites stay observable as
+  `consumed=false` rows so substrate-side analytics can distinguish
+  recall surface area from recall *use*.
+- The Gap 7 verbose envelope respects the post-#829 trimmed budget
+  ceiling; verbose total stays under 10 000 cl100k tokens.
+
+**Dogfood findings (2026-05-19 session) — 5 surfaced, 4 fixed in this
+sprint.**
+
+Per pm-v3 (memory `cd8ede94`): documentation drift between code behavior
+and docstrings is a real defect — file AND fix. The dogfood session that
+validated Gaps 1-7 on a live MCP daemon caught five contract violations
+the unit tests had not pinned. All five were filed at discovery; four
+shipped fixes in the same session.
+
+| Finding | Class | Resolution | Commit |
+|---------|-------|-----------|--------|
+| [#892](https://github.com/alphaonedev/ai-memory-mcp/issues/892) | MCP wire schema | `memory_store` schema missing `source_uri` AND handler dropped it on the floor at `validation.rs:224` (hard-coded `None`). Both sides fixed; SQL row now persists `source_uri` end-to-end through MCP. Verified against `doc:dogfood-2026-05-19-verify` test memory. **CLOSED.** | [`39aa158`](https://github.com/alphaonedev/ai-memory-mcp/commit/39aa158f9) |
+| [#893](https://github.com/alphaonedev/ai-memory-mcp/issues/893) | MCP wire schema | `memory_update` schema missing `expected_version` + `edit_source` — handlers already read them but NHIs couldn't discover them via `tools/list`. Schema fix also exposes `source_uri` on the update path. Verbose token budget trimmed 10196 → 9998 (under 10000 ceiling) by tightening 8 docstring blocks. **CLOSED.** | [`39aa158`](https://github.com/alphaonedev/ai-memory-mcp/commit/39aa158f9) |
+| [#895](https://github.com/alphaonedev/ai-memory-mcp/issues/895) | Docstring drift | `SupersedeResult` docstring claimed a `supersedes` link was written; impl correctly skips (lines 1417-1423) because the FK `target_id REFERENCES memories(id)` would reject pointing at an archived id. Docstring corrected to document the actual two-mechanism encoding. **CLOSED (docs path).** The expensive path (relax FK to allow `memory_links → archived_memories`, OR parallel `archive_links` table) tracked separately for v0.7.0 consideration. | [`19b0854`](https://github.com/alphaonedev/ai-memory-mcp/commit/19b08543c) |
+| [#894](https://github.com/alphaonedev/ai-memory-mcp/issues/894) | Adapter parity | `cargo build --features sal-postgres` failed with 11 distinct compile errors in `src/handlers/*` (Memory / Utc / ConfidenceSource / StorageBackend / `store_err_to_response` / `get_with_visibility_retry` missing imports), blocking postgres adapter work from reaching the gate. All fixes scoped to `cfg(sal-postgres)`-gated import shuffles or visibility tweaks. Postgres SAL parity methods + 5 migrations landed in the same issue. **CLOSED IN-SESSION (all sub-tasks: migrations + SAL methods + parity harness + unblocker).** | [`a69eed0`](https://github.com/alphaonedev/ai-memory-mcp/commit/a69eed03b), [`e3ae0a5`](https://github.com/alphaonedev/ai-memory-mcp/commit/e3ae0a555), [`9bec43c`](https://github.com/alphaonedev/ai-memory-mcp/commit/9bec43c7c), [`62cf9e4`](https://github.com/alphaonedev/ai-memory-mcp/commit/62cf9e49b) |
+| [#891](https://github.com/alphaonedev/ai-memory-mcp/issues/891) | HTTP behavior | HTTP `/api/v1/search` rejects `source_uri`-only with 400 — `search_memories` early-returns on empty `q` before the `source_uri`-only branch can run. One AC pin in `tests/store_parity_gaps.rs` is `#[ignore]`-marked against this. **FILED, retained open** for handler-side fix (pinned by the ignored AC). | (pending) |
+
+**Postgres + Apache AGE parity (issue #894).** Five new migrations
+([commit `a69eed0`](https://github.com/alphaonedev/ai-memory-mcp/commit/a69eed03b))
+mirror the sqlite v45/v46/v47 ladder onto postgres v25 → v29:
+
+- `0025_v07_memory_version.sql` — Gap 1 `BIGINT` optimistic-concurrency counter
+- `0026_v07_source_uri_upgrade.sql` — Gap 2 column + partial index + metadata/citations backfill
+- `0027_v07_recall_observations.sql` — Gap 3 ledger with `(recall_id, memory_id)` PK + FK CASCADE
+- `0028_v07_edit_source_archive_metadata.sql` — Gap 5 `archive_reason` audit + `metadata.superseded_id` forward-pointer indexes
+- `0029_v07_links_temporal_columns.sql` — Gap 7 defensive `ADD COLUMN IF NOT EXISTS` on `memory_links.valid_from / valid_until / observed_by / attest_level`
+
+Greenfield deploys pick up identical columns + indexes inline from
+`postgres_schema.sql`; existing PG installs traverse the five-step
+ladder. Six inherent `PostgresStore` SAL methods
+([commit `e3ae0a5`](https://github.com/alphaonedev/ai-memory-mcp/commit/e3ae0a555))
+bring byte-identical parity with the sqlite-side `storage::` free
+functions (`update_with_expected_version`,
+`update_with_archive_on_supersede`, `search_with_source_uri`,
+`list_by_source_uri`, plus the Gap 7 link-decoration twins). ~870 LOC.
+Inherent (not on the `MemoryStore` trait) so call-sites holding
+`Arc<PostgresStore>` can drive them today; the trait can be widened in
+a follow-up once both adapters stabilise.
+
+**Cross-adapter parity harness.** `tests/store_parity_gaps.rs`
+([commit `9bec43c`](https://github.com/alphaonedev/ai-memory-mcp/commit/9bec43c7c))
+adds six `verify_<gap>_sqlite` reference functions and six matching
+`pg_parity_gap_<n>` postgres twins. Sqlite-side tests always run;
+postgres-side tests are `#[ignore]` and self-skip when
+`AI_MEMORY_TEST_POSTGRES_URL` is unset. The harness compiles cleanly
+under both default and `--features sal-postgres` so a future runner
+that flips the env var picks up zero-friction parity coverage.
+
+**Track C/D status.** The cross-adapter parity tests are green on the
+sqlite side and compile-clean on the postgres side, but live postgres
+execution remains gated on the
+[issue #79](https://github.com/alphaonedev/ai-memory-mcp/issues/79)
+inter-subnet routing blocker (192.168.50.100 cannot reach the
+192.168.1.50 postgres node — different subnets, no bridge / VPN /
+route). The substrate change is complete; what's missing is network
+plumbing. The Track C/D verdict memo will mint to SHIP once the
+operator-side routing change lands and the same harness re-runs
+green against the live PG+AGE backend.
+
+**Regression coverage (51 new pin tests).** Commit
+[`ce1415a`](https://github.com/alphaonedev/ai-memory-mcp/commit/ce1415ca6)
+maps every acceptance criterion in the seven gap issues to a named
+regression test. Total provenance-gap coverage advances **28 → 79
+tests** across 9 files (7 extended + 2 new HTTP files). Per-issue new
+test counts: #884 +5 (missing/clone/downcast/HTTP) + 5 new
+`http_if_match_concurrency`; #885 +5 (insert promotion / limit /
+idempotence); #886 +7 (since/until/noop/probe filters); #887 +5
+(boundaries / serde / unknown filter); #888 +7 (parse / inherit /
+new-row v1); #889 +3 (ordering / namespace compose / kg_query) + 4
+new `http_source_uri_query`; #890 +7 (freshness states / `recall_id`
+UUID). MCP `recall_observations` tool param-branch coverage
+([commit `913a2ff`](https://github.com/alphaonedev/ai-memory-mcp/commit/913a2ffb0))
+pins the three previously-uncovered closure branches in
+`src/mcp/tools/recall_observations.rs::handle_recall_observations`
+(since / until / limit), lifting file line coverage from ~94.5%
+to > 98%.
 
 ### Headline new capability — postgres+AGE first-class
 
@@ -448,7 +574,7 @@ handler. ([commit `fbf093c`](https://github.com/alphaonedev/ai-memory-mcp/commit
   `CURRENT_SCHEMA_VERSION = 34`;
   [`src/store/postgres.rs`](../../src/store/postgres.rs)
   `CURRENT_SCHEMA_VERSION = 33`.)
-- **MCP tool count 60 → 71** (post-grand-slam at HEAD `c9472c1`;
+- **MCP tool count 60 → 73** (post-grand-slam + Gap 3 recall_observations + Gap 4 confidence_tier surface;
   authoritative count from `Profile::full().expected_tool_count()` in
   [`src/profile.rs`](../../src/profile.rs) and verified by
   `grep -oE '"memory_[a-z_]+"' src/mcp/registry.rs | sort -u | wc -l`).
@@ -822,6 +948,74 @@ Follow [`docs/migration-v0.7.0-postgres.md`](../migration-v0.7.0-postgres.md):
   release note (Wave 1-4 closure anchor).
 - Round-2 fixes PR: [#643](https://github.com/alphaonedev/ai-memory-mcp/pull/643)
   on `round-2-fixes`.
+
+## Post-tag follow-up batches (NHI re-run, 2026-05-17 / 2026-05-18)
+
+After the v0.7.0 tag, the NHI re-run campaign (canonical results at
+[`docs/v0.7.0/test-campaign-2026-05-18/`](test-campaign-2026-05-18/))
+surfaced a fix-batch the lane-1 meta-lane absorbed without slipping
+the tag. All items shipped in `local/install-815-816` (HEAD `875bc19`
+on 2026-05-18) and pre-merged into the v0.7.0 retag candidate:
+
+- **#857** — serve_postgres_continuation2/3 + extended test failures.
+  Bulk source-allowlist sweep + designated-approver typing + 404 vs.
+  403 contract on missing-pending-row. Commits `3f13138`, `64436d0`,
+  `4ef8217`, `7eb73fd`, `dbae41d`. **33/33 postgres tests green.**
+- **#858** — bucket_b_subscriptions_persist + cont6_find_paths handler
+  parity. AGE projection on link insert degrades to warn instead of
+  503 (the prior 503 was a substrate bug surfaced by the
+  source-allowlist tightening). Commits `6d8b13a`, `ccd05f7`,
+  `f612675`.
+- **#859** — MCP `tools/list` exposes optional property schemas for
+  NHI discovery. The verbose schema trim in #829 had stripped
+  optional-property descriptions; #859 restores them under the
+  ceiling. Surfaces `memory_update` (10 fields), `memory_link`
+  (relation enum), other tools that gained optional params during
+  v0.7.0. Commit `5ab3315`. Added 8-test regression suite
+  `tests/mcp_tools_list_schema_discovery.rs`.
+- **#860** — `memory_get_links` surfaces temporal + attest columns
+  (`valid_from`, `valid_until`, `observed_by`, `signature`,
+  `attest_level`, `signed_at`). Commit `091350c`.
+- **#861** — `memory_archive_list` preserves metadata + emits tags
+  as JSON array (was emitting the SQL-side string). Commit `091350c`.
+- **#862** — clarified "72 of 72 advertised" vs. "73 advertised
+  entries at v0.7.0" — the +1 is the always-on `memory_capabilities`
+  bootstrap; `Profile::full().expected_tool_count()` returns 73 while
+  `memory_capabilities` summary reports the 72-memory-tool count;
+  both numbers are intentional. Commit `dc07da4` (docs/index.html
+  header correction); subsequent tool additions in the v0.7.0
+  cycle moved the historical 70/71 reference at #862-close time to
+  the current 72/73 numbers — `src/profile.rs::Profile::full().expected_tool_count()` is the canonical assertion.
+- **#863** — `ai-memory governance check-action` CLI subcommand —
+  parity with the substrate `check_agent_action` MCP tool. Commit
+  `3b21228`.
+- **#864** — clarified "Family" naming: MCP tool family
+  (`Family::Core|Graph|Admin|Power`) is unrelated to `MemoryKind`
+  taxonomy (the Batman Form-6 vocabulary). Commit `7647cfe`.
+- **#829** — trim verbose tool docs from 15570 → 9507 cl100k tokens
+  (-38.9%). Verbose token budget ceiling relaxed from 5K-10K (original
+  v0.6.4 playbook) to **≤ 10000 (post-#829)**. Trimmed budget remains
+  **≤ 5000** (post-#859, raised from 3500 → 5000 to support
+  optional-property discovery). Commit `d41b8cb`. 3 CI guards added.
+- **#830** — TTL extend wording clarified across docs: per-tier
+  `*_extend_secs` is a sliding-window **REPLACEMENT**, NOT a
+  max-of-old-and-new extend. The create-time `*_ttl_secs` backstop
+  applies only until first access. Field names retained for
+  backward-compat. Pinned in CLAUDE.md §"Recall Pipeline" and the
+  ADMIN_GUIDE `[ttl]` table.
+- **#831** — MCP `memory_promote` accepts optional `target_tier`
+  parameter (`"mid"` or `"long"`). Omitting preserves the historical
+  highest-reachable-tier behavior. 3 regression tests pin the match
+  arms.
+
+**Closed documentation-labeled issues** as part of this lane-5 sweep:
+
+- **#800** — operator how-to "Activate Batman Mode" — closed on
+  the v0.7.0 ship via [`docs/batman-active-mode.md`](../batman-active-mode.md).
+- **#545** — `memory_capabilities` operational summary + per-tool
+  `callable_now` — closed on the v0.7.0 ship via capabilities-v3
+  (A1-A4 increments; `summary`, `to_describe_to_user`, `callable_now`,
+  `agent_permitted_families` all live on the v3 envelope).
 
 ## Acknowledgements
 

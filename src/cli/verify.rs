@@ -236,7 +236,9 @@ fn fetch_signed_events_for(conn: &Connection, ids: &[String]) -> Result<Vec<Sign
 /// standard). Returns `None` when no policy with a
 /// `max_reflection_depth` exists anywhere in the chain.
 fn governance_cap_for_namespace(conn: &Connection, namespace: &str) -> Option<u32> {
-    crate::db::resolve_governance_policy(conn, namespace).and_then(|p| p.max_reflection_depth)
+    // #880 — `max_reflection_depth` lives on `CorePolicy` after the
+    // governance decomposition; wire format unchanged.
+    crate::db::resolve_governance_policy(conn, namespace).and_then(|p| p.core.max_reflection_depth)
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -622,21 +624,10 @@ mod tests {
         use crate::models::default_metadata;
         let now = Utc::now().to_rfc3339();
         let policy = crate::models::GovernancePolicy {
-            max_reflection_depth: Some(cap),
-            auto_export_reflections_to_filesystem: None,
-            auto_atomise: None,
-            auto_atomise_threshold_cl100k: None,
-            auto_atomise_max_atom_tokens: None,
-            auto_atomise_max_retries: None,
-            auto_persona_trigger_every_n_memories: None,
-            auto_export_personas_to_filesystem: None,
-            auto_atomise_mode: None,
-            legacy_per_pair_classifier: None,
-            auto_classify_kind: None,
-            synthesis_failure_mode: None,
-            synthesis_max_deletes_per_call: None,
-            synthesis_max_candidate_chars: None,
-            multistep_max_content_chars: None,
+            core: crate::models::CorePolicy {
+                max_reflection_depth: Some(cap),
+                ..crate::models::CorePolicy::default()
+            },
             ..crate::models::GovernancePolicy::default()
         };
         let mut metadata = default_metadata();

@@ -34,7 +34,13 @@ benchmarks/longmemeval/results/
 # Local scratch (never committed)
 /backup/
 /backups/
-.claude/
+# Claude Code project config — `settings.json` is shared project-level
+# config (LSP plugin selection, permissions.deny version-controlled,
+# etc.); `settings.local.json` is per-developer overrides that stay
+# local. Per-session transcripts + caches under .claude/ also stay
+# local. Pattern: ignore everything except settings.json.
+.claude/*
+!.claude/settings.json
 
 # Autonomous campaign runtime state (logs, kill-switch, pid)
 .agentic/

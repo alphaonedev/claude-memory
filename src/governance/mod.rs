@@ -53,6 +53,13 @@ use crate::hooks::events::MemoryDelta;
 // `ai-memory governance install-defaults` (one-shot bulk enable)
 // or `ai-memory rules enable <id> --sign` (per-rule).
 pub mod agent_action;
+// v0.7.0 #697 — Ed25519-signed forensic audit log. Independent of the
+// file-based `audit.rs` chain (which logs memory-substrate ops);
+// `governance::audit` captures every governance DECISION (allow /
+// refuse / warn) into a daily-rotated, hash-chained, Ed25519-signed
+// `audit/forensic-<YYYY-MM-DD>.jsonl`. The `ai-memory audit verify
+// --since <ISO_DATE>` CLI walks the chain + signatures.
+pub mod audit;
 // v0.7.0 Policy-Engine Item 3 — deferred audit-log queue for
 // storage-hook refusals. Closes the cryptographic-log gap on the
 // `GOVERNANCE_PRE_WRITE` path that previously routed through
@@ -1214,5 +1221,70 @@ mod tests {
             PermissionsMode::Enforce,
         );
         assert_eq!(d, Decision::Allow);
+    }
+
+    // ------------------------------------------------------------------
+    // Coverage-uplift block (2026-05-19): exercise the same-variant
+    // arms of `impl PartialEq for Decision` (lines 176-185) and the
+    // `default_agent_pattern` helper (line 252-254).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn decision_partial_eq_same_allow_arms_match() {
+        // The (Allow, Allow) arm at line 176.
+        let a = Decision::Allow;
+        let b = Decision::Allow;
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn decision_partial_eq_same_deny_arms_match_by_reason() {
+        // The (Deny, Deny) arm at line 177 compares the inner reason
+        // string.
+        let same = Decision::Deny("nope".into());
+        let same_again = Decision::Deny("nope".into());
+        assert_eq!(same, same_again);
+        let different_reason = Decision::Deny("other".into());
+        assert_ne!(same, different_reason);
+    }
+
+    #[test]
+    fn decision_partial_eq_same_modify_arms_compare_canonical_json() {
+        // The (Modify, Modify) arm at lines 178-183 compares via
+        // canonical JSON because MemoryDelta carries a metadata
+        // serde_json::Value that is not Eq.
+        let a = Decision::Modify(MemoryDelta::default());
+        let b = Decision::Modify(MemoryDelta::default());
+        assert_eq!(a, b);
+        let mut delta_with_meta = MemoryDelta::default();
+        delta_with_meta.metadata = Some(serde_json::json!({"k":"v"}));
+        let c = Decision::Modify(delta_with_meta);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn decision_partial_eq_same_ask_arms_match_by_prompt() {
+        // The (Ask, Ask) arm at line 184.
+        let a = Decision::Ask("really?".into());
+        let b = Decision::Ask("really?".into());
+        assert_eq!(a, b);
+        let c = Decision::Ask("hmm?".into());
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn permission_rule_default_agent_pattern_is_wildcard() {
+        // Drives lines 252-254 (`default_agent_pattern`) via serde's
+        // default-fill on the field. JSON without `agent_pattern`
+        // should deserialise to "*".
+        let json = r#"{
+            "namespace_pattern": "*",
+            "op": "memory_store",
+            "decision": "allow"
+        }"#;
+        let rule: PermissionRule = serde_json::from_str(json).expect("deserialise");
+        assert_eq!(rule.agent_pattern, "*");
+        // Direct call also documents the contract.
+        assert_eq!(default_agent_pattern(), "*");
     }
 }

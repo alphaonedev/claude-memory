@@ -2,6 +2,8 @@
 
 **v0.6.4 — `quiet-tools`** ships with a **collapsed default tool surface**. This document is the operator's guide to the change and the opt-out path for power users.
 
+> **Forward note (v0.7.0):** the numbers in this historical migration doc (5 core / 43 full / 38 unloaded) reflect the v0.6.4 surface. **At v0.7.0 the equivalents are 7 core / 71 full / 64 unloaded** — the original 5 grew to 7 with the always-on `memory_load_family` + `memory_smart_load` loaders, and the full surface grew to 71 with the v0.7 additions (recursive-learning, Agent Skills, Batman Forms 1-7, QW-1/2/3, etc.). See [`MIGRATION_v0.7.md`](MIGRATION_v0.7.md) for the v0.6.4 → v0.7.0 path.
+
 ---
 
 ## What changed

@@ -92,6 +92,21 @@ pub fn run(
             }
         }
         ArchiveAction::Purge { older_than_days } => {
+            // #913 (security-medium / SOC2, 2026-05-19) — admin/destructive
+            // state-change audit. CLI archive purge mirrors the HTTP +
+            // MCP fixes; emit the forensic-chain row BEFORE the storage
+            // write so the audit trail captures the operator regardless
+            // of downstream outcome.
+            let caller = crate::identity::resolve_agent_id(None, None)
+                .unwrap_or_else(|_| format!("anonymous:pid-{}", std::process::id()));
+            crate::governance::audit::record_decision(
+                &caller,
+                "allow",
+                "archive_purge",
+                "",
+                serde_json::json!({ "older_than_days": older_than_days }),
+            );
+
             let purged = db::purge_archive(&conn, older_than_days)?;
             if json_out {
                 writeln!(out.stdout, "{}", serde_json::json!({"purged": purged}))?;

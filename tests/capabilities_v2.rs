@@ -30,11 +30,8 @@ use ai_memory::mcp::{CapabilitiesAccept, handle_capabilities_with_conn};
 use ai_memory::reranker::{BatchedReranker, CrossEncoder};
 use serde_json::Value;
 
-/// Build a fresh in-memory `rusqlite::Connection` so each test gets a
-/// clean DB state for the live-count overlays.
-fn fresh_conn() -> rusqlite::Connection {
-    ai_memory::db::open(std::path::Path::new(":memory:")).expect("open in-memory db")
-}
+mod common;
+use common::fresh_conn;
 
 // ---------------------------------------------------------------------------
 // Cap-v2 reports recall_mode_active = "keyword_only" (now: disabled) when

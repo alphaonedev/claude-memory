@@ -101,6 +101,7 @@ fn seed(conn: &rusqlite::Connection, title: &str) -> String {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(conn, &mem).expect("db::insert")
 }
@@ -152,6 +153,7 @@ fn build_link(
         observed_by: observed_by.map(str::to_string),
         valid_from: valid_from.map(str::to_string),
         valid_until: None,
+        attest_level: None,
     }
 }
 

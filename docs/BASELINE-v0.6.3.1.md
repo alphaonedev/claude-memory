@@ -70,9 +70,11 @@ Source: `Cargo.toml:134–153`.
 
 ---
 
-## 2. MCP tool surface (43 tools)
+## 2. MCP tool surface (43 tools at v0.6.3.1 baseline)
 
-All registered in `src/mcp.rs::tool_definitions()` (lines 147–715). Dispatched in `handle_request()` (lines 3473–3572). Listed via `tools/list` handler at `:3404–3445`. The schema-version stamp is `toolsVersion = "2026-04-26"` (`src/mcp.rs:153`).
+> **Forward note (v0.7.0):** the 43-tool baseline below is the historical v0.6.3.1 snapshot. At v0.7.0 the surface advertises **71 entries at `--profile full`** (70 callable memory tools + the always-on `memory_capabilities` bootstrap). Default `--profile core` (introduced at v0.6.4) ships 7 tools at v0.7.0 plus the always-on bootstrap. See `CHANGELOG.md` [Unreleased]/[0.7.0] for the full delta, and [`MIGRATION_v0.7.md`](MIGRATION_v0.7.md) for the upgrade path. The 43 below remain accurate as the v0.6.3.1 baseline this doc was captured at.
+
+All registered in `src/mcp.rs::tool_definitions()` (lines 147–715) **at v0.6.3.1**; v0.7.0 moves this to `src/mcp/registry.rs::tool_definitions()` with per-Family filtering via `tool_definitions_for_profile()`. Dispatched in `handle_request()` (lines 3473–3572 at v0.6.3.1; now in `src/mcp/mod.rs`). Listed via `tools/list` handler at `:3404–3445` at v0.6.3.1. The v0.6.3.1 schema-version stamp was `toolsVersion = "2026-04-26"` (`src/mcp.rs:153`); v0.7.0 capabilities envelope `schema_version` is `"3"`.
 
 No tool is `#[cfg]`-gated at compile time; tier-gated tools degrade at runtime to a `501 / "LLM not available"` style response.
 

@@ -197,7 +197,11 @@ pub(super) async fn catchup_once_with_store(
         // `db::insert_if_newer`) for daemons that don't yet have a SAL
         // handle plumbed through (e.g. v0.6.x configurations).
         if let Some(store) = store {
-            let ctx = crate::store::CallerContext::for_agent("federation-catchup");
+            // #910 — federation catchup is operator-level (peer sync);
+            // it MUST round-trip every row regardless of metadata.scope
+            // so the receiving daemon has the full snapshot. Use the
+            // admin builder to bypass the SAL visibility filter.
+            let ctx = crate::store::CallerContext::for_admin("federation-catchup");
             for raw in &memories {
                 let mem: crate::models::Memory = match serde_json::from_value(raw.clone()) {
                     Ok(m) => m,

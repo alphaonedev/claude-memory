@@ -113,24 +113,13 @@ fn insert_signed_reflects_on(
 /// inserting a namespace standard memory. Mirrors the `seed_policy`
 /// helper in `tests/governance_inheritance.rs`.
 fn set_governance_cap(conn: &rusqlite::Connection, ns: &str, cap: u32) {
-    use ai_memory::models::{GovernancePolicy, default_metadata};
+    use ai_memory::models::{CorePolicy, GovernancePolicy, default_metadata};
     let now = Utc::now().to_rfc3339();
     let policy = GovernancePolicy {
-        max_reflection_depth: Some(cap),
-        auto_export_reflections_to_filesystem: None,
-        auto_atomise: None,
-        auto_atomise_threshold_cl100k: None,
-        auto_atomise_max_atom_tokens: None,
-        auto_atomise_max_retries: None,
-        auto_persona_trigger_every_n_memories: None,
-        auto_export_personas_to_filesystem: None,
-        auto_atomise_mode: None,
-        legacy_per_pair_classifier: None,
-        auto_classify_kind: None,
-        synthesis_failure_mode: None,
-        synthesis_max_deletes_per_call: None,
-        synthesis_max_candidate_chars: None,
-        multistep_max_content_chars: None,
+        core: CorePolicy {
+            max_reflection_depth: Some(cap),
+            ..CorePolicy::default()
+        },
         ..GovernancePolicy::default()
     };
     let mut metadata = default_metadata();

@@ -35,7 +35,8 @@ use ai_memory::atomisation::{Atomiser, AtomiserConfig};
 use ai_memory::config::{FeatureTier, ResolvedTtl};
 use ai_memory::hooks::pre_store::{AutoAtomisationDispatch, install_auto_atomise_dispatch};
 use ai_memory::models::{
-    ApproverType, AutoAtomiseMode, GovernanceLevel, GovernancePolicy, Memory, Tier,
+    ApproverType, AtomisationPolicy, AutoAtomiseMode, CorePolicy, GovernanceLevel,
+    GovernancePolicy, Memory, Tier,
 };
 use ai_memory::storage as db;
 
@@ -190,29 +191,22 @@ fn seed_policy(conn: &Connection, ns: &str, policy: GovernancePolicy) {
 
 fn make_policy(mode: Option<AutoAtomiseMode>, enable_legacy_flag: bool) -> GovernancePolicy {
     GovernancePolicy {
-        write: GovernanceLevel::Any,
-        promote: GovernanceLevel::Any,
-        delete: GovernanceLevel::Owner,
-        approver: ApproverType::Human,
-        inherit: true,
-        max_reflection_depth: None,
-        auto_export_reflections_to_filesystem: None,
-        // The deferred path still keys off auto_atomise = true to fire;
-        // the synchronous path keys off auto_atomise_mode = Synchronous
-        // directly.
-        auto_atomise: if enable_legacy_flag { Some(true) } else { None },
-        auto_atomise_threshold_cl100k: Some(20),
-        auto_atomise_max_atom_tokens: Some(50),
-        auto_atomise_max_retries: None,
-        auto_persona_trigger_every_n_memories: None,
-        auto_export_personas_to_filesystem: None,
-        auto_atomise_mode: mode,
-        legacy_per_pair_classifier: None,
-        auto_classify_kind: None,
-        synthesis_failure_mode: None,
-        synthesis_max_deletes_per_call: None,
-        synthesis_max_candidate_chars: None,
-        multistep_max_content_chars: None,
+        core: CorePolicy {
+            write: GovernanceLevel::Any,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Human,
+            inherit: true,
+            max_reflection_depth: None,
+        },
+        atomisation: AtomisationPolicy {
+            auto_atomise: if enable_legacy_flag { Some(true) } else { None },
+            auto_atomise_threshold_cl100k: Some(20),
+            auto_atomise_max_atom_tokens: Some(50),
+            auto_atomise_max_retries: None,
+            auto_atomise_mode: mode,
+        },
+        ..Default::default()
     }
 }
 

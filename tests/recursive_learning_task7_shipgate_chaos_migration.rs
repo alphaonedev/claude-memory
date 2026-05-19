@@ -68,6 +68,10 @@ use rusqlite::Connection;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
+mod common;
+#[cfg(feature = "sal-postgres")]
+use common::postgres_url;
+
 // ─────────────────────────────────────────────────────────────────────
 // Fixture helpers — mirror tests/recursive_learning_task{4,5,6}_*.rs.
 // ─────────────────────────────────────────────────────────────────────
@@ -100,6 +104,7 @@ fn make_memory(namespace: &str, title: &str, reflection_depth: i32) -> Memory {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     }
 }
 
@@ -242,7 +247,7 @@ fn legacy_governance_json_without_max_reflection_depth_deserializes_to_default()
     let policy: GovernancePolicy =
         serde_json::from_value(legacy_json).expect("legacy governance JSON must deserialize");
     assert!(
-        policy.max_reflection_depth.is_none(),
+        policy.core.max_reflection_depth.is_none(),
         "missing field deserializes to None via #[serde(default)]"
     );
     assert_eq!(
@@ -258,11 +263,6 @@ fn legacy_governance_json_without_max_reflection_depth_deserializes_to_default()
 // Bring up a fresh schema, verify `memories.reflection_depth` and the
 // `signed_events` table both exist, and round-trip a reflection.
 // ─────────────────────────────────────────────────────────────────────
-
-#[cfg(feature = "sal-postgres")]
-fn postgres_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-}
 
 #[cfg(feature = "sal-postgres")]
 #[tokio::test]
@@ -473,6 +473,7 @@ fn mid_tx_target_deletion_rolls_back_reflection_atomically() {
             ReflectHookDecision::Allow
         })),
         post_reflect: None,
+        active_keypair: None,
     };
 
     let input = reflect_input(
@@ -565,6 +566,7 @@ fn post_reflect_panic_leaves_reflection_committed_documented_gap() {
                 *outcome_capture.lock().unwrap() = Some(o.id.clone());
                 panic!("intentional panic in post_reflect handler");
             })),
+            active_keypair: None,
         };
         db::reflect_with_hooks(&conn, &input, &hooks)
     }));
@@ -749,7 +751,10 @@ async fn federation_apply_remote_memory_round_trips_reflection_depth() {
     let tmp = tempfile::NamedTempFile::new().expect("tempfile");
     let path = tmp.path().to_path_buf();
     let store = SqliteStore::open(&path).expect("open sqlite store");
-    let ctx = CallerContext::for_agent("test-agent-task7-fed".to_string());
+    // #910 — federation catchup is operator-level (peer sync), so the
+    // test ctx uses for_admin so the SAL visibility filter doesn't
+    // drop the peer-owned row on the post-apply round-trip read.
+    let ctx = CallerContext::for_admin("test-agent-task7-fed".to_string());
 
     let now = chrono::Utc::now().to_rfc3339();
     let mem = Memory {
@@ -778,6 +783,7 @@ async fn federation_apply_remote_memory_round_trips_reflection_depth() {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     let id = store
         .apply_remote_memory(&ctx, &mem)
@@ -833,6 +839,7 @@ async fn federation_apply_remote_link_round_trips_reflects_on_edge() {
         observed_by: Some("peer-ai".to_string()),
         valid_from: None,
         valid_until: None,
+        attest_level: None,
     };
     store
         .apply_remote_link(&ctx, &link, "unsigned")

@@ -285,8 +285,67 @@ impl ApproverType {
 /// stops the leaf-first walk in `resolve_governance_policy`, providing
 /// an explicit opt-out path for scoped overrides (e.g. an audit
 /// sandbox under a fully-governed parent).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// # #880 / #793 PR-3 — decomposition (2026-05-18)
+///
+/// Pre-#880 the struct carried 20 flat fields. Adding any new field
+/// forced a 50-site struct-literal cascade across `src/` + `tests/`
+/// (the surface this issue closes). Post-#880 the same 20 fields are
+/// grouped into 7 per-concern sub-structs and re-attached to the
+/// parent via `#[serde(flatten)]`. The composite still carries every
+/// field, so the wire-format / TOML / `metadata.governance` JSON
+/// shape is unchanged (pinned by
+/// `tests/governance_policy_wire_compat.rs`). Each existing field
+/// is still reachable via the new `policy.core.write`,
+/// `policy.atomisation.auto_atomise`, etc. paths, and every
+/// `effective_*` accessor on the parent struct delegates to the
+/// matching sub-struct so the rest of the codebase that calls
+/// `policy.effective_max_reflection_depth()` is unchanged.
+///
+/// Adding a new policy knob now means:
+/// 1. Pick the right sub-struct under [`CorePolicy`] /
+///    [`AtomisationPolicy`] / etc.
+/// 2. Add the field (with `#[serde(default, skip_serializing_if = "Option::is_none")]`).
+/// 3. Add the field to the sub-struct's `Default` impl.
+///
+/// No literal-site cascade. The `..Default::default()` pattern used
+/// at every construction site picks up the new field automatically.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GovernancePolicy {
+    /// Access-control + inheritance + reflection-depth — the
+    /// load-bearing K9/K10 governance knobs. See [`CorePolicy`].
+    #[serde(flatten)]
+    pub core: CorePolicy,
+    /// WT-1-D + Form 2 atomisation knobs. See [`AtomisationPolicy`].
+    #[serde(flatten)]
+    pub atomisation: AtomisationPolicy,
+    /// Form 1 synthesis curator knobs + legacy per-pair opt-in. See
+    /// [`SynthesisPolicy`].
+    #[serde(flatten)]
+    pub synthesis: SynthesisPolicy,
+    /// Form 3 multistep-ingest prompt sizing knobs. See
+    /// [`MultistepPolicy`].
+    #[serde(flatten)]
+    pub multistep: MultistepPolicy,
+    /// Form 6 memory-kind auto-classifier knobs. See
+    /// [`KindClassificationPolicy`].
+    #[serde(flatten)]
+    pub kind_class: KindClassificationPolicy,
+    /// QW-2 persona auto-regeneration cadence + file-backed export
+    /// knobs. See [`PersonaPolicy`].
+    #[serde(flatten)]
+    pub persona: PersonaPolicy,
+    /// QW-1 reflection-export knob. See [`ExportPolicy`].
+    #[serde(flatten)]
+    pub export: ExportPolicy,
+}
+
+/// #880 — access-control + inheritance + reflection-depth sub-struct
+/// of [`GovernancePolicy`]. Every field is flattened back into the
+/// parent on the wire so `metadata.governance` JSON / TOML configs
+/// remain byte-identical to the pre-#880 flat layout.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CorePolicy {
     pub write: GovernanceLevel,
     #[serde(default = "default_promote_level")]
     pub promote: GovernanceLevel,
@@ -306,9 +365,9 @@ pub struct GovernancePolicy {
     /// substrate-side cap on `Memory::reflection_depth` at the
     /// `memory_reflect` MCP write path (enforcement lands in Task 5/8).
     /// `None` → no override, fall back to the compiled default exposed
-    /// by [`Self::effective_max_reflection_depth`]. `Some(0)` is the
-    /// disable-all-reflections sentinel (see accessor doc-comment).
-    /// Persisted inside the existing namespace standard's
+    /// by [`GovernancePolicy::effective_max_reflection_depth`].
+    /// `Some(0)` is the disable-all-reflections sentinel (see accessor
+    /// doc-comment). Persisted inside the existing namespace standard's
     /// `metadata.governance` JSON blob; no SQL schema migration is
     /// required because the column is already a `TEXT`/`JSONB`
     /// payload on both SQLite and Postgres. Pre-v0.7.0 rows that
@@ -319,6 +378,26 @@ pub struct GovernancePolicy {
     /// payloads byte-identical for legacy peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_reflection_depth: Option<u32>,
+}
+
+impl Default for CorePolicy {
+    fn default() -> Self {
+        Self {
+            write: GovernanceLevel::Any,
+            promote: default_promote_level(),
+            delete: default_delete_level(),
+            approver: default_approver(),
+            inherit: default_inherit(),
+            max_reflection_depth: None,
+        }
+    }
+}
+/// #880 — QW-1 reflection-export sub-struct of [`GovernancePolicy`].
+/// Single-field cluster preserved as its own sub-struct so future
+/// reflection-side knobs (e.g. a v0.8 retention sweep) land here
+/// without churning literal sites.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExportPolicy {
     /// v0.7.0 QW-1 — when `Some(true)`, the `post_reflect` substrate
     /// hook deferred-spawns a filesystem write of the reflection
     /// markdown to `~/.ai-memory/reflections/<namespace>/<id>.md` so
@@ -331,6 +410,14 @@ pub struct GovernancePolicy {
     /// peers (no payload-byte drift, no replication regressions).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_export_reflections_to_filesystem: Option<bool>,
+}
+
+/// #880 — WT-1-D + Form 2 atomisation sub-struct of
+/// [`GovernancePolicy`]. Groups the five atomisation knobs so a new
+/// Form 2 / Cluster-F knob lands on this struct without cascading
+/// through every literal site.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AtomisationPolicy {
     /// v0.7.0 WT-1-D — when `Some(true)`, the `pre_store` substrate
     /// hook (`AutoAtomisationHook`) deferred-enqueues a curator pass
     /// on the stored memory if its body exceeds
@@ -371,6 +458,31 @@ pub struct GovernancePolicy {
     /// struct.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_atomise_max_retries: Option<u32>,
+    /// v0.7.x Form 2 (Batman framework) — atomisation execution mode.
+    ///
+    /// - `None` / `Some(Off)` → no atomisation occurs (overrides any
+    ///   `auto_atomise` flag).
+    /// - `Some(Deferred)` → legacy WT-1-D behaviour: curator runs on a
+    ///   detached worker thread AFTER `memory_store` returns. Source
+    ///   is embedded as one blob before the curator round-trip lands.
+    /// - `Some(Synchronous)` → Form 2 alignment: SKIP source embedding,
+    ///   run the curator synchronously inside `memory_store`, atoms get
+    ///   their normal embed-on-insert path, source is archived with
+    ///   `atomised_into > 0` BEFORE the response returns.
+    ///
+    /// Backward compatibility: when this field is absent and
+    /// `auto_atomise = Some(true)` is set, the resolver implicitly maps
+    /// to `Some(Deferred)` so v0.7.0 pre-Form-2 deployments keep their
+    /// existing behaviour. See
+    /// [`GovernancePolicy::effective_auto_atomise_mode`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_atomise_mode: Option<AutoAtomiseMode>,
+}
+
+/// #880 — QW-2 persona auto-regeneration + file-backed export
+/// sub-struct of [`GovernancePolicy`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PersonaPolicy {
     /// v0.7.0 QW-2 — auto-regenerate the Persona artefact for an
     /// entity every N writes to a same-entity Reflection memory.
     /// `None` (default) disables the cadence — operators trigger
@@ -390,24 +502,12 @@ pub struct GovernancePolicy {
     /// artefact. `None` / `Some(false)` keeps the substrate quiet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_export_personas_to_filesystem: Option<bool>,
-    /// v0.7.x Form 2 (Batman framework) — atomisation execution mode.
-    ///
-    /// - `None` / `Some(Off)` → no atomisation occurs (overrides any
-    ///   `auto_atomise` flag).
-    /// - `Some(Deferred)` → legacy WT-1-D behaviour: curator runs on a
-    ///   detached worker thread AFTER `memory_store` returns. Source
-    ///   is embedded as one blob before the curator round-trip lands.
-    /// - `Some(Synchronous)` → Form 2 alignment: SKIP source embedding,
-    ///   run the curator synchronously inside `memory_store`, atoms get
-    ///   their normal embed-on-insert path, source is archived with
-    ///   `atomised_into > 0` BEFORE the response returns.
-    ///
-    /// Backward compatibility: when this field is absent and
-    /// `auto_atomise = Some(true)` is set, the resolver implicitly maps
-    /// to `Some(Deferred)` so v0.7.0 pre-Form-2 deployments keep their
-    /// existing behaviour. See [`Self::effective_auto_atomise_mode`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_atomise_mode: Option<AutoAtomiseMode>,
+}
+
+/// #880 — Form 1 synthesis curator + legacy per-pair classifier
+/// sub-struct of [`GovernancePolicy`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SynthesisPolicy {
     /// v0.7.x Form 1 (Batman framework) — opt-IN to the legacy per-pair
     /// yes/no contradiction classifier on the store path. Default
     /// (`None` / `Some(false)`) routes through the new single-batch
@@ -416,25 +516,6 @@ pub struct GovernancePolicy {
     /// `Some(true)` per-namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_per_pair_classifier: Option<bool>,
-    /// v0.7.x Form 6 (issue #759) — auto-classify a stored memory's
-    /// `MemoryKind` from its content via the substrate-side
-    /// `pre_store::auto_classify_kind` hook. One of:
-    ///   * `Off` (default) — keeps the substrate quiet; the
-    ///     caller-supplied kind (or the SQL `DEFAULT 'observation'`)
-    ///     stands.
-    ///   * `RegexOnly` — deterministic regex heuristics (e.g.
-    ///     "is_a" → Concept; "happened on" → Event;
-    ///     "X says:" → Conversation). No LLM round-trip; tens of
-    ///     microseconds per call.
-    ///   * `RegexThenLlm` — regex first; if low-confidence (no
-    ///     heuristic fired or multiple fired with conflict), fall
-    ///     through to a single-shot LLM classifier. Opt-in only;
-    ///     the substrate never spawns an LLM round-trip on a
-    ///     namespace whose policy is `Off`.
-    /// Caller-supplied `memory_kind` always wins — the hook only
-    /// fills in `Observation` (the default) when no kind was set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auto_classify_kind: Option<MemoryKindAutoClassify>,
     /// v0.7.0 Cluster-B (issue #767) — per-namespace knob controlling
     /// what happens when the Form 1 synthesis curator call fails (LLM
     /// down, malformed JSON, validation failure, etc.).
@@ -485,6 +566,37 @@ pub struct GovernancePolicy {
     /// production.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub synthesis_max_candidate_chars: Option<u32>,
+}
+
+/// #880 — Form 6 memory-kind auto-classifier sub-struct of
+/// [`GovernancePolicy`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KindClassificationPolicy {
+    /// v0.7.x Form 6 (issue #759) — auto-classify a stored memory's
+    /// `MemoryKind` from its content via the substrate-side
+    /// `pre_store::auto_classify_kind` hook. One of:
+    ///   * `Off` (default) — keeps the substrate quiet; the
+    ///     caller-supplied kind (or the SQL `DEFAULT 'observation'`)
+    ///     stands.
+    ///   * `RegexOnly` — deterministic regex heuristics (e.g.
+    ///     "is_a" → Concept; "happened on" → Event;
+    ///     "X says:" → Conversation). No LLM round-trip; tens of
+    ///     microseconds per call.
+    ///   * `RegexThenLlm` — regex first; if low-confidence (no
+    ///     heuristic fired or multiple fired with conflict), fall
+    ///     through to a single-shot LLM classifier. Opt-in only;
+    ///     the substrate never spawns an LLM round-trip on a
+    ///     namespace whose policy is `Off`.
+    /// Caller-supplied `memory_kind` always wins — the hook only
+    /// fills in `Observation` (the default) when no kind was set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_classify_kind: Option<MemoryKindAutoClassify>,
+}
+
+/// #880 — Form 3 multistep-ingest prompt sizing sub-struct of
+/// [`GovernancePolicy`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MultistepPolicy {
     /// v0.7.0 Cluster v0.7-polish (issue #782, PERF-11) — per-namespace
     /// cap on the number of characters of `content` inlined into a Form
     /// 3 multistep-ingest LLM-stage prompt. Form 3's deterministic
@@ -608,53 +720,14 @@ fn default_inherit() -> bool {
     true
 }
 
-impl Default for GovernancePolicy {
-    fn default() -> Self {
-        Self {
-            write: GovernanceLevel::Any,
-            promote: default_promote_level(),
-            delete: default_delete_level(),
-            approver: default_approver(),
-            inherit: default_inherit(),
-            // v0.7.0 Task 2/8: `None` means "no per-namespace override",
-            // and `effective_max_reflection_depth` resolves to the
-            // compiled default of 3.
-            max_reflection_depth: None,
-            // v0.7.0 QW-1: default to "do not write reflections to
-            // disk". The substrate stays SQL-canonical out of the
-            // box; operators opt in per-namespace by setting this to
-            // `Some(true)` on the namespace standard's governance blob.
-            auto_export_reflections_to_filesystem: None,
-            // v0.7.0 WT-1-D: substrate defaults to NOT auto-atomising.
-            // Operators opt in per-namespace by setting this on the
-            // namespace standard's governance blob.
-            auto_atomise: None,
-            auto_atomise_threshold_cl100k: None,
-            auto_atomise_max_atom_tokens: None,
-            // v0.7.0 Cluster-F PERF-5: defer to the compiled
-            // `sync_curator_max_retries` (default 1).
-            auto_atomise_max_retries: None,
-            auto_persona_trigger_every_n_memories: None,
-            auto_export_personas_to_filesystem: None,
-            auto_atomise_mode: None,
-            legacy_per_pair_classifier: None,
-            // v0.7.x Form 6: substrate defaults to Off — caller-supplied
-            // (or `Observation` default) kind stands. Operators opt in
-            // per-namespace via the namespace standard's governance blob.
-            auto_classify_kind: None,
-            // v0.7.0 Cluster-B: defaults preserve the v0.7.0 ship
-            // behaviour (silent fall-through on curator outage, cap of
-            // 1 delete per synthesis batch, 1500-char content cap).
-            synthesis_failure_mode: None,
-            synthesis_max_deletes_per_call: None,
-            synthesis_max_candidate_chars: None,
-            // v0.7.0 polish (issue #782 PERF-11): Form 3 multistep
-            // ingest defers to the compiled default (1500 chars) when
-            // unset — mirrors the synthesis cap rationale.
-            multistep_max_content_chars: None,
-        }
-    }
-}
+// #880 — `Default` for `GovernancePolicy` is derived now: each
+// sub-struct's own `Default` returns "no per-namespace override" so
+// every `effective_*` accessor falls through to the compiled-in
+// default. The old hand-written impl is preserved verbatim in
+// `CorePolicy::default()` (write=Any, promote=Any, delete=Owner,
+// approver=Human, inherit=true, max_reflection_depth=None) and the
+// six secondary policy structs `Default::default()` to the
+// all-`None` shape that pre-#880 callers expected.
 
 impl GovernancePolicy {
     /// Parse a policy out of a `metadata.governance` JSON value. Returns
@@ -678,49 +751,15 @@ impl GovernancePolicy {
     /// `db::tests::namespace_set_standard_default_write_is_owner`.
     #[must_use]
     pub fn default_for_managed_namespace() -> Self {
+        // #880 — every sub-struct defaults to "no override" so the
+        // bootstrap policy only differs from `Default::default()` by
+        // tightening `core.write` to `Owner`.
         Self {
-            write: GovernanceLevel::Owner,
-            promote: default_promote_level(),
-            delete: default_delete_level(),
-            approver: default_approver(),
-            inherit: default_inherit(),
-            // v0.7.0 Task 2/8: managed-namespace bootstrap leaves
-            // `max_reflection_depth` unset so operators get the
-            // compiled-in default (3) until they explicitly override.
-            max_reflection_depth: None,
-            // v0.7.0 QW-1: file-backed export stays opt-in even for
-            // managed namespaces — operators may want governance
-            // enforcement WITHOUT plaintext reflections on disk.
-            auto_export_reflections_to_filesystem: None,
-            // v0.7.0 WT-1-D: managed-namespace bootstrap leaves the
-            // auto-atomise knobs unset; opt-in is explicit.
-            auto_atomise: None,
-            auto_atomise_threshold_cl100k: None,
-            auto_atomise_max_atom_tokens: None,
-            // v0.7.0 Cluster-F PERF-5: defer to compiled default.
-            auto_atomise_max_retries: None,
-            // v0.7.0 QW-2: persona cadence stays opt-in for managed
-            // namespaces too. Operators flip on the cadence
-            // explicitly via the namespace standard's metadata.
-            auto_persona_trigger_every_n_memories: None,
-            auto_export_personas_to_filesystem: None,
-            // v0.7.x Form 1/2: opt-in. Default leaves the substrate
-            // on the new synthesis path and the deferred atomisation
-            // mode (inherited from the legacy auto_atomise flag).
-            auto_atomise_mode: None,
-            legacy_per_pair_classifier: None,
-            // v0.7.x Form 6: managed-namespace bootstrap leaves
-            // auto-classify Off — operators opt in explicitly.
-            auto_classify_kind: None,
-            // v0.7.0 Cluster-B: managed-namespace bootstrap inherits
-            // the compiled defaults; operators tighten on a per-ns basis.
-            synthesis_failure_mode: None,
-            synthesis_max_deletes_per_call: None,
-            synthesis_max_candidate_chars: None,
-            // v0.7.0 polish (issue #782 PERF-11): managed-namespace
-            // bootstrap defers to the compiled default; operators
-            // tighten on a per-ns basis.
-            multistep_max_content_chars: None,
+            core: CorePolicy {
+                write: GovernanceLevel::Owner,
+                ..CorePolicy::default()
+            },
+            ..Self::default()
         }
     }
 
@@ -750,7 +789,7 @@ impl GovernancePolicy {
     /// then call this accessor on the result.
     #[must_use]
     pub fn effective_max_reflection_depth(&self) -> u32 {
-        self.max_reflection_depth.unwrap_or(3)
+        self.core.max_reflection_depth.unwrap_or(3)
     }
 
     /// v0.7.0 QW-1 — resolve the file-backed-export policy. Returns
@@ -764,7 +803,9 @@ impl GovernancePolicy {
     /// `effective_max_reflection_depth` is consumed.
     #[must_use]
     pub fn effective_auto_export_reflections_to_filesystem(&self) -> bool {
-        self.auto_export_reflections_to_filesystem.unwrap_or(false)
+        self.export
+            .auto_export_reflections_to_filesystem
+            .unwrap_or(false)
     }
 
     /// v0.7.0 WT-1-D — resolve the auto-atomisation enable flag.
@@ -778,7 +819,7 @@ impl GovernancePolicy {
     /// `effective_max_reflection_depth` is consumed.
     #[must_use]
     pub fn effective_auto_atomise(&self) -> bool {
-        self.auto_atomise.unwrap_or(false)
+        self.atomisation.auto_atomise.unwrap_or(false)
     }
 
     /// v0.7.0 WT-1-D — resolve the cl100k token threshold above which
@@ -787,7 +828,9 @@ impl GovernancePolicy {
     /// enough to live as a single observation).
     #[must_use]
     pub fn effective_auto_atomise_threshold_cl100k(&self) -> u32 {
-        self.auto_atomise_threshold_cl100k.unwrap_or(500)
+        self.atomisation
+            .auto_atomise_threshold_cl100k
+            .unwrap_or(500)
     }
 
     /// v0.7.0 WT-1-D — resolve the per-atom token budget for the
@@ -797,7 +840,7 @@ impl GovernancePolicy {
     /// CLI/MCP-driven atomisation.
     #[must_use]
     pub fn effective_auto_atomise_max_atom_tokens(&self) -> u32 {
-        self.auto_atomise_max_atom_tokens.unwrap_or(200)
+        self.atomisation.auto_atomise_max_atom_tokens.unwrap_or(200)
     }
 
     /// v0.7.0 Cluster-F PERF-5 — resolve the Synchronous-mode
@@ -809,7 +852,7 @@ impl GovernancePolicy {
     /// Synchronous-mode latency envelope.
     #[must_use]
     pub fn effective_auto_atomise_max_retries(&self) -> Option<u32> {
-        self.auto_atomise_max_retries
+        self.atomisation.auto_atomise_max_retries
     }
 
     /// v0.7.0 QW-2 — resolve the auto-persona regeneration cadence.
@@ -820,7 +863,7 @@ impl GovernancePolicy {
     /// after walking the leaf-first ancestor chain.
     #[must_use]
     pub fn effective_auto_persona_trigger_every_n_memories(&self) -> Option<u32> {
-        self.auto_persona_trigger_every_n_memories
+        self.persona.auto_persona_trigger_every_n_memories
     }
 
     /// v0.7.0 QW-2 — resolve the file-backed-export policy for
@@ -830,7 +873,9 @@ impl GovernancePolicy {
     /// [`Self::effective_auto_export_reflections_to_filesystem`].
     #[must_use]
     pub fn effective_auto_export_personas_to_filesystem(&self) -> bool {
-        self.auto_export_personas_to_filesystem.unwrap_or(false)
+        self.persona
+            .auto_export_personas_to_filesystem
+            .unwrap_or(false)
     }
 
     /// v0.7.x Form 2 — resolve the atomisation execution mode.
@@ -847,10 +892,10 @@ impl GovernancePolicy {
     /// the `pre_store` hook chain entirely.
     #[must_use]
     pub fn effective_auto_atomise_mode(&self) -> AutoAtomiseMode {
-        if let Some(m) = self.auto_atomise_mode {
+        if let Some(m) = self.atomisation.auto_atomise_mode {
             return m;
         }
-        if self.auto_atomise.unwrap_or(false) {
+        if self.atomisation.auto_atomise.unwrap_or(false) {
             AutoAtomiseMode::Deferred
         } else {
             AutoAtomiseMode::Off
@@ -865,7 +910,7 @@ impl GovernancePolicy {
     /// depend on the v0.6.x behaviour.
     #[must_use]
     pub fn effective_legacy_per_pair_classifier(&self) -> bool {
-        self.legacy_per_pair_classifier.unwrap_or(false)
+        self.synthesis.legacy_per_pair_classifier.unwrap_or(false)
     }
 
     /// v0.7.0 Cluster-B (issue #767) — resolve the synthesis-failure
@@ -875,7 +920,7 @@ impl GovernancePolicy {
     /// namespace when a curator outage must be surfaced loudly.
     #[must_use]
     pub fn effective_synthesis_failure_mode(&self) -> SynthesisFailureMode {
-        self.synthesis_failure_mode.unwrap_or_default()
+        self.synthesis.synthesis_failure_mode.unwrap_or_default()
     }
 
     /// v0.7.0 Cluster-B (issue #767, SEC-1) — resolve the per-call
@@ -884,7 +929,7 @@ impl GovernancePolicy {
     /// approval flow.
     #[must_use]
     pub fn effective_synthesis_max_deletes_per_call(&self) -> u32 {
-        self.synthesis_max_deletes_per_call.unwrap_or(1)
+        self.synthesis.synthesis_max_deletes_per_call.unwrap_or(1)
     }
 
     /// v0.7.0 Cluster-B (issue #767, PERF-7) — resolve the
@@ -893,7 +938,7 @@ impl GovernancePolicy {
     /// Truncation only affects the LLM prompt, not the stored row.
     #[must_use]
     pub fn effective_synthesis_max_candidate_chars(&self) -> usize {
-        self.synthesis_max_candidate_chars.unwrap_or(1500) as usize
+        self.synthesis.synthesis_max_candidate_chars.unwrap_or(1500) as usize
     }
 
     /// v0.7.0 polish (issue #782, PERF-11) — resolve the per-stage
@@ -907,7 +952,17 @@ impl GovernancePolicy {
     /// untouched.
     #[must_use]
     pub fn effective_multistep_max_content_chars(&self) -> usize {
-        self.multistep_max_content_chars.unwrap_or(1500) as usize
+        self.multistep.multistep_max_content_chars.unwrap_or(1500) as usize
+    }
+
+    /// #880 — auto-classify-kind accessor, missing in the pre-#880
+    /// hand-written impl (callers were reading `policy.kind_class.auto_classify_kind`
+    /// directly). Now exposed via a typed accessor so the call sites can
+    /// migrate to the sub-struct path without referencing every field
+    /// directly.
+    #[must_use]
+    pub fn effective_auto_classify_kind(&self) -> MemoryKindAutoClassify {
+        self.kind_class.auto_classify_kind.unwrap_or_default()
     }
 }
 
@@ -944,41 +999,41 @@ mod tests {
     #[test]
     fn governance_policy_default_resolves_form_fields_to_none_and_compiled_defaults() {
         let p = GovernancePolicy::default();
-        assert_eq!(p.write, GovernanceLevel::Any);
-        assert_eq!(p.promote, GovernanceLevel::Any);
-        assert_eq!(p.delete, GovernanceLevel::Owner);
-        assert_eq!(p.approver, ApproverType::Human);
-        assert!(p.inherit);
+        assert_eq!(p.core.write, GovernanceLevel::Any);
+        assert_eq!(p.core.promote, GovernanceLevel::Any);
+        assert_eq!(p.core.delete, GovernanceLevel::Owner);
+        assert_eq!(p.core.approver, ApproverType::Human);
+        assert!(p.core.inherit);
         // Every Form / Cluster field defaults to None.
-        assert!(p.max_reflection_depth.is_none());
-        assert!(p.auto_export_reflections_to_filesystem.is_none());
-        assert!(p.auto_atomise.is_none());
-        assert!(p.auto_atomise_threshold_cl100k.is_none());
-        assert!(p.auto_atomise_max_atom_tokens.is_none());
-        assert!(p.auto_atomise_max_retries.is_none());
-        assert!(p.auto_persona_trigger_every_n_memories.is_none());
-        assert!(p.auto_export_personas_to_filesystem.is_none());
-        assert!(p.auto_atomise_mode.is_none());
-        assert!(p.legacy_per_pair_classifier.is_none());
-        assert!(p.auto_classify_kind.is_none());
-        assert!(p.synthesis_failure_mode.is_none());
-        assert!(p.synthesis_max_deletes_per_call.is_none());
-        assert!(p.synthesis_max_candidate_chars.is_none());
-        assert!(p.multistep_max_content_chars.is_none());
+        assert!(p.core.max_reflection_depth.is_none());
+        assert!(p.export.auto_export_reflections_to_filesystem.is_none());
+        assert!(p.atomisation.auto_atomise.is_none());
+        assert!(p.atomisation.auto_atomise_threshold_cl100k.is_none());
+        assert!(p.atomisation.auto_atomise_max_atom_tokens.is_none());
+        assert!(p.atomisation.auto_atomise_max_retries.is_none());
+        assert!(p.persona.auto_persona_trigger_every_n_memories.is_none());
+        assert!(p.persona.auto_export_personas_to_filesystem.is_none());
+        assert!(p.atomisation.auto_atomise_mode.is_none());
+        assert!(p.synthesis.legacy_per_pair_classifier.is_none());
+        assert!(p.kind_class.auto_classify_kind.is_none());
+        assert!(p.synthesis.synthesis_failure_mode.is_none());
+        assert!(p.synthesis.synthesis_max_deletes_per_call.is_none());
+        assert!(p.synthesis.synthesis_max_candidate_chars.is_none());
+        assert!(p.multistep.multistep_max_content_chars.is_none());
     }
 
     #[test]
     fn default_for_managed_namespace_tightens_write_to_owner() {
         let p = GovernancePolicy::default_for_managed_namespace();
-        assert_eq!(p.write, GovernanceLevel::Owner);
-        assert!(p.inherit);
+        assert_eq!(p.core.write, GovernanceLevel::Owner);
+        assert!(p.core.inherit);
         // All Form fields remain None — managed namespaces inherit
         // compiled defaults explicitly.
-        assert!(p.max_reflection_depth.is_none());
-        assert!(p.auto_atomise.is_none());
-        assert!(p.auto_atomise_mode.is_none());
-        assert!(p.synthesis_failure_mode.is_none());
-        assert!(p.multistep_max_content_chars.is_none());
+        assert!(p.core.max_reflection_depth.is_none());
+        assert!(p.atomisation.auto_atomise.is_none());
+        assert!(p.atomisation.auto_atomise_mode.is_none());
+        assert!(p.synthesis.synthesis_failure_mode.is_none());
+        assert!(p.multistep.multistep_max_content_chars.is_none());
     }
 
     #[test]
@@ -990,14 +1045,14 @@ mod tests {
     #[test]
     fn effective_max_reflection_depth_returns_override_when_set() {
         let mut p = GovernancePolicy::default();
-        p.max_reflection_depth = Some(7);
+        p.core.max_reflection_depth = Some(7);
         assert_eq!(p.effective_max_reflection_depth(), 7);
     }
 
     #[test]
     fn effective_max_reflection_depth_returns_zero_kill_switch() {
         let mut p = GovernancePolicy::default();
-        p.max_reflection_depth = Some(0);
+        p.core.max_reflection_depth = Some(0);
         assert_eq!(p.effective_max_reflection_depth(), 0);
     }
 
@@ -1010,9 +1065,9 @@ mod tests {
     #[test]
     fn effective_auto_export_reflections_to_filesystem_returns_override() {
         let mut p = GovernancePolicy::default();
-        p.auto_export_reflections_to_filesystem = Some(true);
+        p.export.auto_export_reflections_to_filesystem = Some(true);
         assert!(p.effective_auto_export_reflections_to_filesystem());
-        p.auto_export_reflections_to_filesystem = Some(false);
+        p.export.auto_export_reflections_to_filesystem = Some(false);
         assert!(!p.effective_auto_export_reflections_to_filesystem());
     }
 
@@ -1025,7 +1080,7 @@ mod tests {
     #[test]
     fn effective_auto_atomise_returns_override() {
         let mut p = GovernancePolicy::default();
-        p.auto_atomise = Some(true);
+        p.atomisation.auto_atomise = Some(true);
         assert!(p.effective_auto_atomise());
     }
 
@@ -1038,7 +1093,7 @@ mod tests {
     #[test]
     fn effective_auto_atomise_threshold_cl100k_returns_override() {
         let mut p = GovernancePolicy::default();
-        p.auto_atomise_threshold_cl100k = Some(1000);
+        p.atomisation.auto_atomise_threshold_cl100k = Some(1000);
         assert_eq!(p.effective_auto_atomise_threshold_cl100k(), 1000);
     }
 
@@ -1051,7 +1106,7 @@ mod tests {
     #[test]
     fn effective_auto_atomise_max_atom_tokens_returns_override() {
         let mut p = GovernancePolicy::default();
-        p.auto_atomise_max_atom_tokens = Some(50);
+        p.atomisation.auto_atomise_max_atom_tokens = Some(50);
         assert_eq!(p.effective_auto_atomise_max_atom_tokens(), 50);
     }
 
@@ -1064,7 +1119,7 @@ mod tests {
     #[test]
     fn effective_auto_atomise_max_retries_returns_override() {
         let mut p = GovernancePolicy::default();
-        p.auto_atomise_max_retries = Some(3);
+        p.atomisation.auto_atomise_max_retries = Some(3);
         assert_eq!(p.effective_auto_atomise_max_retries(), Some(3));
     }
 
@@ -1077,7 +1132,7 @@ mod tests {
     #[test]
     fn effective_auto_persona_trigger_returns_override() {
         let mut p = GovernancePolicy::default();
-        p.auto_persona_trigger_every_n_memories = Some(5);
+        p.persona.auto_persona_trigger_every_n_memories = Some(5);
         assert_eq!(p.effective_auto_persona_trigger_every_n_memories(), Some(5));
     }
 
@@ -1090,7 +1145,7 @@ mod tests {
     #[test]
     fn effective_auto_export_personas_to_filesystem_returns_override() {
         let mut p = GovernancePolicy::default();
-        p.auto_export_personas_to_filesystem = Some(true);
+        p.persona.auto_export_personas_to_filesystem = Some(true);
         assert!(p.effective_auto_export_personas_to_filesystem());
     }
 
@@ -1103,15 +1158,15 @@ mod tests {
     #[test]
     fn effective_auto_atomise_mode_explicit_off_wins_over_enabled_flag() {
         let mut p = GovernancePolicy::default();
-        p.auto_atomise = Some(true);
-        p.auto_atomise_mode = Some(AutoAtomiseMode::Off);
+        p.atomisation.auto_atomise = Some(true);
+        p.atomisation.auto_atomise_mode = Some(AutoAtomiseMode::Off);
         assert_eq!(p.effective_auto_atomise_mode(), AutoAtomiseMode::Off);
     }
 
     #[test]
     fn effective_auto_atomise_mode_legacy_flag_implies_deferred() {
         let mut p = GovernancePolicy::default();
-        p.auto_atomise = Some(true);
+        p.atomisation.auto_atomise = Some(true);
         // No explicit mode → implicit Deferred (legacy WT-1-D behaviour).
         assert_eq!(p.effective_auto_atomise_mode(), AutoAtomiseMode::Deferred);
     }
@@ -1119,8 +1174,8 @@ mod tests {
     #[test]
     fn effective_auto_atomise_mode_explicit_synchronous() {
         let mut p = GovernancePolicy::default();
-        p.auto_atomise = Some(true);
-        p.auto_atomise_mode = Some(AutoAtomiseMode::Synchronous);
+        p.atomisation.auto_atomise = Some(true);
+        p.atomisation.auto_atomise_mode = Some(AutoAtomiseMode::Synchronous);
         assert_eq!(
             p.effective_auto_atomise_mode(),
             AutoAtomiseMode::Synchronous
@@ -1130,7 +1185,7 @@ mod tests {
     #[test]
     fn effective_auto_atomise_mode_explicit_deferred_when_flag_absent() {
         let mut p = GovernancePolicy::default();
-        p.auto_atomise_mode = Some(AutoAtomiseMode::Deferred);
+        p.atomisation.auto_atomise_mode = Some(AutoAtomiseMode::Deferred);
         // Explicit mode wins regardless of the boolean flag.
         assert_eq!(p.effective_auto_atomise_mode(), AutoAtomiseMode::Deferred);
     }
@@ -1151,7 +1206,7 @@ mod tests {
     #[test]
     fn effective_legacy_per_pair_classifier_returns_override() {
         let mut p = GovernancePolicy::default();
-        p.legacy_per_pair_classifier = Some(true);
+        p.synthesis.legacy_per_pair_classifier = Some(true);
         assert!(p.effective_legacy_per_pair_classifier());
     }
 
@@ -1167,7 +1222,7 @@ mod tests {
     #[test]
     fn effective_synthesis_failure_mode_returns_override() {
         let mut p = GovernancePolicy::default();
-        p.synthesis_failure_mode = Some(SynthesisFailureMode::BlockWrite);
+        p.synthesis.synthesis_failure_mode = Some(SynthesisFailureMode::BlockWrite);
         assert_eq!(
             p.effective_synthesis_failure_mode(),
             SynthesisFailureMode::BlockWrite
@@ -1195,7 +1250,7 @@ mod tests {
     #[test]
     fn effective_synthesis_max_deletes_per_call_returns_override() {
         let mut p = GovernancePolicy::default();
-        p.synthesis_max_deletes_per_call = Some(8);
+        p.synthesis.synthesis_max_deletes_per_call = Some(8);
         assert_eq!(p.effective_synthesis_max_deletes_per_call(), 8);
     }
 
@@ -1208,7 +1263,7 @@ mod tests {
     #[test]
     fn effective_synthesis_max_candidate_chars_returns_override() {
         let mut p = GovernancePolicy::default();
-        p.synthesis_max_candidate_chars = Some(2_500);
+        p.synthesis.synthesis_max_candidate_chars = Some(2_500);
         assert_eq!(p.effective_synthesis_max_candidate_chars(), 2_500);
     }
 
@@ -1221,7 +1276,7 @@ mod tests {
     #[test]
     fn effective_multistep_max_content_chars_returns_override() {
         let mut p = GovernancePolicy::default();
-        p.multistep_max_content_chars = Some(3_000);
+        p.multistep.multistep_max_content_chars = Some(3_000);
         assert_eq!(p.effective_multistep_max_content_chars(), 3_000);
     }
 
@@ -1272,33 +1327,36 @@ mod tests {
     #[test]
     fn governance_policy_serde_round_trip_with_all_v070_fields() {
         let mut p = GovernancePolicy::default();
-        p.max_reflection_depth = Some(5);
-        p.auto_atomise = Some(true);
-        p.auto_atomise_mode = Some(AutoAtomiseMode::Synchronous);
-        p.auto_atomise_threshold_cl100k = Some(750);
-        p.auto_atomise_max_atom_tokens = Some(150);
-        p.auto_atomise_max_retries = Some(2);
-        p.auto_persona_trigger_every_n_memories = Some(10);
-        p.auto_export_personas_to_filesystem = Some(true);
-        p.auto_export_reflections_to_filesystem = Some(true);
-        p.legacy_per_pair_classifier = Some(false);
-        p.auto_classify_kind = Some(MemoryKindAutoClassify::RegexOnly);
-        p.synthesis_failure_mode = Some(SynthesisFailureMode::BlockWrite);
-        p.synthesis_max_deletes_per_call = Some(4);
-        p.synthesis_max_candidate_chars = Some(2_000);
-        p.multistep_max_content_chars = Some(3_000);
+        p.core.max_reflection_depth = Some(5);
+        p.atomisation.auto_atomise = Some(true);
+        p.atomisation.auto_atomise_mode = Some(AutoAtomiseMode::Synchronous);
+        p.atomisation.auto_atomise_threshold_cl100k = Some(750);
+        p.atomisation.auto_atomise_max_atom_tokens = Some(150);
+        p.atomisation.auto_atomise_max_retries = Some(2);
+        p.persona.auto_persona_trigger_every_n_memories = Some(10);
+        p.persona.auto_export_personas_to_filesystem = Some(true);
+        p.export.auto_export_reflections_to_filesystem = Some(true);
+        p.synthesis.legacy_per_pair_classifier = Some(false);
+        p.kind_class.auto_classify_kind = Some(MemoryKindAutoClassify::RegexOnly);
+        p.synthesis.synthesis_failure_mode = Some(SynthesisFailureMode::BlockWrite);
+        p.synthesis.synthesis_max_deletes_per_call = Some(4);
+        p.synthesis.synthesis_max_candidate_chars = Some(2_000);
+        p.multistep.multistep_max_content_chars = Some(3_000);
         let v = serde_json::to_value(&p).unwrap();
         let back: GovernancePolicy = serde_json::from_value(v).unwrap();
-        assert_eq!(back.max_reflection_depth, Some(5));
-        assert_eq!(back.auto_atomise_mode, Some(AutoAtomiseMode::Synchronous));
-        assert_eq!(back.auto_atomise_threshold_cl100k, Some(750));
-        assert_eq!(back.auto_persona_trigger_every_n_memories, Some(10));
+        assert_eq!(back.core.max_reflection_depth, Some(5));
         assert_eq!(
-            back.synthesis_failure_mode,
+            back.atomisation.auto_atomise_mode,
+            Some(AutoAtomiseMode::Synchronous)
+        );
+        assert_eq!(back.atomisation.auto_atomise_threshold_cl100k, Some(750));
+        assert_eq!(back.persona.auto_persona_trigger_every_n_memories, Some(10));
+        assert_eq!(
+            back.synthesis.synthesis_failure_mode,
             Some(SynthesisFailureMode::BlockWrite)
         );
-        assert_eq!(back.synthesis_max_deletes_per_call, Some(4));
-        assert_eq!(back.multistep_max_content_chars, Some(3_000));
+        assert_eq!(back.synthesis.synthesis_max_deletes_per_call, Some(4));
+        assert_eq!(back.multistep.multistep_max_content_chars, Some(3_000));
     }
 
     #[test]
@@ -1322,8 +1380,8 @@ mod tests {
             },
         });
         let parsed = GovernancePolicy::from_metadata(&meta).unwrap().unwrap();
-        assert_eq!(parsed.write, GovernanceLevel::Owner);
-        assert_eq!(parsed.max_reflection_depth, Some(4));
+        assert_eq!(parsed.core.write, GovernanceLevel::Owner);
+        assert_eq!(parsed.core.max_reflection_depth, Some(4));
     }
 
     #[test]

@@ -108,14 +108,26 @@ pub const MIN_SUPPORTED_SCHEMA: u32 = 16;
 /// v41 from Cluster G's (#767) shadow-mode retention closeout which
 /// adds the denormalised `confidence_shadow_observations.source` column
 /// plus the compound `(namespace, source, observed_at)` index supporting
-/// the streaming calibration scan (PERF-4 + PERF-12), and v42 from
+/// the streaming calibration scan (PERF-4 + PERF-12), v42 from
 /// polish PERF-8 (#781) — auto-persona indexed entity-id column
 /// (`memories.mentioned_entity_id TEXT` + partial index) replacing the
 /// content `LIKE '%entity_X%'` full-table scan in the auto-persona
-/// matcher. When a DB's `schema_version` exceeds this, the binary is
-/// too old for a newer DB and we surface a warning. v0.6.3.1 (PR-9h
-/// / issue #487 PR #497 req #72).
-pub const MAX_SUPPORTED_SCHEMA: u32 = 42;
+/// matcher, v43 from issue #810 / #813 — atomic
+/// `(attest_level, signature)` invariant on `memory_links` enforced
+/// by a `BEFORE INSERT/UPDATE` trigger pair, and v44 from issue #228
+/// — the additive `memories.encrypted_envelope BLOB NULL` column
+/// backing the E2E content encryption substrate. When a DB's
+/// `schema_version` exceeds this, the binary is too old for a newer
+/// DB and we surface a warning. v0.6.3.1 (PR-9h / issue #487 PR #497
+/// req #72).
+///
+/// v0.7.0 Provenance write-path closeout: bumped to v47 spanning the
+/// three landings — v45 for Gap 1 (#884, `memories.version` optimistic
+/// concurrency column), v46 for Gap 2 (#885, backfill of the v38
+/// `memories.source_uri` first-class column from `metadata.source_uri`
+/// and `citations[0].uri`), and v47 for Gap 3 (#886, the
+/// `recall_observations` ledger).
+pub const MAX_SUPPORTED_SCHEMA: u32 = 47;
 
 /// Pure boundary check: `true` when `v` lies within
 /// `[MIN_SUPPORTED_SCHEMA, MAX_SUPPORTED_SCHEMA]`. Extracted so the

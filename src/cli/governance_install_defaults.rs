@@ -450,4 +450,172 @@ mod tests {
             "got: {err}"
         );
     }
+
+    // ------------------------------------------------------------------
+    // Coverage-uplift block (2026-05-19): exercise helper functions
+    // (render_preview, load_seed_row) and additional run() branches that
+    // the original 6 tests did not cover.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn render_preview_emits_one_row_per_seeded_rule() {
+        let preview = vec![
+            SeedRuleRow {
+                id: "R001".into(),
+                kind: "filesystem_write".into(),
+                matcher: r#"{"glob":"/tmp/**"}"#.into(),
+                severity: "refuse".into(),
+                enabled: false,
+            },
+            SeedRuleRow {
+                id: "R002".into(),
+                kind: "filesystem_write".into(),
+                matcher: r#"{"glob":"/var/tmp/**"}"#.into(),
+                severity: "refuse".into(),
+                enabled: true,
+            },
+        ];
+        let missing: Vec<String> = vec![];
+
+        let mut so = Vec::<u8>::new();
+        let mut se = Vec::<u8>::new();
+        let mut out = CliOutput::from_std(&mut so, &mut se);
+        render_preview(&mut out, &preview, &missing).unwrap();
+        drop(out);
+        let stdout = String::from_utf8(so).unwrap();
+        // Header line is present.
+        assert!(stdout.contains("The following seed rules will be enabled"));
+        // Both rule ids appear in the preview.
+        assert!(stdout.contains("R001"));
+        assert!(stdout.contains("R002"));
+        // Disabled row prints "will-enable"; enabled row prints
+        // "already-on" — both arms exercised.
+        assert!(stdout.contains("will-enable"));
+        assert!(stdout.contains("already-on"));
+        // No "Warning" line — the missing list is empty.
+        assert!(!stdout.contains("Warning"));
+    }
+
+    #[test]
+    fn render_preview_emits_warning_block_when_missing_present() {
+        let preview: Vec<SeedRuleRow> = vec![];
+        let missing = vec!["R003".to_string(), "R004".to_string()];
+
+        let mut so = Vec::<u8>::new();
+        let mut se = Vec::<u8>::new();
+        let mut out = CliOutput::from_std(&mut so, &mut se);
+        render_preview(&mut out, &preview, &missing).unwrap();
+        drop(out);
+        let stdout = String::from_utf8(so).unwrap();
+        // Warning + remediation lines fire.
+        assert!(stdout.contains("Warning"));
+        assert!(stdout.contains("R003"));
+        assert!(stdout.contains("R004"));
+        assert!(stdout.contains("re-run `ai-memory schema-init`"));
+    }
+
+    #[test]
+    fn load_seed_row_returns_none_for_unknown_id() {
+        let (_dir, db_path) = fresh_db();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let row = load_seed_row(&conn, "R999-nonexistent").unwrap();
+        assert!(row.is_none());
+    }
+
+    #[test]
+    fn load_seed_row_returns_typed_row_with_disabled_default() {
+        let (_dir, db_path) = fresh_db();
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let row = load_seed_row(&conn, "R001").unwrap();
+        let row = row.expect("R001 seeded");
+        assert_eq!(row.id, "R001");
+        assert_eq!(row.kind, "filesystem_write");
+        assert_eq!(row.severity, "refuse");
+        assert!(!row.enabled, "seeded rows ship at enabled = 0");
+    }
+
+    #[test]
+    fn install_defaults_human_render_emits_activated_and_missing_lines() {
+        // Drives both `if !report.activated.is_empty()` and
+        // `if !report.missing.is_empty()` writeln arms (lines ~173-178)
+        // in a single run by hand-deleting one row before invoking run.
+        let (_dir, db_path) = fresh_db();
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute("DELETE FROM governance_rules WHERE id = 'R002'", [])
+                .unwrap();
+        }
+        let mut so = Vec::<u8>::new();
+        let mut se = Vec::<u8>::new();
+        let mut out = CliOutput::from_std(&mut so, &mut se);
+        run(&db_path, yes_args(), &mut out).unwrap();
+        drop(out);
+        let stdout = String::from_utf8(so).unwrap();
+        // Summary header with non-zero counts.
+        assert!(stdout.contains("Activated 3 rule(s)"));
+        assert!(stdout.contains("1 missing"));
+        // Per-id "activated:" line fires when activated is non-empty.
+        assert!(stdout.contains("  activated:"));
+        // Per-id "missing:" line fires when missing is non-empty.
+        assert!(stdout.contains("  missing:"));
+        assert!(stdout.contains("R002"));
+    }
+
+    #[test]
+    fn install_defaults_json_envelope_pins_wire_shape_when_partial_missing() {
+        // Hand-delete two rows, run with --json --yes, parse envelope.
+        let (_dir, db_path) = fresh_db();
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute(
+                "DELETE FROM governance_rules WHERE id IN ('R003','R004')",
+                [],
+            )
+            .unwrap();
+        }
+        let mut so = Vec::<u8>::new();
+        let mut se = Vec::<u8>::new();
+        let mut out = CliOutput::from_std(&mut so, &mut se);
+        run(
+            &db_path,
+            InstallDefaultsArgs {
+                yes: true,
+                json: true,
+            },
+            &mut out,
+        )
+        .unwrap();
+        drop(out);
+        let stdout = String::from_utf8(so).unwrap();
+        let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+        assert_eq!(v["verb"], "governance.install-defaults");
+        let result = &v["result"];
+        // R001 + R002 activated; R003 + R004 missing.
+        let activated = result["activated"].as_array().unwrap();
+        assert_eq!(activated.len(), 2);
+        let missing = result["missing"].as_array().unwrap();
+        assert_eq!(missing.len(), 2);
+        assert!(missing.iter().any(|x| x == "R003"));
+        assert!(missing.iter().any(|x| x == "R004"));
+    }
+
+    #[test]
+    fn run_propagates_open_error_for_non_existent_db_with_unwritable_parent() {
+        // db path under a non-existent directory cannot be opened —
+        // exercises the with_context closure on Connection::open (lines
+        // 101-106). The closure body fires only on the error path.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("nonexistent-dir/missing.db");
+        let mut so = Vec::<u8>::new();
+        let mut se = Vec::<u8>::new();
+        let mut out = CliOutput::from_std(&mut so, &mut se);
+        let err = run(&db_path, yes_args(), &mut out).expect_err("must fail");
+        // The with_context closure runs and the formatted context is
+        // attached to the error chain.
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("governance install-defaults: open db at"),
+            "expected context, got: {chain}"
+        );
+    }
 }

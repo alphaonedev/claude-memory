@@ -255,3 +255,114 @@ mod tests {
         assert!(!cache.is_empty());
     }
 }
+
+// ---------------------------------------------------------------------------
+// v0.7.0 #922 — federation per-peer nonce replay cache
+// ---------------------------------------------------------------------------
+
+use std::collections::HashMap;
+
+/// v0.7.0 #922 — per-peer LRU bound.
+pub const FEDERATION_NONCE_CAPACITY_PER_PEER: usize = 10_000;
+
+/// v0.7.0 #922 — per-peer bounded FIFO cache of `(peer_id, nonce)`.
+#[derive(Debug, Default)]
+pub struct FederationNonceCache {
+    inner: Mutex<HashMap<String, VecDeque<[u8; 32]>>>,
+}
+
+impl FederationNonceCache {
+    /// Fresh empty cache.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check + record `(peer_id, nonce)`.
+    pub fn record_and_check(&self, peer_id: &str, nonce: &str) -> ReplayDecision {
+        let fp = Self::fingerprint(peer_id, nonce);
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let deque = guard.entry(peer_id.to_string()).or_default();
+        if deque.iter().any(|h| h == &fp) {
+            return ReplayDecision::Replay;
+        }
+        if deque.len() >= FEDERATION_NONCE_CAPACITY_PER_PEER {
+            deque.pop_front();
+        }
+        deque.push_back(fp);
+        ReplayDecision::Fresh
+    }
+
+    /// Distinct peers with at least one cached fingerprint.
+    #[must_use]
+    pub fn peer_count(&self) -> usize {
+        self.inner.lock().map(|g| g.len()).unwrap_or(0)
+    }
+
+    /// Cached fingerprints for `peer_id`.
+    #[must_use]
+    pub fn len_for_peer(&self, peer_id: &str) -> usize {
+        self.inner
+            .lock()
+            .map(|g| g.get(peer_id).map_or(0, VecDeque::len))
+            .unwrap_or(0)
+    }
+
+    fn fingerprint(peer_id: &str, nonce: &str) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        let pid = peer_id.as_bytes();
+        let non = nonce.as_bytes();
+        #[allow(clippy::cast_possible_truncation)]
+        hasher.update((pid.len() as u32).to_be_bytes());
+        hasher.update(pid);
+        #[allow(clippy::cast_possible_truncation)]
+        hasher.update((non.len() as u32).to_be_bytes());
+        hasher.update(non);
+        hasher.finalize().into()
+    }
+}
+
+#[cfg(test)]
+mod federation_nonce_cache_tests {
+    use super::*;
+
+    #[test]
+    fn first_seen_returns_fresh() {
+        let cache = FederationNonceCache::new();
+        assert_eq!(cache.record_and_check("p", "n"), ReplayDecision::Fresh);
+        assert_eq!(cache.len_for_peer("p"), 1);
+    }
+
+    #[test]
+    fn exact_repeat_returns_replay() {
+        let cache = FederationNonceCache::new();
+        assert_eq!(cache.record_and_check("p", "n"), ReplayDecision::Fresh);
+        assert_eq!(cache.record_and_check("p", "n"), ReplayDecision::Replay);
+        assert_eq!(cache.len_for_peer("p"), 1);
+    }
+
+    #[test]
+    fn different_peers_can_use_same_nonce() {
+        let cache = FederationNonceCache::new();
+        assert_eq!(cache.record_and_check("a", "s"), ReplayDecision::Fresh);
+        assert_eq!(cache.record_and_check("b", "s"), ReplayDecision::Fresh);
+        assert_eq!(cache.peer_count(), 2);
+    }
+
+    #[test]
+    fn fifo_eviction_at_per_peer_capacity() {
+        let cache = FederationNonceCache::new();
+        for i in 0..FEDERATION_NONCE_CAPACITY_PER_PEER {
+            assert_eq!(
+                cache.record_and_check("p", &format!("n-{i}")),
+                ReplayDecision::Fresh
+            );
+        }
+        assert_eq!(cache.len_for_peer("p"), FEDERATION_NONCE_CAPACITY_PER_PEER);
+        assert_eq!(cache.record_and_check("p", "n-new"), ReplayDecision::Fresh);
+        assert_eq!(cache.record_and_check("p", "n-0"), ReplayDecision::Fresh);
+    }
+}

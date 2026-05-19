@@ -9,11 +9,12 @@
 //! Ollama dependency.
 //!
 //! Flags:
-//!   --db <path>         SQLite path; created if missing.
+//!   --db <path>         `SQLite` path; created if missing.
 //!   --input <path>      File to offload.
 //!   --output <path>     Where deref writes the round-tripped bytes.
 //!   --report <path>     JSON report (round-trip + tamper outcomes).
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use ai_memory::offload::{ContextOffloader, OffloadConfig, OffloadError};
@@ -61,7 +62,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     let digest = hasher.finalize();
     let mut out = String::with_capacity(64);
     for byte in digest {
-        out.push_str(&format!("{byte:02x}"));
+        write!(out, "{byte:02x}").expect("writing to String never fails");
     }
     out
 }
@@ -75,7 +76,7 @@ fn main() -> Result<()> {
     let result = off
         .offload(&content, "cookbook/offload", None, "ai:cookbook")
         .context("offload step")?;
-    let deref = off.deref(&result.ref_id).context("deref step")?;
+    let deref = off.deref(&result.ref_id, None).context("deref step")?;
     std::fs::write(&args.output, deref.content.as_bytes())
         .with_context(|| format!("write output {}", args.output.display()))?;
     let round_trip_ok = deref.content == content && deref.sha256 == result.content_sha256;
@@ -95,11 +96,10 @@ fn main() -> Result<()> {
         "UPDATE offloaded_blobs SET content_zstd = ?1 WHERE ref_id = ?2",
         params![tampered, result.ref_id],
     )?;
-    let tamper_refused = match off.deref(&result.ref_id) {
+    let tamper_refused = match off.deref(&result.ref_id, None) {
         Err(e) => e
             .downcast_ref::<OffloadError>()
-            .map(|err| matches!(err, OffloadError::IntegrityFailed { .. }))
-            .unwrap_or(false),
+            .is_some_and(|err| matches!(err, OffloadError::IntegrityFailed { .. })),
         Ok(_) => false,
     };
 

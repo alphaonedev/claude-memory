@@ -5,7 +5,10 @@
 
 use crate::embeddings::Embed;
 use crate::hnsw::VectorIndex;
-use crate::models::{CandidateCounts, Memory, MemoryKind, RecallMeta, RecallTelemetry};
+use crate::models::{
+    AttestLevel, CandidateCounts, ConfidenceTier, Memory, MemoryKind, RecallMeta, RecallTelemetry,
+};
+use crate::observations;
 use crate::reranker::BatchedReranker;
 use crate::{db, validate};
 use serde_json::{Value, json};
@@ -181,6 +184,165 @@ pub async fn handle_recall_with_pre_recall_hook(
     )
 }
 
+/// v0.7.0 Gap 7 (#890) — Tier-3 recall-row decoration.
+///
+/// Serialise a `(Memory, score)` pair into the JSON shape the recall
+/// response surfaces. When `verbose_provenance` is true (the default
+/// since v0.7.0), the row carries the full provenance audit trail —
+/// derived `confidence_tier`, derived `freshness_state`, and the
+/// `latest_link_attest_level` lookup over `memory_links`. Plain serde
+/// already round-trips the substrate-side columns (`confidence`,
+/// `source`, `source_uri`, `access_count`, `last_accessed_at`), so
+/// the additional decoration is the *derived* half.
+///
+/// Token-budget contract: the verbose decoration adds at most ~120
+/// bytes per row (3 short snake_case keys + 3 short snake_case
+/// values). The token-budget guards (`tests/token_budget_guard.rs`)
+/// pin the catalog totals; the per-row decoration grows with `count`
+/// not catalog size, so the guards remain accurate.
+fn decorate_memory(
+    mem: &Memory,
+    score: f64,
+    verbose_provenance: bool,
+    conn: &rusqlite::Connection,
+) -> Value {
+    let mut val = serde_json::to_value(mem).unwrap_or_default();
+    let Some(obj) = val.as_object_mut() else {
+        return val;
+    };
+    obj.insert(
+        "score".to_string(),
+        json!((score * 1000.0).round() / 1000.0),
+    );
+    if !verbose_provenance {
+        return val;
+    }
+    // Gap 7 (#890) — derived confidence tier (Gap 4 enum).
+    obj.insert(
+        "confidence_tier".to_string(),
+        json!(mem.confidence_tier().as_str()),
+    );
+    // Gap 7 — derived freshness_state from expires_at + last_accessed_at.
+    obj.insert("freshness_state".to_string(), json!(freshness_state(mem)));
+    // Gap 7 — latest link attest level. Best-effort: a SQL error here
+    // collapses to None so a corrupt links row doesn't break the
+    // recall response.
+    let latest_attest = latest_link_attest_level(conn, &mem.id);
+    if let Some(level) = latest_attest {
+        obj.insert("latest_link_attest_level".to_string(), json!(level));
+    }
+    val
+}
+
+/// v0.7.0 Gap 7 (#890) — derive a coarse freshness state from
+/// substrate-side timestamps.
+///
+/// - `"expired"` — `expires_at` is set and lies in the past.
+/// - `"stale"`   — no access recorded in the last 30 days (long-tier
+///                 rows that haven't been touched for a month).
+/// - `"warm"`    — has been accessed in the last 30 days.
+/// - `"fresh"`   — newly created OR `last_accessed_at == created_at`
+///                 (never touched, but young).
+///
+/// Conservative defaults: a row with unparseable timestamps lands in
+/// `"warm"` (the substrate sees activity recently enough to surface
+/// it via recall, so blocking it on a timestamp parse would be
+/// hostile). Pure function; no DB queries.
+fn freshness_state(mem: &Memory) -> &'static str {
+    let now = chrono::Utc::now();
+    if let Some(exp) = mem.expires_at.as_deref()
+        && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(exp)
+        && dt < now
+    {
+        return "expired";
+    }
+    let last = mem.last_accessed_at.as_deref().unwrap_or(&mem.created_at);
+    let Ok(last_dt) = chrono::DateTime::parse_from_rfc3339(last) else {
+        return "warm";
+    };
+    let age_days = (now - last_dt.with_timezone(&chrono::Utc)).num_days();
+    if age_days > 30 {
+        "stale"
+    } else if age_days < 1 && mem.access_count == 0 {
+        "fresh"
+    } else {
+        "warm"
+    }
+}
+
+/// v0.7.0 Gap 7 (#890) — return the strongest attestation level
+/// across every link incident on `memory_id`. `peer_attested >
+/// self_signed > unsigned`. Returns `None` when no links exist.
+/// Best-effort: a SQL error returns `None` so the recall row keeps
+/// its remaining decoration.
+fn latest_link_attest_level(conn: &rusqlite::Connection, memory_id: &str) -> Option<String> {
+    let links = db::get_links(conn, memory_id).ok()?;
+    let mut best: Option<AttestLevel> = None;
+    for link in &links {
+        let Some(level_str) = link.attest_level.as_deref() else {
+            continue;
+        };
+        let Some(level) = AttestLevel::from_str(level_str) else {
+            continue;
+        };
+        let candidate_rank = attest_rank(level);
+        match best {
+            None => best = Some(level),
+            Some(curr) if candidate_rank > attest_rank(curr) => best = Some(level),
+            _ => {}
+        }
+    }
+    best.map(|l| l.as_str().to_string())
+}
+
+const fn attest_rank(level: AttestLevel) -> u8 {
+    match level {
+        AttestLevel::Unsigned => 0,
+        AttestLevel::SelfSigned => 1,
+        AttestLevel::PeerAttested => 2,
+    }
+}
+
+/// v0.7.0 Gap 3 (#886) — record one `recall_observations` row per
+/// returned candidate under `recall_id`. The `retriever` label is
+/// stamped uniformly across the batch ("hybrid+rerank", "hybrid",
+/// "keyword") to match the corresponding response `mode`. Best-
+/// effort: a SQL error logs at warn level and continues, since the
+/// recall response is already minted by the time this runs.
+fn record_recall_observations(
+    conn: &rusqlite::Connection,
+    recall_id: &str,
+    memories_json: &[Value],
+    retriever: &str,
+) {
+    if !observations::table_exists(conn) {
+        return;
+    }
+    let mut candidates: Vec<observations::Candidate<'_>> = Vec::with_capacity(memories_json.len());
+    let mut id_holders: Vec<&str> = Vec::with_capacity(memories_json.len());
+    for (idx, m) in memories_json.iter().enumerate() {
+        if let Some(id) = m.get("id").and_then(Value::as_str) {
+            id_holders.push(id);
+            let score = m.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+            #[allow(clippy::cast_possible_wrap)]
+            let rank = (idx + 1) as i64;
+            candidates.push(observations::Candidate {
+                memory_id: id_holders.last().copied().unwrap(),
+                retriever,
+                rank,
+                score,
+            });
+        }
+    }
+    if let Err(e) = observations::record_recall(conn, recall_id, &candidates) {
+        tracing::warn!(
+            target: "observations",
+            recall_id = %recall_id,
+            "record_recall failed (non-fatal): {e}"
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
 pub fn handle_recall(
@@ -199,22 +361,56 @@ pub fn handle_recall(
     // keeps v0.6.x recall semantics exactly.
     recall_scope: Option<&crate::config::RecallScope>,
 ) -> Result<Value, String> {
-    // Helper: serialize scored memories with score field (#95)
-    fn scored_memories(results: Vec<(Memory, f64)>) -> Vec<Value> {
-        results
-            .into_iter()
-            .map(|(mem, score)| {
-                let mut val = serde_json::to_value(&mem).unwrap_or_default();
-                if let Some(obj) = val.as_object_mut() {
-                    obj.insert(
-                        "score".to_string(),
-                        json!((score * 1000.0).round() / 1000.0),
-                    );
-                }
-                val
-            })
-            .collect()
-    }
+    // v0.7.0 Gap 7 (#890) — `verbose_provenance` defaults to true.
+    // Pre-Gap-7 recall responses dropped per-row provenance scaffolding
+    // (confidence_tier / source_uri / freshness_state / access_count /
+    // latest_link_attest_level) to keep the wire small; v0.7.0
+    // reverses the default so MCP callers see the full audit trail
+    // by default. Clients that want the trimmed shape can pass
+    // `verbose_provenance=false`.
+    let verbose_provenance = params["verbose_provenance"].as_bool().unwrap_or(true);
+
+    // v0.7.0 Gap 3 (#886) — fresh per-call recall_id stamped into
+    // every observation row (and echoed back in the response so the
+    // caller can cite it on a later memory_store / memory_link).
+    let recall_id = uuid::Uuid::new_v4().to_string();
+
+    // v0.7.0 Gap 4 (#887) — derived-tier filter (`"confirmed"` /
+    // `"likely"` / `"ambiguous"`). When set, keeps only the matching
+    // tier. Unknown / empty values fall through to "no filter" so a
+    // typo on the client side doesn't silently inverter the filter.
+    let confidence_tier_filter: Option<ConfidenceTier> = params["confidence_tier"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(ConfidenceTier::parse);
+
+    // Helper: serialize scored memories with score field (#95) and,
+    // when `verbose_provenance` is set, the Gap 7 (#890) decoration
+    // block (`confidence_tier`, `freshness_state`, `latest_link_attest_level`).
+    // Plain serde already emits `confidence`, `source`, `source_uri`,
+    // `access_count`, `last_accessed_at`; the Gap 7 contract just adds
+    // the derived fields the substrate computes here.
+    let scored_memories =
+        |results: Vec<(Memory, f64)>, conn: &rusqlite::Connection| -> Vec<Value> {
+            results
+                .into_iter()
+                .map(|(mem, score)| decorate_memory(&mem, score, verbose_provenance, conn))
+                .collect()
+        };
+
+    // v0.7.0 Gap 4 (#887) — filter `(Memory, f64)` candidates by the
+    // derived confidence tier. No-op when `confidence_tier_filter` is
+    // None.
+    let apply_confidence_tier_filter = |results: Vec<(Memory, f64)>| -> Vec<(Memory, f64)> {
+        match confidence_tier_filter {
+            None => results,
+            Some(target) => results
+                .into_iter()
+                .filter(|(m, _)| m.confidence_tier() == target)
+                .collect(),
+        }
+    };
 
     let _ = db::gc_if_needed(conn, archive_on_gc);
     let context = params["context"].as_str().ok_or("context is required")?;
@@ -304,6 +500,20 @@ pub fn handle_recall(
     let source_uri_prefix: Option<String> = params["source_uri_prefix"]
         .as_str()
         .map(std::string::ToString::to_string);
+
+    // v0.7.0 (issue #518) — per-session "recently accessed" boost.
+    // When the caller passes a non-empty `session_id`, the rerank
+    // post-step adds `SESSION_RECENCY_BOOST` to every candidate
+    // already in the session's ring buffer and records the post-
+    // boost hit set back into the buffer so the next recall in the
+    // same session reuses the new context. `None` / empty preserves
+    // pre-#518 recall semantics exactly.
+    let session_id: Option<String> = params["session_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(std::string::ToString::to_string);
+    let session_tracker = crate::reranker::global_session_recall_tracker();
 
     // v0.6.0.0 contextual recall — caller-supplied recent conversation tokens.
     let context_tokens: Vec<String> = params["context_tokens"]
@@ -454,8 +664,21 @@ pub fn handle_recall(
                 if let Some(ce) = reranker {
                     let ce_reranked = ce.rerank(context, results);
                     let ce_reranked = apply_kinds_filter(ce_reranked, kinds_filter.as_deref());
-                    let memories = scored_memories(ce_reranked);
-                    let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "hybrid+rerank"});
+                    let ce_reranked = apply_confidence_tier_filter(ce_reranked);
+                    // v0.7.0 (issue #518) — session recency boost.
+                    let ce_reranked = crate::reranker::apply_session_recency_boost(
+                        ce_reranked,
+                        session_id.as_deref(),
+                        session_tracker,
+                    );
+                    let memories = scored_memories(ce_reranked, conn);
+                    record_recall_observations(conn, &recall_id, &memories, "hybrid+rerank");
+                    let mut resp = json!({
+                        "recall_id": recall_id,
+                        "memories": memories,
+                        "count": memories.len(),
+                        "mode": "hybrid+rerank",
+                    });
                     decorate_budget(&mut resp, &outcome);
                     attach_meta(&mut resp, "hybrid", &telemetry);
                     super::inject_namespace_standard(conn, namespace, &mut resp);
@@ -463,9 +686,22 @@ pub fn handle_recall(
                 }
 
                 let results = apply_kinds_filter(results, kinds_filter.as_deref());
-                let memories = scored_memories(results);
-                let mut resp =
-                    json!({"memories": memories, "count": memories.len(), "mode": "hybrid"});
+                let results = apply_confidence_tier_filter(results);
+                // v0.7.0 (issue #518) — session recency boost (no
+                // cross-encoder branch).
+                let results = crate::reranker::apply_session_recency_boost(
+                    results,
+                    session_id.as_deref(),
+                    session_tracker,
+                );
+                let memories = scored_memories(results, conn);
+                record_recall_observations(conn, &recall_id, &memories, "hybrid");
+                let mut resp = json!({
+                    "recall_id": recall_id,
+                    "memories": memories,
+                    "count": memories.len(),
+                    "mode": "hybrid",
+                });
                 decorate_budget(&mut resp, &outcome);
                 attach_meta(&mut resp, "hybrid", &telemetry);
                 super::inject_namespace_standard(conn, namespace, &mut resp);
@@ -507,8 +743,23 @@ pub fn handle_recall(
         source_uri_prefix.as_deref(),
     );
     let results = apply_kinds_filter(results, kinds_filter.as_deref());
-    let memories = scored_memories(results);
-    let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "keyword"});
+    let results = apply_confidence_tier_filter(results);
+    // v0.7.0 (issue #518) — session recency boost on the keyword-only
+    // fallback branch as well, so the contract is uniform regardless
+    // of which retrieval mode produced the candidate set.
+    let results = crate::reranker::apply_session_recency_boost(
+        results,
+        session_id.as_deref(),
+        session_tracker,
+    );
+    let memories = scored_memories(results, conn);
+    record_recall_observations(conn, &recall_id, &memories, "keyword");
+    let mut resp = json!({
+        "recall_id": recall_id,
+        "memories": memories,
+        "count": memories.len(),
+        "mode": "keyword",
+    });
     decorate_budget(&mut resp, &outcome);
     attach_meta(&mut resp, "keyword_only", &telemetry);
     super::inject_namespace_standard(conn, namespace, &mut resp);
@@ -566,6 +817,7 @@ mod tests {
             confidence_source: crate::models::ConfidenceSource::CallerProvided,
             confidence_signals: None,
             confidence_decayed_at: None,
+            version: 1,
         }
     }
 

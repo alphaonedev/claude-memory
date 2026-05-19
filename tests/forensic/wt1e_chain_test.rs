@@ -137,6 +137,7 @@ fn seed_long_source(conn: &Connection, ns: &str, keyword: &str) -> String {
         confidence_source: ConfidenceSource::CallerProvided,
         confidence_signals: None,
         confidence_decayed_at: None,
+        version: 1,
     };
     db::insert(conn, &mem).expect("seed")
 }

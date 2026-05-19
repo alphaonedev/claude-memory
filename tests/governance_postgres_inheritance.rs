@@ -45,9 +45,8 @@ use ai_memory::store::postgres::PostgresStore;
 use ai_memory::store::{GovernedAction, MemoryStore};
 use sqlx::PgPool;
 
-fn postgres_url() -> Option<String> {
-    std::env::var("AI_MEMORY_TEST_POSTGRES_URL").ok()
-}
+mod common;
+use common::postgres_url;
 
 fn unique_suffix() -> String {
     uuid::Uuid::new_v4().to_string()[..8].to_string()
