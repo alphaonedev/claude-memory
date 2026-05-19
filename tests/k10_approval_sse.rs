@@ -143,7 +143,9 @@ async fn http_sse_endpoint_emits_event_to_attached_client() {
         replay_cache: std::sync::Arc::new(ai_memory::identity::replay::ReplayCache::default()),
 
         verify_require_nonce: false,
-        federation_nonce_cache: std::sync::Arc::new(ai_memory::identity::replay::FederationNonceCache::default()),
+        federation_nonce_cache: std::sync::Arc::new(
+            ai_memory::identity::replay::FederationNonceCache::default(),
+        ),
         autonomous_hooks: false,
         recall_scope: std::sync::Arc::new(None),
         deferred_audit_queue: std::sync::Arc::new(None),

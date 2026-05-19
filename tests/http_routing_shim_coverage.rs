@@ -74,7 +74,9 @@ fn build_test_router(tier: FeatureTier) -> (axum::Router, NamedTempFile) {
         llm_call_timeout: std::time::Duration::from_secs(30),
         replay_cache: std::sync::Arc::new(ai_memory::identity::replay::ReplayCache::default()),
         verify_require_nonce: false,
-        federation_nonce_cache: std::sync::Arc::new(ai_memory::identity::replay::FederationNonceCache::default()),
+        federation_nonce_cache: std::sync::Arc::new(
+            ai_memory::identity::replay::FederationNonceCache::default(),
+        ),
         autonomous_hooks: false,
         recall_scope: Arc::new(None),
         deferred_audit_queue: Arc::new(None),

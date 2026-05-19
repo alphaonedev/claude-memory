@@ -83,7 +83,9 @@ fn build_router_with_embedder(embedder: Option<Embedder>) -> (axum::Router, Name
         replay_cache: std::sync::Arc::new(ai_memory::identity::replay::ReplayCache::default()),
 
         verify_require_nonce: false,
-        federation_nonce_cache: std::sync::Arc::new(ai_memory::identity::replay::FederationNonceCache::default()),
+        federation_nonce_cache: std::sync::Arc::new(
+            ai_memory::identity::replay::FederationNonceCache::default(),
+        ),
         autonomous_hooks: false,
         recall_scope: Arc::new(None),
         deferred_audit_queue: Arc::new(None),
