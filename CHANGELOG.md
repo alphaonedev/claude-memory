@@ -95,7 +95,7 @@ The v0.7.0 surface previously documented a 7-level provenance framework (Identit
 
 #### Changed
 
-- **MCP tool count 71 → 73** (Gap 3 `memory_recall_observations` adds 1; Gap 4 `confidence_tier` arg surfaces another callable). `Profile::full().expected_tool_count()` returns 73; pinned by `src/profile.rs:771 assert_eq!(total, 73)`. CLI subcommand count surface bumped to 56 across README + CLAUDE.md (was `~50` placeholder, now exact).
+- **MCP tool count 71 → 73** (Gap 3 `memory_recall_observations` adds 1; Gap 4 `confidence_tier` arg surfaces another callable). `Profile::full().expected_tool_count()` returns 73; pinned by `src/profile.rs:771 assert_eq!(total, 73)`. CLI subcommand count surface bumped to 55 across README + CLAUDE.md (was `~50` placeholder, now exact per `Command` enum at `src/daemon_runtime.rs:157-440`).
 
 ## [v0.6.4] — 2026-05-08 — `quiet-tools`
 

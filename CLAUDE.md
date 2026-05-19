@@ -108,7 +108,7 @@ release-notes intro lives under `docs/v0.7.0/release-notes.md`
 
 1. **MCP Server** (`src/mcp/`) — stdio JSON-RPC 2.0 with **73 advertised entries at `--profile full`** at v0.7.0 (72 callable "memory tools" + the always-on `memory_capabilities` bootstrap — both numbers are intentional; see issue [#862](https://github.com/alphaonedev/ai-memory-mcp/issues/862) for the disambiguation, and `Profile::full().expected_tool_count()` in `src/profile.rs` for the canonical assertion). Default `--profile core` ships **7 tools** at v0.7.0 (the original 5 + `memory_load_family` + `memory_smart_load`) plus the always-on `memory_capabilities` bootstrap. Plus 2 prompts (`recall-first`, `memory-workflow`).
 2. **HTTP API** (`src/handlers/`) — Axum REST server on port 9077, **72 `.route(...)` registrations in `src/lib.rs`** at `/api/v1/` (and the bare `/metrics` Prometheus surface). Handlers split per domain under `src/handlers/{http,federation_receive,hook_subscribers,transport}.rs` (#650 partially addressed at v0.7.0; full per-domain split tracked in #650).
-3. **CLI** (`src/main.rs` thin shim + `src/daemon_runtime.rs::Command`) — clap-based, **56 top-level subcommands** at v0.7.0 (was 40 at v0.6.4) with optional `--json` output
+3. **CLI** (`src/main.rs` thin shim + `src/daemon_runtime.rs::Command`) — clap-based, **55 top-level subcommands** at v0.7.0 (was 40 at v0.6.4) with optional `--json` output
 
 All three interfaces share the same storage layer (`src/storage/`) and validation (`src/validate.rs`) layers. The sqlite legacy path uses `Arc<Mutex<(Connection, PathBuf, ResolvedTtl, bool)>>` — a single SQLite connection protected by a mutex. Lock contention is the bottleneck under concurrent HTTP + MCP load. The v0.7 SAL trait (under `src/store/`) abstracts sqlite vs. postgres+AGE adapters; `ai-memory serve --store-url postgres://…` selects the postgres path.
 
@@ -117,7 +117,7 @@ All three interfaces share the same storage layer (`src/storage/`) and validatio
 | Module | Role |
 |--------|------|
 | `main.rs` | Thin CLI shim (W6 refactor); top-level `Command` enum lives in `src/daemon_runtime.rs` |
-| `daemon_runtime.rs` | clap top-level `Command` enum (56 subcommands), HTTP daemon `serve` bootstrap, MCP `mcp` dispatch |
+| `daemon_runtime.rs` | clap top-level `Command` enum (55 subcommands), HTTP daemon `serve` bootstrap, MCP `mcp` dispatch |
 | `mcp/` | MCP server: stdin/stdout JSON-RPC loop, tool registry (`src/mcp/registry.rs`), per-tool handlers under `src/mcp/tools/` |
 | `storage/` | SAL trait + sqlite path; CRUD, FTS5 queries, recall scoring, GC, schema migrations (current `CURRENT_SCHEMA_VERSION = 43` in `src/storage/migrations.rs`) |
 | `store/` | SAL adapter implementations (sqlite + postgres + Apache AGE feature gates) |
