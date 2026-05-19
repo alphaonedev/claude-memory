@@ -29,7 +29,11 @@ use tempfile::TempDir;
 mod common;
 use common::free_port;
 
-const SPAWN_TIMEOUT: Duration = Duration::from_secs(15);
+// CI's Code Coverage job runs the test binary under `cargo llvm-cov`
+// instrumentation, which inflates startup time by 3-5x. 60s gives
+// enough headroom on every supported CI surface (Linux/macOS/Windows)
+// regardless of instrumentation overhead.
+const SPAWN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// RAII guard for the spawned daemon. Drops kill the child on test
 /// exit so leaked test processes don't accumulate on flaky failures.
