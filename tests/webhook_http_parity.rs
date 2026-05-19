@@ -152,6 +152,20 @@ impl HttpHarness {
 }
 
 /// Insert a wildcard subscription pointing at the wiremock URL via a
+/// Per-test serial mutex. `set_allow_loopback_webhooks(true)` is a
+/// PROCESS-WIDE config flip; combined with the in-process dispatch
+/// loop reading the loopback flag on every fire, two parallel webhook
+/// tests can race on whether the flag is on. Holding this mutex for
+/// the body of each `#[tokio::test]` below serialises the 4 webhook
+/// HTTP-parity tests so the global flag stays stable per test. The
+/// observable bleed surface (test A's mock receives test B's
+/// `memory_consolidated` event) goes away once the tests cannot
+/// overlap.
+fn webhook_serial_lock() -> &'static std::sync::Mutex<()> {
+    static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    M.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 /// fresh DB connection (the dispatch thread will reopen anyway).
 fn subscribe_all(db_path: &Path, mock_url: &str) -> String {
     // H11 (#628 blocker): wiremock binds to 127.0.0.1; loopback
@@ -224,6 +238,9 @@ fn seed_memory(db_path: &Path, title: &str, namespace: &str) -> String {
 
 #[tokio::test]
 async fn webhook_fires_on_http_delete() {
+    let _g = webhook_serial_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let harness = HttpHarness::new();
     let (mock, hook_url) = fresh_mock().await;
     let _sub_id = subscribe_all(&harness.db_path, &hook_url);
@@ -257,6 +274,9 @@ async fn webhook_fires_on_http_delete() {
 
 #[tokio::test]
 async fn webhook_fires_on_http_promote() {
+    let _g = webhook_serial_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let harness = HttpHarness::new();
     let (mock, hook_url) = fresh_mock().await;
     subscribe_all(&harness.db_path, &hook_url);
@@ -284,6 +304,9 @@ async fn webhook_fires_on_http_promote() {
 
 #[tokio::test]
 async fn webhook_fires_on_http_link_created() {
+    let _g = webhook_serial_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let harness = HttpHarness::new();
     let (mock, hook_url) = fresh_mock().await;
     subscribe_all(&harness.db_path, &hook_url);
@@ -319,6 +342,9 @@ async fn webhook_fires_on_http_link_created() {
 
 #[tokio::test]
 async fn webhook_fires_on_http_consolidate() {
+    let _g = webhook_serial_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let harness = HttpHarness::new();
     let (mock, hook_url) = fresh_mock().await;
     subscribe_all(&harness.db_path, &hook_url);
