@@ -10508,7 +10508,12 @@ mod tests {
             return;
         };
         let store = PostgresStore::connect(&url).await.unwrap();
-        let ctx = CallerContext::for_agent("ai:sal-test");
+        // Use admin ctx so the SAL-level scope=private filter (#910) doesn't
+        // mask the row — this test is about agent_id IMMUTABILITY (Blocker
+        // #295), not visibility scoping. With `for_agent("ai:sal-test")`
+        // the .get() post-filter returns NotFound against an
+        // "ai:alice"-owned row.
+        let ctx = CallerContext::for_admin();
         let ns = format!("sal-agent-{}", uuid::Uuid::new_v4());
 
         let mut first = sample_memory("agent-1", &ns, "owned-by-alice", "original");
