@@ -259,7 +259,12 @@ async fn touch_after_recall_short_tier_extends_ttl_no_promote() {
             .await
             .expect("connect postgres adapter"),
     );
-    let ctx = CallerContext::for_agent("ai:touch-batch-test-short");
+    // Caller must match the owner stamp on fresh_memory's metadata.agent_id
+    // ("ai:touch-batch-test") so the SAL-level scope=private filter (#910)
+    // doesn't fold the row into NotFound. The "-short" suffix on the prior
+    // ctx was test-only naming; this test exercises TTL semantics on a
+    // short-tier row owned by the same caller as the mid-tier sibling above.
+    let ctx = CallerContext::for_agent("ai:touch-batch-test");
 
     let suffix = uuid::Uuid::new_v4();
     let ns = format!("touch-batch-short-{suffix}");
