@@ -187,17 +187,30 @@ fn subscribe_all(db_path: &Path, mock_url: &str) -> String {
     .expect("insert subscription")
 }
 
-/// Wait up to `total` for the mock server to receive at least one
-/// request, polling every 25 ms. Returns the captured requests.
-async fn wait_for_dispatch(mock: &MockServer, total: Duration) -> Vec<wiremock::Request> {
+/// Wait for the mock server to receive a request whose JSON body has
+/// `event == expected_event`. Tolerates cross-test bleed: dispatch
+/// from prior #[tokio::test] runs `std::thread::spawn`-detached, so
+/// even with `webhook_serial_lock()` held by the test body, a slow
+/// dispatch from a prior test can land on this test's mock if port
+/// reuse aligns. Filtering by `event` makes each test resilient to
+/// straggler events from siblings.
+async fn wait_for_event(
+    mock: &MockServer,
+    expected_event: &str,
+    total: Duration,
+) -> Option<wiremock::Request> {
     let deadline = std::time::Instant::now() + total;
     loop {
         let received = mock.received_requests().await.unwrap_or_default();
-        if !received.is_empty() {
-            return received;
+        for req in &received {
+            if let Ok(body) = serde_json::from_slice::<Value>(&req.body)
+                && body["event"].as_str() == Some(expected_event)
+            {
+                return Some(req.clone());
+            }
         }
         if std::time::Instant::now() >= deadline {
-            return received;
+            return None;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -251,15 +264,12 @@ async fn webhook_fires_on_http_delete() {
         .await;
     assert_eq!(status, StatusCode::OK, "delete should succeed");
 
-    let received = wait_for_dispatch(&mock, Duration::from_secs(2)).await;
-    assert!(
-        !received.is_empty(),
-        "expected memory_delete webhook to fire on HTTP DELETE; \
-         received nothing within 2s"
-    );
+    let req = wait_for_event(&mock, "memory_delete", Duration::from_secs(2))
+        .await
+        .expect("memory_delete webhook must fire on HTTP DELETE within 2s");
 
     // Validate the event payload shape matches the MCP precedent.
-    let body: Value = serde_json::from_slice(&received[0].body).expect("payload is valid JSON");
+    let body: Value = serde_json::from_slice(&req.body).expect("payload is valid JSON");
     assert_eq!(body["event"], "memory_delete");
     assert_eq!(body["memory_id"], mem_id);
     assert_eq!(body["namespace"], "v064-017");
@@ -287,13 +297,11 @@ async fn webhook_fires_on_http_promote() {
         .await;
     assert_eq!(status, StatusCode::OK, "promote should succeed");
 
-    let received = wait_for_dispatch(&mock, Duration::from_secs(2)).await;
-    assert!(
-        !received.is_empty(),
-        "expected memory_promote webhook to fire on HTTP promote"
-    );
+    let req = wait_for_event(&mock, "memory_promote", Duration::from_secs(2))
+        .await
+        .expect("memory_promote webhook must fire on HTTP promote within 2s");
 
-    let body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    let body: Value = serde_json::from_slice(&req.body).unwrap();
     assert_eq!(body["event"], "memory_promote");
     assert_eq!(body["memory_id"], mem_id);
     // HTTP only does tier promotion. Vertical mode is MCP-only.
@@ -325,13 +333,11 @@ async fn webhook_fires_on_http_link_created() {
         .await;
     assert_eq!(status, StatusCode::CREATED, "link should be created");
 
-    let received = wait_for_dispatch(&mock, Duration::from_secs(2)).await;
-    assert!(
-        !received.is_empty(),
-        "expected memory_link_created webhook to fire on HTTP link"
-    );
+    let req = wait_for_event(&mock, "memory_link_created", Duration::from_secs(2))
+        .await
+        .expect("memory_link_created webhook must fire on HTTP link within 2s");
 
-    let body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    let body: Value = serde_json::from_slice(&req.body).unwrap();
     assert_eq!(body["event"], "memory_link_created");
     assert_eq!(body["memory_id"], src_id, "outer memory_id is the source");
     // Details flattened.
@@ -372,13 +378,11 @@ async fn webhook_fires_on_http_consolidate() {
         .expect("response carries new id")
         .to_string();
 
-    let received = wait_for_dispatch(&mock, Duration::from_secs(2)).await;
-    assert!(
-        !received.is_empty(),
-        "expected memory_consolidated webhook to fire on HTTP consolidate"
-    );
+    let req = wait_for_event(&mock, "memory_consolidated", Duration::from_secs(2))
+        .await
+        .expect("memory_consolidated webhook must fire on HTTP consolidate within 2s");
 
-    let body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    let body: Value = serde_json::from_slice(&req.body).unwrap();
     assert_eq!(body["event"], "memory_consolidated");
     assert_eq!(body["memory_id"], new_id);
     // Details flattened.
