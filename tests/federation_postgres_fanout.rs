@@ -433,10 +433,14 @@ async fn subscribe_postgres_replays_history() {
     // The list_subscriptions endpoint resolves the subscription back
     // through the SAL `list` projection. The post-fanout local row
     // is still present (fanout doesn't move ownership, it mirrors).
+    // Per #874 (security-medium, 2026-05-18): the list_subscriptions
+    // handler requires X-Agent-Id to match the agent_id= query param,
+    // else it returns 403 before reaching the SAL list projection.
     let list_resp = client
         .get(format!(
             "{base}/api/v1/subscriptions?agent_id={subscriber_aid}"
         ))
+        .header("x-agent-id", &subscriber_aid)
         .send()
         .await
         .expect("list subs")

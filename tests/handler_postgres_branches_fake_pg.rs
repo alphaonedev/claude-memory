@@ -117,11 +117,27 @@ async fn get_uri(router: &axum::Router, uri: &str) -> (StatusCode, Value) {
 }
 
 async fn delete_uri(router: &axum::Router, uri: &str) -> (StatusCode, Value) {
-    let req = Request::builder()
-        .method("DELETE")
-        .uri(uri)
-        .body(Body::empty())
-        .unwrap();
+    delete_uri_as(router, uri, None).await
+}
+
+/// Per #874 (security-medium, 2026-05-18) the unsubscribe handler
+/// REQUIRES authenticated identity via `X-Agent-Id` header (or body),
+/// and refuses the request with 403 if the `agent_id=` query param
+/// does not match the authenticated caller. Tests that pass an
+/// `agent_id=…` query param MUST therefore also set the matching
+/// `X-Agent-Id` header through this helper to exercise the
+/// happy-path branches; otherwise the handler returns 403 instead
+/// of the asserted 200/400.
+async fn delete_uri_as(
+    router: &axum::Router,
+    uri: &str,
+    caller_agent_id: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder().method("DELETE").uri(uri);
+    if let Some(caller) = caller_agent_id {
+        builder = builder.header("x-agent-id", caller);
+    }
+    let req = builder.body(Body::empty()).unwrap();
     let resp = router.clone().oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
@@ -862,16 +878,25 @@ async fn pg_unsubscribe_by_id_when_missing_returns_ok_envelope() {
 #[tokio::test]
 async fn pg_unsubscribe_no_id_no_ns_400() {
     let (router, _f) = build_fake_pg_router();
-    let (status, _v) = delete_uri(&router, "/api/v1/subscriptions?agent_id=pg-agent").await;
+    // Per #874: must send X-Agent-Id matching the query agent_id, else
+    // the handler returns 403 before reaching the missing-(id,ns) gate.
+    let (status, _v) = delete_uri_as(
+        &router,
+        "/api/v1/subscriptions?agent_id=pg-agent",
+        Some("pg-agent"),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn pg_unsubscribe_by_namespace_missing_returns_removed_false() {
     let (router, _f) = build_fake_pg_router();
-    let (status, _v) = delete_uri(
+    // Per #874: matching X-Agent-Id required to clear the auth gate.
+    let (status, _v) = delete_uri_as(
         &router,
         "/api/v1/subscriptions?agent_id=pg-agent&namespace=nonexistent",
+        Some("pg-agent"),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
